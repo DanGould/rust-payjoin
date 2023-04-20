@@ -17,14 +17,16 @@ fn main() -> Result<()> {
 
     let matches = cli().get_matches();
     let port = matches.get_one::<String>("PORT").context("Missing PORT argument")?;
-    let cookie_file =
-        matches.get_one::<String>("COOKIE_FILE").context("Missing COOKIE_FILE argument")?;
+    let rpc_user =
+        matches.get_one::<String>("BITCOIN_RPC_USER").context("Missing BITCOIN_RPC_USER argument")?;
+    let rpc_pass =
+        matches.get_one::<String>("BITCOIN_RPC_PASS").context("Missing BITCOIN_RPC_PASS argument")?;
     let bitcoind = bitcoincore_rpc::Client::new(
         &format!(
             "http://127.0.0.1:{}",
             port.parse::<u16>().context("Failed to parse PORT argument")?
         ),
-        bitcoincore_rpc::Auth::CookieFile(cookie_file.into()),
+        bitcoincore_rpc::Auth::UserPass(rpc_user.into(), rpc_pass.into()),
     )
     .context("Failed to connect to bitcoind")?;
     match matches.subcommand() {
@@ -347,7 +349,9 @@ fn cli() -> Command {
         .about("Transfer bitcoin and preserve your privacy")
         .arg(arg!(<PORT> "The port of the bitcoin node"))
         .arg_required_else_help(true)
-        .arg(arg!(<COOKIE_FILE> "Path to the cookie file of the bitcoin node"))
+        .arg(arg!(<BITCOIN_RPC_USER> "Path to the rpc user of the bitcoin node"))
+        .subcommand_required(true)
+        .arg(arg!(<BITCOIN_RPC_PASS> "Path to the rpc password file of the bitcoin node"))
         .subcommand_required(true)
         .subcommand(
             Command::new("send")
