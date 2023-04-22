@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         matches.get_one::<String>("BITCOIN_RPC_PASS").context("Missing BITCOIN_RPC_PASS argument")?;
     let bitcoind = bitcoincore_rpc::Client::new(
         &format!(
-            "http://127.0.0.1:{}",
+            "bitcoin:{}/wallet/spending01.dat",
             port.parse::<u16>().context("Failed to parse PORT argument")?
         ),
         bitcoincore_rpc::Auth::UserPass(rpc_user.into(), rpc_pass.into()),
