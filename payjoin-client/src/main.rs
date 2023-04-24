@@ -6,7 +6,7 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use bitcoincore_rpc::bitcoin::Amount;
 use bitcoincore_rpc::RpcApi;
-use clap::{arg, Arg, Command};
+use clap::{arg, Arg, Command, ArgMatches};
 use payjoin::bitcoin::util::psbt::PartiallySignedTransaction as Psbt;
 use payjoin::receiver::PayjoinProposal;
 use payjoin::{PjUriExt, UriExt};
@@ -15,18 +15,15 @@ use rouille::{Request, Response};
 fn main() -> Result<()> {
     env_logger::init();
 
-    let matches = cli().get_matches();
-    let port = matches.get_one::<String>("PORT").context("Missing PORT argument")?;
-    let rpc_user =
-        matches.get_one::<String>("BITCOIN_RPC_USER").context("Missing BITCOIN_RPC_USER argument")?;
-    let rpc_pass =
-        matches.get_one::<String>("BITCOIN_RPC_PASS").context("Missing BITCOIN_RPC_PASS argument")?;
+    let matches = cli();
+    let config = parse_config(&matches)?;
+
     let bitcoind = bitcoincore_rpc::Client::new(
         &format!(
             "bitcoin:{}/wallet/spending01.dat",
-            port.parse::<u16>().context("Failed to parse PORT argument")?
+            config.bind_port
         ),
-        bitcoincore_rpc::Auth::UserPass(rpc_user.into(), rpc_pass.into()),
+        config.bitcoind_auth,
     )
     .context("Failed to connect to bitcoind")?;
     match matches.subcommand() {
@@ -344,7 +341,31 @@ fn serialize_psbt(psbt: &Psbt) -> String {
     .unwrap()
 }
 
-fn cli() -> Command {
+#[derive(Debug)]
+struct ClientConfig {
+    bind_port: u16,
+    // pj_endpoint: String,
+    bitcoind_auth: bitcoincore_rpc::Auth,
+    bitcoind_rpc_port: u16,
+    danger_accept_invalid_certs: bool,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            bind_port: 3000,
+            // pj_endpoint: "https://payjoin.btcpayserver.org/btc-testnet/".to_string(),
+            bitcoind_auth: bitcoincore_rpc::Auth::UserPass(
+                "bitcoin".to_string(),
+                "".to_string().into(),
+            ),
+            bitcoind_rpc_port: 18443,
+            danger_accept_invalid_certs: false,
+        }
+    }
+}
+
+fn cli() -> ArgMatches {
     Command::new("payjoin")
         .about("Transfer bitcoin and preserve your privacy")
         .arg(arg!(<PORT> "The port of the bitcoin node"))
@@ -366,4 +387,20 @@ fn cli() -> Command {
                 .arg_required_else_help(true)
                 .arg(arg!(<ENDPOINT> "The `pj=` endpoint to receive the payjoin request")),
         )
+        .get_matches()
+}
+
+fn parse_config(matches: &ArgMatches) -> Result<ClientConfig> {
+    let port = matches.get_one::<String>("PORT").context("Missing PORT argument")?;
+    let bind_port = port.parse::<u16>().context("Failed to parse PORT argument")?;
+    let rpc_user =
+        matches.get_one::<String>("BITCOIN_RPC_USER").context("Missing BITCOIN_RPC_USER argument")?;
+    let rpc_pass =
+        matches.get_one::<String>("BITCOIN_RPC_PASS").context("Missing BITCOIN_RPC_PASS argument")?;
+    
+    Ok(ClientConfig {
+        bind_port,
+        bitcoind_auth: bitcoincore_rpc::Auth::UserPass(rpc_user.into(), rpc_pass.into()),
+        ..Default::default()
+    })
 }
