@@ -1,0 +1,16 @@
+.tox/
+dist/
+payjoinpython.egg-info/
+__pycache__/
+libpayjoinffi.dylib
+.idea/
+.DS_Store
+
+*.swp
+
+src/payjoinpython/payjoin.py
+src/payjoinpython/*.so
+*.whl
+build/
+
+testing-setup-py-simple-example.py

@@ -1,0 +1,23 @@
+[package]
+name = "payjoin-ffi"
+version = "0.0.1"
+authors = ["Dan Gould <d@ngould.dev>"]
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+name = "payjoinffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[features]
+default = ["uniffi/cli"]
+
+[dependencies]
+payjoin = { path = "../payjoin", features = ["send"] }
+uniffi = { version = "0.23.0 "}
+
+[build-dependencies]
+uniffi = { version = "0.23.0", features = ["build"] }
