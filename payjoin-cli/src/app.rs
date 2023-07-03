@@ -485,8 +485,9 @@ impl App {
 
         let amount = Amount::from_sat(amount_arg.parse()?);
         let pj_uri_string = self.make_pj_uri_string(amount)? + "&pjos=0";
-
         println!("{}", pj_uri_string);
+
+        // --- ws enrollment
         let ws_uri = "ws://localhost:3012/socket";
         println!(
             "Listening via relay at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
@@ -510,6 +511,7 @@ impl App {
         println!("Waiting for messages...");
         let msg = socket.read_message().expect("Error reading message");
         println!("Received Request, deserializing: {}", msg);
+        /// --- 
         // for a production protocol bhttp would make more sense than json
         let req: relay::Request = serde_json::from_str(&msg.to_text().unwrap()).unwrap();
         println!("Deserialized request: {:?}", req);

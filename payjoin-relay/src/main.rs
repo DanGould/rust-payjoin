@@ -1,4 +1,5 @@
 use std::net::TcpListener;
+
 use tungstenite::accept;
 use hyper::Body;
 use hyper::service::{make_service_fn, service_fn};
@@ -6,52 +7,64 @@ use hyper::StatusCode;
 use tokio::sync::{mpsc, oneshot};
 use tungstenite::Message;
 
+mod masque;
+use masque::*;
+
 use payjoin::relay;
 
 #[tokio::main]
-async fn main() {
-    let server = TcpListener::bind("127.0.0.1:3012").unwrap();
-    println!("REElay listening on ws://127.0.0.1:3012 😡");
-    let (tx, mut rx) = mpsc::channel::<(relay::Request, oneshot::Sender<relay::Response>)>(1);
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = Server::new();
+    server.bind("127.0.0.1:4433").await.unwrap();
+    // server.run().await This runs the QUIC proxy for both UDP and TCP HTTP/1.1 / SOCKS5 proxy
 
-    tokio::spawn(async move {
-        for stream in server.incoming() {
-            println!("New ws connection!");
-            let mut websocket = accept(stream.unwrap()).unwrap();
-            let msg = websocket.read_message().unwrap();
-            println!("Received: {}, awaiting Original PSBT", msg);
-            let (relay_req, res_tx) = rx.recv().await.unwrap();
-            // relay Original PSBT request to receiver via websocket
-            let serialized_req = serde_json::to_string(&relay_req).unwrap();
-            let post = Message::Text(serialized_req.to_string());
-            println!("Received Original PSBT, relaying to receiver via websocket");
-            websocket.write_message(post).unwrap();
-            println!("Awaiting Payjoin PSBT from receiver via websocket"); // does this need to be async? break because block?
-            // TODO await ws client transform Original PSBT into Payjoin PSBT
-            let msg = websocket.read_message().unwrap();
-            let serialized_res =  msg.into_text().unwrap();
-            let res = serde_json::from_str::<relay::Response>(&serialized_res).unwrap();
-            println!("Received Payjoin PSBT res {:#?}, relaying to sender via http", serialized_res);
-            // delay 200ms
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            let sent = res_tx.send(res);
-            println!("sent to http server via res_tx: {:?}", sent);
-            break;
-        }
-    });
+    let server_addr = server.listen_addr().unwrap();
+    // TODO manually listen to server_addr
+
+    println!("MASQUE proxy listening on {}", server_addr);
+    // let (tx, mut rx) = mpsc::channel::<(relay::Request, oneshot::Sender<relay::Response>)>(1);
+
+    // -- ALLOCATION PROTOCOL
+    // tokio::spawn(async move {
+    //     for stream in server.incoming() {
+    //         // allocation
+    //         println!("New ws connection!");
+    //         let mut websocket = accept(stream.unwrap()).unwrap();
+    //         let msg = websocket.read_message().unwrap();
+    //         println!("Received: {}, awaiting Original PSBT", msg);
+    //         let (relay_req, res_tx) = rx.recv().await.unwrap();
+    //         // relay Original PSBT request to receiver via websocket
+    //         let serialized_req = serde_json::to_string(&relay_req).unwrap();
+    //         let post = Message::Text(serialized_req.to_string());
+    //         println!("Received Original PSBT, relaying to receiver via websocket");
+    //         websocket.write_message(post).unwrap();
+    //         println!("Awaiting Payjoin PSBT from receiver via websocket"); // does this need to be async? break because block?
+    //         // TODO await ws client transform Original PSBT into Payjoin PSBT
+    //         let msg = websocket.read_message().unwrap();
+    //         let serialized_res =  msg.into_text().unwrap();
+    //         let res = serde_json::from_str::<relay::Response>(&serialized_res).unwrap();
+    //         println!("Received Payjoin PSBT res {:#?}, relaying to sender via http", serialized_res);
+    //         // delay 200ms
+    //         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    //         let sent = res_tx.send(res);
+    //         println!("sent to http server via res_tx: {:?}", sent);
+    //         break;
+    //     }
+    // });
    
-    // run HTTP server. On Post PJ, relay to websocket
-    let make_svc = make_service_fn(move |_| {
-        let tx = tx.clone();
-        async move {
-            let handler = move |req| handle_http_req(tx.clone(), req);
-            Ok::<_, hyper::Error>(service_fn(handler))
-        }
-    });
+    // -- run HTTP server. On Post PJ, relay to websocket
+    // let make_svc = make_service_fn(move |_| {
+    //     let tx = tx.clone();
+    //     async move {
+    //         let handler = move |req| handle_http_req(tx.clone(), req);
+    //         Ok::<_, hyper::Error>(service_fn(handler))
+    //     }
+    // });
 
-    let server = hyper::Server::bind(&([127, 0, 0, 1], 3000).into()).serve(make_svc);
-    println!("REElay configured to listen on http://127.0.0.1:3000 😡");
-    server.await.unwrap();
+    // let server = hyper::Server::bind(&([127, 0, 0, 1], 3000).into()).serve(make_svc);
+    // println!("REElay configured to listen on http://127.0.0.1:3000 😡");
+    // server.await.unwrap();
+    server.run().await
 }
 
 async fn handle_http_req(
