@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::net::{TcpListener, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -473,6 +474,43 @@ impl payjoin::receive::Headers for RouilleHeaders<'_> {
 fn serialize_psbt(psbt: &Psbt) -> String { base64::encode(&psbt.serialize()) }
 
 #[cfg(feature = "reelay")]
+struct Client {
+    listener: Option<TcpListener>,
+}
+#[cfg(feature = "reelay")]
+#[derive(Debug, Clone)]
+struct RunBeforeBindError;
+#[cfg(feature = "reelay")]
+
+impl std::fmt::Display for RunBeforeBindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "bind(listen_addr) has to be called before run()")
+    }
+}
+#[cfg(feature = "reelay")]
+impl std::error::Error for RunBeforeBindError {}
+
+#[cfg(feature = "reelay")]
+impl Client {
+    pub fn new() -> Client { Client { listener: None } }
+
+    pub fn listen_addr(&self) -> Option<SocketAddr> {
+        return self
+            .listener
+            .as_ref()
+            .map(|listener| listener.local_addr().unwrap());
+    }
+
+    pub async fn bind<T: tokio::net::ToSocketAddrs>(&mut self, bind_addr: T) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Creating TCP listener");
+
+        let listener = TcpListener::bind(addr).await?;
+        self.listener = Some(listener);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "reelay")]
 use tungstenite::{connect, Message};
 #[cfg(feature = "reelay")]
 
@@ -487,10 +525,10 @@ impl App {
         let pj_uri_string = self.make_pj_uri_string(amount)? + "&pjos=0";
         println!("{}", pj_uri_string);
 
-        // --- ws enrollment
-        let ws_uri = "ws://localhost:3012/socket";
+        // --- masque connect-udp enrollment
+        let ws_uri = "localhost:4433/";
         println!(
-            "Listening via relay at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
+            "Listening via MASQUE at {}. Configured to accept payjoin at ~BIP 21~ Payjoin Uri: localhost:3000 via MASQUE",
             self.config.pj_host
         );
         println!("{}", pj_uri_string);

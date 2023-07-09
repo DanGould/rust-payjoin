@@ -1467,6 +1467,7 @@ dependencies = [
  "env_logger 0.9.3",
  "hyper_serde",
  "log",
+ "masque",
  "payjoin",
  "reqwest",
  "rouille",

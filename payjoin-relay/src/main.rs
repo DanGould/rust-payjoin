@@ -16,7 +16,7 @@ use payjoin::relay;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = Server::new();
     server.bind("127.0.0.1:4433").await.unwrap();
-    // server.run().await This runs the QUIC proxy for both UDP and TCP HTTP/1.1 / SOCKS5 proxy
+    //_ = server.run().await; // This runs the QUIC proxy for both UDP and TCP HTTP/1.1 / SOCKS5 proxy
 
     let server_addr = server.listen_addr().unwrap();
     // TODO manually listen to server_addr
