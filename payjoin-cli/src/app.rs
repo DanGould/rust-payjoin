@@ -122,21 +122,7 @@ impl App {
     }
 
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        use payjoin::Uri;
-
-        let pj_receiver_address = self.bitcoind.get_new_address(None, None)?.assume_checked();
-        let amount = Amount::from_sat(amount_arg.parse()?);
-        let pj_uri_string = format!(
-            "{}?amount={}&pj={}",
-            pj_receiver_address.to_qr_uri(),
-            amount.to_btc(),
-            self.config.pj_endpoint
-        );
-        // check that the URI is corrctly formatted
-        let _pj_uri = Uri::from_str(&pj_uri_string)
-            .map_err(|e| anyhow!("Constructed a bad URI string from args: {}", e))?
-            .assume_checked();
-
+        let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -167,6 +153,25 @@ impl App {
 
         server.run();
         Ok(())
+    }
+
+    fn construct_payjoin_uri(&self, amount_arg: &str) -> Result<String> {
+        let pj_receiver_address = self.bitcoind.get_new_address(None, None)?.assume_checked();
+        let amount = Amount::from_sat(amount_arg.parse()?);
+        let pj_uri_string = format!(
+            "{}?amount={}&pj={}",
+            pj_receiver_address.to_qr_uri(),
+            amount.to_btc(),
+            self.config.pj_endpoint
+        );
+        let pj_uri = payjoin::Uri::from_str(&pj_uri_string)
+            .map_err(|e| anyhow!("Constructed a bad URI string from args: {}", e))?;
+        let _pj_uri = pj_uri
+            .assume_checked()
+            .check_pj_supported()
+            .map_err(|e| anyhow!("Constructed URI does not support payjoin: {}", e))?;
+
+        Ok(pj_uri_string)
     }
 
     fn handle_web_request(&self, req: &Request) -> Response {
