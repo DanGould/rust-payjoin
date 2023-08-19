@@ -4,6 +4,33 @@ use clap::{arg, Arg, ArgMatches, Command};
 mod app;
 use app::{App, AppConfig};
 
+#[cfg(feature = "v2")]
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::init();
+
+    let matches = cli();
+    let config = AppConfig::new(&matches)?;
+    let app = App::new(config)?;
+
+    match matches.subcommand() {
+        Some(("send", sub_matches)) => {
+            let bip21 = sub_matches.get_one::<String>("BIP21").context("Missing BIP21 argument")?;
+            app.send_payjoin(bip21).await?;
+        }
+        Some(("receive", sub_matches)) => {
+            let amount =
+                sub_matches.get_one::<String>("AMOUNT").context("Missing AMOUNT argument")?;
+
+            app.receive_payjoin(amount).await?;
+        }
+        _ => unreachable!(), // If all subcommands are defined above, anything else is unreachabe!()
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "v2"))]
 fn main() -> Result<()> {
     env_logger::init();
 
@@ -19,6 +46,7 @@ fn main() -> Result<()> {
         Some(("receive", sub_matches)) => {
             let amount =
                 sub_matches.get_one::<String>("AMOUNT").context("Missing AMOUNT argument")?;
+
             app.receive_payjoin(amount)?;
         }
         _ => unreachable!(), // If all subcommands are defined above, anything else is unreachabe!()
