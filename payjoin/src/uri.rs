@@ -188,6 +188,7 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
         }
     }
 
+    #[cfg(not(feature = "v2"))]
     fn finalize(
         self,
     ) -> std::result::Result<Self::Value, <Self::Value as bip21::DeserializationError>::Error> {
@@ -207,6 +208,25 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
                     Err(PjParseError(InternalPjParseError::UnsecureEndpoint))
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "v2")]
+    fn finalize(
+        self,
+    ) -> std::result::Result<Self::Value, <Self::Value as bip21::DeserializationError>::Error> {
+        match (self.pj, self.pjos) {
+            (None, None) => Ok(Payjoin::Unsupported),
+            (None, Some(_)) => Err(PjParseError(InternalPjParseError::MissingEndpoint)),
+            (Some(endpoint), pjos) =>
+                if endpoint.scheme() == "ws" {
+                    Ok(Payjoin::Supported(PayjoinParams {
+                        _endpoint: endpoint,
+                        disable_output_substitution: pjos.unwrap_or(false),
+                    }))
+                } else {
+                    Err(PjParseError(InternalPjParseError::UnsecureEndpoint))
+                },
         }
     }
 }

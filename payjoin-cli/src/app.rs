@@ -10,8 +10,9 @@ use bitcoincore_rpc::RpcApi;
 use clap::ArgMatches;
 use config::{Config, File, FileFormat};
 use payjoin::bitcoin::psbt::Psbt;
-use payjoin::receive::{Error, PayjoinProposal};
+use payjoin::receive::{Error, PayjoinProposal, UncheckedProposal};
 use payjoin::{bitcoin, PjUriExt, UriExt};
+#[cfg(not(feature = "v2"))]
 use rouille::{Request, Response};
 use serde::{Deserialize, Serialize};
 
@@ -41,22 +42,65 @@ impl App {
         Ok(Self { config, bitcoind, seen_inputs })
     }
 
+    #[cfg(feature = "v2")]
+    pub async fn send_payjoin(&self, bip21: &str) -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let (req, ctx) = self.create_pj_request(bip21)?;
+
+        let (stream, _) = connect_async(req.url).await?;
+
+        let (mut write, mut read) = stream.split();
+        log::debug!("Sending request");
+        write.send(Message::binary(req.body)).await?;
+        log::debug!("Awaiting response");
+        let buffer = read.next().await.unwrap()?.into_text()?;
+        let mut response = std::io::Cursor::new(&buffer);
+        self.process_pj_response(ctx, &mut response)?;
+        write.close().await?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "v2"))]
     pub fn send_payjoin(&self, bip21: &str) -> Result<()> {
+        let (req, ctx) = self.create_pj_request(bip21)?;
+
+        let client = reqwest::blocking::Client::builder()
+            .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
+            .build()
+            .with_context(|| "Failed to build reqwest http client")?;
+        let mut response = client
+            .post(req.url)
+            .body(req.body)
+            .header("Content-Type", "text/plain")
+            .send()
+            .with_context(|| "HTTP request failed")?;
+
+        self.process_pj_response(ctx, &mut response)?;
+        Ok(())
+    }
+
+    fn create_pj_request(
+        &self,
+        bip21: &str,
+    ) -> Result<(payjoin::send::Request, payjoin::send::Context)> {
         use payjoin::send::Configuration;
 
         let link = payjoin::Uri::try_from(bip21)
             .map_err(|e| anyhow!("Failed to create URI from BIP21: {}", e))?;
 
-        let link = link
+        let uri = link
             .assume_checked()
             .check_pj_supported()
             .map_err(|e| anyhow!("The provided URI doesn't support payjoin (BIP78): {}", e))?;
 
-        let amount = link.amount.ok_or_else(|| anyhow!("please specify the amount in the Uri"))?;
+        let amount = uri.amount.ok_or_else(|| anyhow!("please specify the amount in the Uri"))?;
 
         // wallet_create_funded_psbt requires a HashMap<address: String, Amount>
         let mut outputs = HashMap::with_capacity(1);
-        outputs.insert(link.address.to_string(), amount);
+        outputs.insert(uri.address.to_string(), amount);
 
         // TODO: make payjoin-cli send feerate configurable
         // 2.1 sat/vB == 525 sat/kwu for testing purposes.
@@ -89,27 +133,24 @@ impl App {
         let psbt = Psbt::from_str(&psbt).with_context(|| "Failed to load PSBT from base64")?;
         log::debug!("Original psbt: {:#?}", psbt);
 
-        let payout_scripts = std::iter::once(link.address.script_pubkey());
+        let payout_scripts = std::iter::once(uri.address.script_pubkey());
         // recommendation or bust for this simple reference implementation
         let pj_params = Configuration::recommended(&psbt, payout_scripts, fee_rate)
             .unwrap_or_else(|_| Configuration::non_incentivizing());
 
-        let (req, ctx) = link
+        let (req, ctx) = uri
             .create_pj_request(psbt, pj_params)
             .with_context(|| "Failed to create payjoin request")?;
-        let client = reqwest::blocking::Client::builder()
-            .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
-            .build()
-            .with_context(|| "Failed to build reqwest http client")?;
-        let mut response = client
-            .post(req.url)
-            .body(req.body)
-            .header("Content-Type", "text/plain")
-            .send()
-            .with_context(|| "HTTP request failed")?;
+        Ok((req, ctx))
+    }
+
+    fn process_pj_response(
+        &self,
+        ctx: payjoin::send::Context,
+        response: &mut impl std::io::Read,
+    ) -> Result<bitcoin::Txid> {
         // TODO display well-known errors and log::debug the rest
-        let psbt =
-            ctx.process_response(&mut response).with_context(|| "Failed to process response")?;
+        let psbt = ctx.process_response(response).with_context(|| "Failed to process response")?;
         log::debug!("Proposed psbt: {:#?}", psbt);
         let psbt = self
             .bitcoind
@@ -127,9 +168,10 @@ impl App {
             .send_raw_transaction(&tx)
             .with_context(|| "Failed to send raw transaction")?;
         log::info!("Transaction sent: {}", txid);
-        Ok(())
+        Ok(txid)
     }
 
+    #[cfg(not(feature = "v2"))]
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
         let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
         println!(
@@ -138,6 +180,44 @@ impl App {
         );
         println!("{}", pj_uri_string);
 
+        self.start_http_server()?;
+        Ok(())
+    }
+
+    #[cfg(feature = "v2")]
+    pub async fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
+        println!(
+            "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
+            self.config.pj_host
+        );
+        println!("{}", pj_uri_string);
+
+        let (stream, _) = connect_async(reqwest::Url::parse(&self.config.pj_endpoint)?).await?;
+        log::debug!("ws parsed");
+        let (mut write, mut read) = stream.split();
+        // enroll receiver
+        write.send(Message::binary(*b"receiver")).await?;
+        log::debug!("Enrolled receiver, awaiting request");
+        let buffer = read.next().await.unwrap()?;
+        log::debug!("Received request");
+        let proposal = UncheckedProposal::from_base64(&buffer.into_data())
+            .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
+        let payjoin_psbt = self
+            .process_proposal(proposal)
+            .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
+        let payjoin_psbt_ser = base64::encode(&payjoin_psbt.serialize());
+        write.send(Message::binary(payjoin_psbt_ser)).await?;
+        write.close().await?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "v2"))]
+    fn start_http_server(self) -> Result<()> {
         #[cfg(feature = "local-https")]
         let server = {
             let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
@@ -183,6 +263,7 @@ impl App {
         Ok(pj_uri_string)
     }
 
+    #[cfg(not(feature = "v2"))]
     fn handle_web_request(&self, req: &Request) -> Response {
         log::debug!("Received request: {:?}", req);
         match (req.method(), req.url().as_ref()) {
@@ -216,6 +297,7 @@ impl App {
         .with_additional_header("Access-Control-Allow-Origin", "*")
     }
 
+    #[cfg(not(feature = "v2"))]
     fn handle_get_bip21(&self, amount: Option<Amount>) -> Result<Response, Error> {
         let address = self
             .bitcoind
@@ -241,9 +323,10 @@ impl App {
         Ok(Response::text(uri_string))
     }
 
+    #[cfg(not(feature = "v2"))]
     fn handle_payjoin_post(&self, req: &Request) -> Result<Response, Error> {
         let headers = Headers(req.headers());
-        let proposal = payjoin::receive::UncheckedProposal::from_request(
+        let proposal = UncheckedProposal::from_request(
             req.data().context("Failed to read request body").map_err(|e| {
                 log::warn!("Failed to read request body: {}", e);
                 Error::Server(e.into())
@@ -252,6 +335,15 @@ impl App {
             headers,
         )?;
 
+        let payjoin_proposal_psbt = self.process_proposal(proposal)?;
+        log::debug!("Receiver's Payjoin proposal PSBT Rsponse: {:#?}", payjoin_proposal_psbt);
+
+        let payload = base64::encode(&payjoin_proposal_psbt.serialize());
+        log::info!("successful response");
+        Ok(Response::text(payload))
+    }
+
+    fn process_proposal(&self, proposal: UncheckedProposal) -> Result<Psbt, Error> {
         // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
         let _to_broadcast_in_failure_case = proposal.get_transaction_to_schedule_broadcast();
 
@@ -338,11 +430,7 @@ impl App {
             .context("Failed to parse PSBT")
             .map_err(|e| Error::Server(e.into()))?;
         let payjoin_proposal_psbt = payjoin.prepare_psbt(payjoin_proposal_psbt)?;
-        log::debug!("Receiver's Payjoin proposal PSBT Rsponse: {:#?}", payjoin_proposal_psbt);
-
-        let payload = base64::encode(&payjoin_proposal_psbt.serialize());
-        log::info!("successful response");
-        Ok(Response::text(payload))
+        Ok(payjoin_proposal_psbt)
     }
 
     fn insert_input_seen_before(&self, input: bitcoin::OutPoint) -> Result<bool> {

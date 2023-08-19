@@ -35,4 +35,7 @@ mod uri;
 #[cfg(any(feature = "send", feature = "receive"))]
 pub(crate) mod weight;
 
+#[cfg(feature = "v2")]
+pub mod v2;
+
 pub use uri::{PjParseError, PjUri, PjUriExt, Uri, UriExt};

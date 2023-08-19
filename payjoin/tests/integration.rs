@@ -1,4 +1,5 @@
 #[cfg(all(feature = "send", feature = "receive"))]
+#[cfg(not(feature = "v2"))]
 mod integration {
     use std::collections::HashMap;
     use std::str::FromStr;
