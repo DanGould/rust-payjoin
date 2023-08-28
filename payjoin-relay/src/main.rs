@@ -46,10 +46,15 @@ async fn handle_web_req(
     res_buffer: Buffer,
     req: Request<Body>,
 ) -> Result<Response<Body>> {
-    let mut response = match (req.method(), req.uri().path()) {
-        (&Method::POST, "/") => post_fallback(req.into_body(), req_buffer, res_buffer).await,
-        (&Method::GET, "/receive") => get_request(req_buffer).await,
-        (&Method::POST, "/receive") => post_payjoin(req.into_body(), res_buffer).await,
+    let path = req.uri().path().to_string();
+    let (parts, body) = req.into_parts();
+
+    let path_segments: Vec<&str> = path.split('/').collect();
+    dbg!(&path_segments);
+    let mut response = match (parts.method, path_segments.as_slice()) {
+        (Method::POST, &["", id]) => post_fallback(id, body, req_buffer, res_buffer).await,
+        (Method::GET, &["", id, "receive"]) => get_request(id, req_buffer).await,
+        (Method::POST, &["", id, "receive"]) => post_payjoin(id, body, res_buffer).await,
         _ => Ok(not_found()),
     }
     .unwrap_or_else(|e| e.to_response());
@@ -85,6 +90,7 @@ impl From<hyper::http::Error> for HandlerError {
 }
 
 async fn post_fallback(
+    _id: &str,
     body: Body,
     req_buffer: Buffer,
     res_buffer: Buffer,
@@ -103,7 +109,7 @@ async fn post_fallback(
     }
 }
 
-async fn get_request(req_buffer: Buffer) -> Result<Response<Body>, HandlerError> {
+async fn get_request(_id: &str, req_buffer: Buffer) -> Result<Response<Body>, HandlerError> {
     let timeout = Duration::from_secs(30);
     match req_buffer.peek_with_timeout(timeout).await {
         Some(buffered_req) => Ok(Response::new(Body::from(buffered_req))),
@@ -111,7 +117,11 @@ async fn get_request(req_buffer: Buffer) -> Result<Response<Body>, HandlerError>
     }
 }
 
-async fn post_payjoin(body: Body, res_buffer: Buffer) -> Result<Response<Body>, HandlerError> {
+async fn post_payjoin(
+    _id: &str,
+    body: Body,
+    res_buffer: Buffer,
+) -> Result<Response<Body>, HandlerError> {
     let res = hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
 
     res_buffer.push(res).await;
