@@ -1,16 +1,13 @@
-use std::error::Error;
 use std::net::{Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use payjoin::v2::{MAX_BUFFER_SIZE, RECEIVER};
+use payjoin::v2::RECEIVE;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::handshake::server::Request;
-use tokio_tungstenite::tungstenite::{accept_hdr, Message};
-use tokio_tungstenite::{accept_async, accept_hdr_async, WebSocketStream};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
 use tracing::{debug, error, info, info_span, Instrument};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::EnvFilter;
@@ -18,60 +15,64 @@ use tracing_subscriber::EnvFilter;
 type Stream = SplitStream<WebSocketStream<TcpStream>>;
 type Sink = SplitSink<WebSocketStream<TcpStream>, Message>;
 
+mod db;
+use crate::db::DbPool;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     let server = TcpListener::bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 8080)).await?;
 
+    let pool = DbPool::new().await?;
     println!("Serverless payjoin relay awaiting WebSockets connection on port 8080");
-    let buffers = (Buffer::new(), Buffer::new());
     for id in 0.. {
         let (connection, _) = server.accept().await?;
         tokio::spawn(
-            handle_connection(connection, buffers.clone())
-                .instrument(info_span!("Connection {}", id)),
+            handle_connection(connection, pool.clone()).instrument(info_span!("Connection {}", id)),
         );
     }
 
     Ok(())
 }
 
-async fn handle_connection(connection: TcpStream, buffers: (Buffer, Buffer)) {
-    let result = handle_connection_impl(connection, buffers).await;
+async fn handle_connection(connection: TcpStream, pool: DbPool) {
+    let result = handle_connection_impl(connection, pool).await;
     error!("{:?}", result);
 }
 
-async fn handle_connection_impl(
-    connection: TcpStream,
-    (req_buffer, res_buffer): (Buffer, Buffer),
-) -> Result<()> {
+async fn handle_connection_impl(connection: TcpStream, pool: DbPool) -> Result<()> {
     info!("Waiting to establish a stream");
     //let stream = accept_async(connection).await?;
-    let mut subdirectory = String::new();
+    let mut pubkey_id = String::new();
     let stream = accept_hdr_async(connection, |req: &Request, res| {
-        subdirectory = if let Some(pos) = req.uri().path().rfind('/') {
+        pubkey_id = if let Some(pos) = req.uri().path().rfind('/') {
             &req.uri().path()[pos + 1..]
         } else {
             req.uri().path()
         }
         .to_string();
-        if let Some(pos) = subdirectory.find('?') {
-            subdirectory = subdirectory[..pos].to_string()
+        if let Some(pos) = pubkey_id.find('?') {
+            pubkey_id = pubkey_id[..pos].to_string()
         };
-        debug!("Subdirectory: {}", subdirectory);
+        debug!("Subdirectory: {}", pubkey_id);
         Ok(res)
     })
     .await?;
     let (mut write, mut read) = stream.split();
     info!("Accepted stream");
     match read_stream_to_string(&mut read).await? {
-        Some(data) =>
-            if data == RECEIVER {
-                handle_receiver_request(&mut write, &mut read, &req_buffer, &res_buffer).await?;
+        Some(data) => {
+            let mut parts = data.split_whitespace();
+            let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
+            if operation == RECEIVE {
+                let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
+                info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
+                handle_receiver_request(&mut write, &mut read, &pool, pubkey_id).await?;
             } else {
-                handle_sender_request(&mut write, &data, &req_buffer, &res_buffer).await?;
-            },
+                handle_sender_request(&mut write, &data, &pool, &pubkey_id).await?;
+            }
+        }
         None => (),
     }
     info!("Closing stream");
@@ -98,14 +99,14 @@ async fn read_stream_to_string(read: &mut Stream) -> Result<Option<String>> {
 async fn handle_receiver_request(
     write: &mut Sink,
     read: &mut Stream,
-    req_buffer: &Buffer,
-    res_buffer: &Buffer,
+    pool: &DbPool,
+    pubkey_id: &str,
 ) -> Result<()> {
-    let buffered_req = req_buffer.peek().await;
+    let buffered_req = pool.peek_req(pubkey_id).await?;
     write.send(Message::binary(buffered_req)).await?;
 
     if let Some(response) = read_stream_to_string(read).await? {
-        res_buffer.push(response.as_bytes().to_vec()).await;
+        pool.push_res(pubkey_id, response.as_bytes().to_vec()).await?;
     }
 
     Ok(())
@@ -114,66 +115,13 @@ async fn handle_receiver_request(
 async fn handle_sender_request(
     write: &mut Sink,
     data: &str,
-    req_buffer: &Buffer,
-    res_buffer: &Buffer,
+    pool: &DbPool,
+    pubkey_id: &str,
 ) -> Result<()> {
-    req_buffer.push(data.as_bytes().to_vec()).await;
-    let response = res_buffer.peek().await;
-
+    pool.push_req(pubkey_id, data.as_bytes().to_vec()).await?;
+    debug!("pushed req");
+    let response = pool.peek_res(pubkey_id).await?;
+    debug!("peek req");
     write.send(response.into()).await?;
     Ok(())
-}
-
-pub(crate) struct Buffer {
-    buffer: Arc<Mutex<Vec<u8>>>,
-    sender: mpsc::Sender<()>,
-    receiver: Arc<Mutex<mpsc::Receiver<()>>>,
-}
-
-/// Clone here makes a copy of the Arc pointer, not the underlying data
-/// All clones point to the same internal data
-impl Clone for Buffer {
-    fn clone(&self) -> Self {
-        Buffer {
-            buffer: Arc::clone(&self.buffer),
-            sender: self.sender.clone(),
-            receiver: Arc::clone(&self.receiver),
-        }
-    }
-}
-
-impl Buffer {
-    fn new() -> Self {
-        let (sender, receiver) = mpsc::channel(1);
-        Buffer {
-            buffer: Arc::new(Mutex::new(Vec::new())),
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
-        }
-    }
-
-    async fn push(&self, request: Vec<u8>) {
-        info!("push");
-        let mut buffer: tokio::sync::MutexGuard<'_, Vec<u8>> = self.buffer.lock().await;
-        *buffer = request;
-        info!("pushed");
-        let _ = self.sender.send(()).await; // signal that a new request has been added
-    }
-
-    async fn peek(&self) -> Vec<u8> {
-        info!("peek");
-        let mut buffer = self.buffer.lock().await;
-        let mut contents = buffer.clone();
-        if contents.is_empty() {
-            drop(buffer);
-            // wait for a signal that a new request has been added
-            info!("empty, awaiting push");
-            self.receiver.lock().await.recv().await;
-            info!("pushed, awaiting lock");
-            buffer = self.buffer.lock().await;
-            contents = buffer.clone();
-        }
-        info!("peeked");
-        contents
-    }
 }

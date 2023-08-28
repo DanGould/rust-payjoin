@@ -201,7 +201,7 @@ impl App {
         log::debug!("ws parsed");
         let (mut write, mut read) = stream.split();
         // enroll receiver
-        write.send(Message::binary(*b"receiver")).await?;
+        write.send(Message::binary(*b"receive subs")).await?;
         log::debug!("Enrolled receiver, awaiting request");
         let buffer = read.next().await.unwrap()?;
         log::debug!("Received request");
