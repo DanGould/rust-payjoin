@@ -8,9 +8,10 @@ use futures_util::{SinkExt, StreamExt};
 use payjoin::v2::{MAX_BUFFER_SIZE, RECEIVER};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{accept_async, WebSocketStream};
-use tracing::{error, info, info_span, Instrument};
+use tokio_tungstenite::tungstenite::handshake::server::Request;
+use tokio_tungstenite::tungstenite::{accept_hdr, Message};
+use tokio_tungstenite::{accept_async, accept_hdr_async, WebSocketStream};
+use tracing::{debug, error, info, info_span, Instrument};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
@@ -46,10 +47,24 @@ async fn handle_connection_impl(
     (req_buffer, res_buffer): (Buffer, Buffer),
 ) -> Result<()> {
     info!("Waiting to establish a stream");
-    let stream = accept_async(connection).await?;
+    //let stream = accept_async(connection).await?;
+    let mut subdirectory = String::new();
+    let stream = accept_hdr_async(connection, |req: &Request, res| {
+        subdirectory = if let Some(pos) = req.uri().path().rfind('/') {
+            &req.uri().path()[pos + 1..]
+        } else {
+            req.uri().path()
+        }
+        .to_string();
+        if let Some(pos) = subdirectory.find('?') {
+            subdirectory = subdirectory[..pos].to_string()
+        };
+        debug!("Subdirectory: {}", subdirectory);
+        Ok(res)
+    })
+    .await?;
     let (mut write, mut read) = stream.split();
     info!("Accepted stream");
-
     match read_stream_to_string(&mut read).await? {
         Some(data) =>
             if data == RECEIVER {
