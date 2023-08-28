@@ -207,7 +207,7 @@ impl App {
         let connection = self.connect_relay().await?;
         // enroll receiver
         let (mut write, mut read) = connection.open_bi().await?.await?;
-        write.write_all(b"receiver").await?;
+        write.write_all(b"receive subs").await?;
         log::debug!("Enrolled receiver, awaiting request");
         let mut buffer = vec![0; 65536].into_boxed_slice();
         let len = read.read(&mut buffer).await?.unwrap();
