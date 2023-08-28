@@ -51,6 +51,18 @@ async fn handle_connection_impl(
     info!("Waiting for session request...");
 
     let session_request = incoming_session.await?;
+    let subdirectory = if let Some(pos) = session_request.path().rfind('/') {
+        &session_request.path()[pos + 1..]
+    } else {
+        session_request.path()
+    };
+    let subdirectory = if let Some(pos) = subdirectory.find('?') {
+        &subdirectory[..pos]
+    } else {
+        subdirectory
+    };
+
+    println!("Subdirectory: {}", subdirectory);
 
     info!(
         "New session: Authority: '{}', Path: '{}'",
