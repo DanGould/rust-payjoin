@@ -225,7 +225,7 @@ impl App {
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
         );
-        println!("{}", pj_uri_string);
+        println!("{}/id", pj_uri_string);
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
@@ -233,7 +233,7 @@ impl App {
             .with_context(|| "Failed to build reqwest http client")?;
         log::debug!("Awaiting request");
         let res =
-            Self::long_poll_get(&client, &(self.config.pj_endpoint.to_string() + "/receive"))?;
+            Self::long_poll_get(&client, &(self.config.pj_endpoint.to_string() + "/id/receive"))?;
 
         log::debug!("Received request");
         let proposal = UncheckedProposal::from_relay_response(res)
@@ -243,7 +243,7 @@ impl App {
             .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
         let payjoin_psbt_ser = payjoin::base64::encode(&payjoin_psbt.serialize());
         let _ = client
-            .post(self.config.pj_endpoint.to_string() + "/receive")
+            .post(self.config.pj_endpoint.to_string() + "/id/receive")
             .body(payjoin_psbt_ser)
             .send()
             .with_context(|| "HTTP request failed")?;

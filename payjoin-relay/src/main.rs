@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
@@ -18,22 +19,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (req_buffer, res_buffer) = (Buffer::new(), Buffer::new());
     let app = Router::new()
         .route(
-            "/",
+            "/:id",
             post({
                 let req_buffer = req_buffer.clone();
                 let res_buffer = res_buffer.clone();
-                move |body| post_fallback(body, req_buffer, res_buffer)
+                move |id, body| post_fallback(id, body, req_buffer, res_buffer)
             }),
         )
         .route(
-            "/receive",
+            "/:id/receive",
             get({
                 let req_buffer = req_buffer.clone();
-                move || get_request(req_buffer)
+                move |id| get_request(id, req_buffer)
             })
             .post({
                 let res_buffer = res_buffer.clone();
-                move |body| post_payjoin(body, res_buffer)
+                move |id, body| post_payjoin(id, body, res_buffer)
             }),
         );
 
@@ -52,6 +53,7 @@ fn init_logging() {
 }
 
 async fn post_fallback(
+    Path(_id): Path<String>,
     body: Bytes,
     req_buffer: Buffer,
     res_buffer: Buffer,
@@ -70,7 +72,7 @@ async fn post_fallback(
     }
 }
 
-async fn get_request(req_buffer: Buffer) -> (StatusCode, Vec<u8>) {
+async fn get_request(Path(_id): Path<String>, req_buffer: Buffer) -> (StatusCode, Vec<u8>) {
     let timeout = Duration::from_secs(30);
     match req_buffer.peek_with_timeout(timeout).await {
         Some(buffered_req) => (StatusCode::OK, buffered_req),
@@ -78,7 +80,11 @@ async fn get_request(req_buffer: Buffer) -> (StatusCode, Vec<u8>) {
     }
 }
 
-async fn post_payjoin(res: Bytes, res_buffer: Buffer) -> (StatusCode, String) {
+async fn post_payjoin(
+    Path(_id): Path<String>,
+    res: Bytes,
+    res_buffer: Buffer,
+) -> (StatusCode, String) {
     res_buffer.push(res.to_vec()).await;
     (StatusCode::OK, "Received".to_string())
 }
