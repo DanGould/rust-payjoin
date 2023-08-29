@@ -55,6 +55,8 @@ async fn handle_connection_impl(connection: TcpStream, pool: DbPool) -> Result<(
         if let Some(pos) = pubkey_id.find('?') {
             pubkey_id = pubkey_id[..pos].to_string()
         };
+        // concat pubkey_id to 16 chars to fit postgres table name
+        pubkey_id = shorten_string(&pubkey_id);
         debug!("Subdirectory: {}", pubkey_id);
         Ok(res)
     })
@@ -67,8 +69,9 @@ async fn handle_connection_impl(connection: TcpStream, pool: DbPool) -> Result<(
             let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
             if operation == RECEIVE {
                 let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
+                let pubkey_id = shorten_string(pubkey_id);
                 info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
-                handle_receiver_request(&mut write, &mut read, &pool, pubkey_id).await?;
+                handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
             } else {
                 handle_sender_request(&mut write, &data, &pool, &pubkey_id).await?;
             }
@@ -125,3 +128,5 @@ async fn handle_sender_request(
     write.send(response.into()).await?;
     Ok(())
 }
+
+fn shorten_string(input: &str) -> String { input.chars().take(8).collect() }
