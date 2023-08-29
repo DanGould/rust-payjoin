@@ -184,7 +184,7 @@ impl App {
 
     #[cfg(not(feature = "v2"))]
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
+        let pj_uri_string = self.construct_payjoin_uri(amount_arg, None)?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -197,7 +197,12 @@ impl App {
 
     #[cfg(feature = "v2")]
     pub async fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let mut rng = bitcoin::secp256k1::rand::thread_rng();
+        let key = bitcoin::secp256k1::KeyPair::new(&secp, &mut rng);
+        let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
+        let pubkey_base64 = base64::encode_config(key.public_key().to_string(), b64_config);
+        let pj_uri_string = self.construct_payjoin_uri(amount_arg, Some(&pubkey_base64))?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -207,7 +212,8 @@ impl App {
         let connection = self.connect_relay().await?;
         // enroll receiver
         let (mut write, mut read) = connection.open_bi().await?.await?;
-        write.write_all(b"receive subs").await?;
+        let enroll_string = format!("{} {}", payjoin::v2::RECEIVE, pubkey_base64);
+        write.write_all(enroll_string.as_bytes()).await?;
         log::debug!("Enrolled receiver, awaiting request");
         let mut buffer = vec![0; 65536].into_boxed_slice();
         let len = read.read(&mut buffer).await?.unwrap();
@@ -273,14 +279,19 @@ impl App {
         Ok(())
     }
 
-    fn construct_payjoin_uri(&self, amount_arg: &str) -> Result<String> {
+    fn construct_payjoin_uri(&self, amount_arg: &str, pubkey: Option<&str>) -> Result<String> {
         let pj_receiver_address = self.bitcoind.get_new_address(None, None)?.assume_checked();
         let amount = Amount::from_sat(amount_arg.parse()?);
+        //let subdir = self.config.pj_endpoint + pubkey.map_or(&String::from(""), |s| &format!("/{}", s));
         let pj_uri_string = format!(
             "{}?amount={}&pj={}",
             pj_receiver_address.to_qr_uri(),
             amount.to_btc(),
-            self.config.pj_endpoint
+            format!(
+                "{}{}",
+                self.config.pj_endpoint,
+                pubkey.map_or(String::from(""), |s| format!("/{}", s))
+            )
         );
         let pj_uri = payjoin::Uri::from_str(&pj_uri_string)
             .map_err(|e| anyhow!("Constructed a bad URI string from args: {}", e))?;

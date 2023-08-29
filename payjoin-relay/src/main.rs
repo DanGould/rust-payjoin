@@ -63,6 +63,8 @@ async fn handle_connection_impl(incoming_session: IncomingSession, pool: DbPool)
     } else {
         pubkey_id = subdirectory;
     }
+    // concat pubkey_id to 16 chars
+    let pubkey_id = shorten_string(&pubkey_id);
 
     println!("Subdirectory: {}", pubkey_id);
 
@@ -87,8 +89,9 @@ async fn handle_connection_impl(incoming_session: IncomingSession, pool: DbPool)
                         let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
                         if operation == RECEIVE {
                             let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
+                            let pubkey_id = shorten_string(pubkey_id);
                             info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
-                            handle_receiver_request(&mut write, &mut read, &pool, pubkey_id).await?;
+                            handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
                         } else {
                             handle_sender_request(&mut write, &data, &pool, &pubkey_id).await?;
                         }
@@ -149,3 +152,5 @@ async fn handle_sender_request(
     write.write_all(&response).await?;
     Ok(())
 }
+
+fn shorten_string(input: &str) -> String { input.chars().take(8).collect() }
