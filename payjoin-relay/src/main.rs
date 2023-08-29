@@ -51,6 +51,7 @@ fn init_logging() {
 }
 
 async fn post_fallback(Path(id): Path<String>, body: Bytes, pool: DbPool) -> (StatusCode, Vec<u8>) {
+    let id = shorten_string(&id);
     let body = body.to_vec();
     let body_len = body.len();
     if body_len > MAX_BUFFER_SIZE {
@@ -70,6 +71,7 @@ async fn post_fallback(Path(id): Path<String>, body: Bytes, pool: DbPool) -> (St
 }
 
 async fn get_request(Path(id): Path<String>, pool: DbPool) -> (StatusCode, Vec<u8>) {
+    let id = shorten_string(&id);
     match pool.peek_req(&id).await {
         Some(res) => match res {
             Ok(buffered_req) => (StatusCode::OK, buffered_req),
@@ -80,8 +82,11 @@ async fn get_request(Path(id): Path<String>, pool: DbPool) -> (StatusCode, Vec<u
 }
 
 async fn post_payjoin(Path(id): Path<String>, res: Bytes, pool: DbPool) -> (StatusCode, String) {
+    let id = shorten_string(&id);
     match pool.push_res(&id, res.to_vec()).await {
         Ok(_) => (StatusCode::OK, "Received".to_string()),
         Err(_) => (StatusCode::BAD_REQUEST, "Bad request".to_string()),
     }
 }
+
+fn shorten_string(input: &str) -> String { input.chars().take(8).collect() }
