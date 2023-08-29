@@ -85,18 +85,19 @@ impl From<hyper::http::Error> for HandlerError {
 }
 
 async fn post_fallback(id: &str, body: Body, pool: DbPool) -> Result<Response<Body>, HandlerError> {
+    let id = shorten_string(id);
     let req = hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
 
     if req.len() > MAX_BUFFER_SIZE {
         return Err(HandlerError::PayloadTooLarge);
     }
 
-    match pool.push_req(id, req.into()).await {
+    match pool.push_req(&id, req.into()).await {
         Ok(_) => (),
         Err(_) => return Err(HandlerError::BadRequest),
     };
 
-    match pool.peek_res(id).await {
+    match pool.peek_res(&id).await {
         Some(result) => match result {
             Ok(buffered_res) => Ok(Response::new(Body::from(buffered_res))),
             Err(_) => Err(HandlerError::BadRequest),
@@ -106,7 +107,8 @@ async fn post_fallback(id: &str, body: Body, pool: DbPool) -> Result<Response<Bo
 }
 
 async fn get_request(id: &str, pool: DbPool) -> Result<Response<Body>, HandlerError> {
-    match pool.peek_req(id).await {
+    let id = shorten_string(id);
+    match pool.peek_req(&id).await {
         Some(result) => match result {
             Ok(buffered_req) => Ok(Response::new(Body::from(buffered_req))),
             Err(_) => Err(HandlerError::BadRequest),
@@ -116,9 +118,10 @@ async fn get_request(id: &str, pool: DbPool) -> Result<Response<Body>, HandlerEr
 }
 
 async fn post_payjoin(id: &str, body: Body, pool: DbPool) -> Result<Response<Body>, HandlerError> {
+    let id = shorten_string(id);
     let res = hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
 
-    match pool.push_res(id, res.into()).await {
+    match pool.push_res(&id, res.into()).await {
         Ok(_) => Ok(Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty())?),
         Err(_) => Err(HandlerError::BadRequest),
     }
@@ -129,3 +132,5 @@ fn not_found() -> Response<Body> {
     *res.status_mut() = StatusCode::NOT_FOUND;
     res
 }
+
+fn shorten_string(input: &str) -> String { input.chars().take(8).collect() }

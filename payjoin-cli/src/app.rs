@@ -10,7 +10,7 @@ use bitcoincore_rpc::RpcApi;
 use clap::ArgMatches;
 use config::{Config, File, FileFormat};
 use payjoin::bitcoin::psbt::Psbt;
-use payjoin::bitcoin::{self};
+use payjoin::bitcoin::{self, base64};
 use payjoin::receive::{Error, ProvisionalProposal, UncheckedProposal};
 #[cfg(not(feature = "v2"))]
 use rouille::{Request, Response};
@@ -207,7 +207,7 @@ impl App {
 
     #[cfg(not(feature = "v2"))]
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
+        let pj_uri_string = self.construct_payjoin_uri(amount_arg, None)?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -220,20 +220,27 @@ impl App {
 
     #[cfg(feature = "v2")]
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg)?;
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let mut rng = bitcoin::secp256k1::rand::thread_rng();
+        let key = bitcoin::secp256k1::KeyPair::new(&secp, &mut rng);
+        let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
+        let pubkey_base64 = base64::encode_config(key.public_key().to_string(), b64_config);
+
+        let pj_uri_string = self.construct_payjoin_uri(amount_arg, Some(&pubkey_base64))?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
         );
-        println!("{}/id", pj_uri_string);
+        println!("{}", pj_uri_string);
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
             .build()
             .with_context(|| "Failed to build reqwest http client")?;
         log::debug!("Awaiting request");
-        let res =
-            Self::long_poll_get(&client, &(self.config.pj_endpoint.to_string() + "/id/receive"))?;
+        let receive_endpoint =
+            format!("{}/{}/{}", self.config.pj_endpoint, pubkey_base64, payjoin::v2::RECEIVE);
+        let res = Self::long_poll_get(&client, &receive_endpoint)?;
 
         log::debug!("Received request");
         let proposal = UncheckedProposal::from_relay_response(res)
@@ -243,7 +250,7 @@ impl App {
             .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
         let payjoin_psbt_ser = payjoin::base64::encode(payjoin_psbt.serialize());
         let _ = client
-            .post(self.config.pj_endpoint.to_string() + "/id/receive")
+            .post(receive_endpoint)
             .body(payjoin_psbt_ser)
             .send()
             .with_context(|| "HTTP request failed")?;
@@ -278,14 +285,19 @@ impl App {
         Ok(())
     }
 
-    fn construct_payjoin_uri(&self, amount_arg: &str) -> Result<String> {
+    fn construct_payjoin_uri(&self, amount_arg: &str, pubkey: Option<&str>) -> Result<String> {
         let pj_receiver_address = self.bitcoind.get_new_address(None, None)?.assume_checked();
         let amount = Amount::from_sat(amount_arg.parse()?);
+        //let subdir = self.config.pj_endpoint + pubkey.map_or(&String::from(""), |s| &format!("/{}", s));
         let pj_uri_string = format!(
             "{}?amount={}&pj={}",
             pj_receiver_address.to_qr_uri(),
             amount.to_btc(),
-            self.config.pj_endpoint
+            format!(
+                "{}{}",
+                self.config.pj_endpoint,
+                pubkey.map_or(String::from(""), |s| format!("/{}", s))
+            )
         );
 
         // to check uri validity
