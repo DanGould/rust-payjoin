@@ -288,6 +288,48 @@ pub trait Headers {
     fn get_header(&self, key: &str) -> Option<&str>;
 }
 
+#[cfg(feature = "v2")]
+pub struct ProposalContext {
+    s: bitcoin::secp256k1::KeyPair,
+}
+
+impl ProposalContext {
+    pub fn new() -> Self {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let (sk, _) = secp.generate_keypair(&mut rand::rngs::OsRng);
+        ProposalContext { s: bitcoin::secp256k1::KeyPair::from_secret_key(&secp, &sk) }
+    }
+
+    pub fn subdirectory(&self) -> String {
+        let pubkey = &self.s.public_key().serialize();
+        let b64_config =
+            bitcoin::base64::Config::new(bitcoin::base64::CharacterSet::UrlSafe, false);
+        let pubkey_base64 = bitcoin::base64::encode_config(pubkey, b64_config);
+        pubkey_base64
+    }
+
+    pub fn receive_subdir(&self) -> String {
+        format!("{}/{}", self.subdirectory(), crate::v2::RECEIVE)
+    }
+
+    pub fn parse_relay_response(
+        self,
+        mut body: impl std::io::Read,
+    ) -> Result<UncheckedProposal, RequestError> {
+        let mut buf = Vec::new();
+        let _ = body.read_to_end(&mut buf);
+        let (proposal, e) = crate::v2::decrypt_message_a(&mut buf, self.s.secret_key());
+        let mut proposal = serde_json::from_slice::<UncheckedProposal>(&proposal)
+            .map_err(InternalRequestError::Json)?;
+        proposal.psbt = proposal.psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
+        proposal.v2_context = Some(e);
+        log::debug!("Received original psbt: {:?}", proposal.psbt);
+        log::debug!("Received request with params: {:?}", proposal.params);
+
+        Ok(proposal)
+    }
+}
+
 /// The sender's original PSBT and optional parameters
 ///
 /// This type is used to proces the request. It is returned by
@@ -302,6 +344,7 @@ pub struct UncheckedProposal {
     #[cfg_attr(feature = "v2", serde(deserialize_with = "deserialize_psbt"))]
     psbt: Psbt,
     params: Params,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 /// Typestate to validate that the Original PSBT has no receiver-owned inputs.
@@ -310,6 +353,7 @@ pub struct UncheckedProposal {
 pub struct MaybeInputsOwned {
     psbt: Psbt,
     params: Params,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 /// Typestate to validate that the Original PSBT has no mixed input types.
@@ -318,6 +362,7 @@ pub struct MaybeInputsOwned {
 pub struct MaybeMixedInputScripts {
     psbt: Psbt,
     params: Params,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 /// Typestate to validate that the Original PSBT has no inputs that have been seen before.
@@ -326,6 +371,7 @@ pub struct MaybeMixedInputScripts {
 pub struct MaybeInputsSeen {
     psbt: Psbt,
     params: Params,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 pub(crate) fn deserialize_psbt<'de, D>(deserializer: D) -> Result<Psbt, D::Error>
@@ -343,19 +389,6 @@ where
 }
 
 impl UncheckedProposal {
-    #[cfg(feature = "v2")]
-    pub fn from_relay_response(mut body: impl std::io::Read) -> Result<Self, RequestError> {
-        let mut buf = Vec::new();
-        let _ = body.read_to_end(&mut buf);
-        let mut proposal = serde_json::from_slice::<UncheckedProposal>(&buf)
-            .map_err(InternalRequestError::Json)?;
-        proposal.psbt = proposal.psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
-        log::debug!("Received original psbt: {:?}", proposal.psbt);
-        log::debug!("Received request with params: {:?}", proposal.params);
-
-        Ok(proposal)
-    }
-
     pub fn from_request(
         mut body: impl std::io::Read,
         query: &str,
@@ -392,7 +425,7 @@ impl UncheckedProposal {
 
         // TODO check that params are valid for the request's Original PSBT
 
-        Ok(UncheckedProposal { psbt, params })
+        Ok(UncheckedProposal { psbt, params, v2_context: None })
     }
 
     /// The Sender's Original PSBT
@@ -417,7 +450,11 @@ impl UncheckedProposal {
         can_broadcast: impl Fn(&bitcoin::Transaction) -> Result<bool, Error>,
     ) -> Result<MaybeInputsOwned, Error> {
         if can_broadcast(&self.psbt.clone().extract_tx())? {
-            Ok(MaybeInputsOwned { psbt: self.psbt, params: self.params })
+            Ok(MaybeInputsOwned {
+                psbt: self.psbt,
+                params: self.params,
+                v2_context: self.v2_context,
+            })
         } else {
             Err(Error::BadRequest(InternalRequestError::OriginalPsbtNotBroadcastable.into()))
         }
@@ -429,7 +466,7 @@ impl UncheckedProposal {
     /// So-called "non-interactive" receivers, like payment processors, that allow arbitrary requests are otherwise vulnerable to probing attacks.
     /// Those receivers call `get_transaction_to_check_broadcast()` and `attest_tested_and_scheduled_broadcast()` after making those checks downstream.
     pub fn assume_interactive_receiver(self) -> MaybeInputsOwned {
-        MaybeInputsOwned { psbt: self.psbt, params: self.params }
+        MaybeInputsOwned { psbt: self.psbt, params: self.params, v2_context: self.v2_context }
     }
 }
 
@@ -464,7 +501,11 @@ impl MaybeInputsOwned {
         }
         err?;
 
-        Ok(MaybeMixedInputScripts { psbt: self.psbt, params: self.params })
+        Ok(MaybeMixedInputScripts {
+            psbt: self.psbt,
+            params: self.params,
+            v2_context: self.v2_context,
+        })
     }
 }
 
@@ -508,7 +549,7 @@ impl MaybeMixedInputScripts {
             })?;
         }
 
-        Ok(MaybeInputsSeen { psbt: self.psbt, params: self.params })
+        Ok(MaybeInputsSeen { psbt: self.psbt, params: self.params, v2_context: self.v2_context })
     }
 }
 
@@ -533,7 +574,7 @@ impl MaybeInputsSeen {
             }
         })?;
 
-        Ok(OutputsUnknown { psbt: self.psbt, params: self.params })
+        Ok(OutputsUnknown { psbt: self.psbt, params: self.params, v2_context: self.v2_context })
     }
 }
 
@@ -544,6 +585,7 @@ impl MaybeInputsSeen {
 pub struct OutputsUnknown {
     psbt: Psbt,
     params: Params,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 impl OutputsUnknown {
@@ -574,6 +616,7 @@ impl OutputsUnknown {
             payjoin_psbt: self.psbt,
             params: self.params,
             owned_vouts,
+            v2_context: self.v2_context,
         })
     }
 }
@@ -583,6 +626,7 @@ pub struct PayjoinProposal {
     payjoin_psbt: Psbt,
     params: Params,
     owned_vouts: Vec<usize>,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 impl PayjoinProposal {
@@ -597,6 +641,16 @@ impl PayjoinProposal {
     pub fn get_owned_vouts(&self) -> &Vec<usize> { &self.owned_vouts }
 
     pub fn psbt(&self) -> &Psbt { &self.payjoin_psbt }
+
+    pub fn serialize_body(&self) -> Vec<u8> {
+        match self.v2_context {
+            Some(e) => {
+                let mut payjoin_bytes = self.payjoin_psbt.serialize();
+                crate::v2::encrypt_message_b(&mut payjoin_bytes, e)
+            }
+            None => bitcoin::base64::encode(self.payjoin_psbt.serialize()).as_bytes().to_vec(),
+        }
+    }
 }
 
 /// A mutable checked proposal that the receiver may contribute inputs to to make a payjoin.
@@ -605,6 +659,7 @@ pub struct ProvisionalProposal {
     payjoin_psbt: Psbt,
     params: Params,
     owned_vouts: Vec<usize>,
+    v2_context: Option<bitcoin::secp256k1::PublicKey>,
 }
 
 impl ProvisionalProposal {
@@ -833,6 +888,7 @@ impl ProvisionalProposal {
             payjoin_psbt: self.payjoin_psbt,
             owned_vouts: self.owned_vouts,
             params: self.params,
+            v2_context: self.v2_context,
         })
     }
 

@@ -11,7 +11,7 @@ use clap::ArgMatches;
 use config::{Config, File, FileFormat};
 use payjoin::bitcoin::psbt::Psbt;
 use payjoin::bitcoin::{self, base64};
-use payjoin::receive::{Error, ProvisionalProposal, UncheckedProposal};
+use payjoin::receive::{Error, PayjoinProposal, ProvisionalProposal, UncheckedProposal};
 #[cfg(not(feature = "v2"))]
 use rouille::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -220,13 +220,9 @@ impl App {
 
     #[cfg(feature = "v2")]
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let mut rng = bitcoin::secp256k1::rand::thread_rng();
-        let key = bitcoin::secp256k1::KeyPair::new(&secp, &mut rng);
-        let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
-        let pubkey_base64 = base64::encode_config(key.public_key().to_string(), b64_config);
-
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg, Some(&pubkey_base64))?;
+        let context = payjoin::receive::ProposalContext::new();
+        let pj_uri_string =
+            self.construct_payjoin_uri(amount_arg, Some(&context.subdirectory()))?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -238,20 +234,21 @@ impl App {
             .build()
             .with_context(|| "Failed to build reqwest http client")?;
         log::debug!("Awaiting request");
-        let receive_endpoint =
-            format!("{}/{}/{}", self.config.pj_endpoint, pubkey_base64, payjoin::v2::RECEIVE);
+        let receive_endpoint = format!("{}/{}", self.config.pj_endpoint, context.receive_subdir());
         let res = Self::long_poll_get(&client, &receive_endpoint)?;
 
         log::debug!("Received request");
-        let proposal = UncheckedProposal::from_relay_response(res)
+        let proposal = context
+            .parse_relay_response(res)
             .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
-        let payjoin_psbt = self
+        let payjoin_proposal = self
             .process_proposal(proposal)
             .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
-        let payjoin_psbt_ser = payjoin::base64::encode(&payjoin_psbt.serialize());
+
+        let body = payjoin_proposal.serialize_body();
         let _ = client
             .post(receive_endpoint)
-            .body(payjoin_psbt_ser)
+            .body(body)
             .send()
             .with_context(|| "HTTP request failed")?;
         Ok(())
@@ -377,15 +374,15 @@ impl App {
             headers,
         )?;
 
-        let payjoin_proposal_psbt = self.process_proposal(proposal)?;
-        log::debug!("Receiver's Payjoin proposal PSBT Rsponse: {:#?}", payjoin_proposal_psbt);
+        let payjoin_proposal = self.process_proposal(proposal)?;
 
-        let payload = payjoin::bitcoin::base64::encode(&payjoin_proposal_psbt.serialize());
+        let body = payjoin_proposal.serialize_body().as_str().to_sring();
+
         log::info!("successful response");
-        Ok(Response::text(payload))
+        Ok(Response::text(body))
     }
 
-    fn process_proposal(&self, proposal: UncheckedProposal) -> Result<Psbt, Error> {
+    fn process_proposal(&self, proposal: UncheckedProposal) -> Result<PayjoinProposal, Error> {
         // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
         let _to_broadcast_in_failure_case = proposal.get_transaction_to_schedule_broadcast();
 
@@ -457,23 +454,18 @@ impl App {
             .assume_checked();
         provisional_payjoin.substitute_output_address(receiver_substitute_address);
 
-        let payjoi_proposal = provisional_payjoin.finalize_proposal(
+        let payjoin_proposal = provisional_payjoin.finalize_proposal(
             |psbt: &Psbt| {
                 self.bitcoind
-                    .wallet_process_psbt(
-                        &payjoin::base64::encode(psbt.serialize()),
-                        None,
-                        None,
-                        Some(false),
-                    )
+                    .wallet_process_psbt(&base64::encode(psbt.serialize()), None, None, Some(false))
                     .map(|res| Psbt::from_str(&res.psbt).map_err(|e| Error::Server(e.into())))
                     .map_err(|e| Error::Server(e.into()))?
             },
             Some(bitcoin::FeeRate::MIN),
         )?;
-        let payjoin_proposal_psbt = payjoi_proposal.psbt();
+        let payjoin_proposal_psbt = payjoin_proposal.psbt();
         log::debug!("Receiver's Payjoin proposal PSBT Rsponse: {:#?}", payjoin_proposal_psbt);
-        Ok(payjoin_proposal_psbt.clone())
+        Ok(payjoin_proposal)
     }
 
     fn insert_input_seen_before(&self, input: bitcoin::OutPoint) -> Result<bool> {
@@ -622,4 +614,4 @@ impl payjoin::receive::Headers for Headers<'_> {
     }
 }
 
-fn serialize_psbt(psbt: &Psbt) -> String { payjoin::base64::encode(&psbt.serialize()) }
+fn serialize_psbt(psbt: &Psbt) -> String { base64::encode(&psbt.serialize()) }
