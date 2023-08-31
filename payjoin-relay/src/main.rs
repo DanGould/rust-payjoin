@@ -63,21 +63,40 @@ async fn handle_connection_impl(connection: TcpStream, pool: DbPool) -> Result<(
     .await?;
     let (mut write, mut read) = stream.split();
     info!("Accepted stream");
-    match read_stream_to_string(&mut read).await? {
-        Some(data) => {
-            let mut parts = data.split_whitespace();
-            let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
-            if operation == RECEIVE {
-                let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
-                let pubkey_id = shorten_string(pubkey_id);
-                info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
-                handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
-            } else {
-                handle_sender_request(&mut write, &data, &pool, &pubkey_id).await?;
+    match read.next().await {
+        Some(bytes) => {
+            let bytes = bytes?.into_data();
+            match std::str::from_utf8(&bytes) {
+                Ok(message) => {
+                    let mut parts = message.split_whitespace();
+                    let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
+                    if operation == RECEIVE {
+                        let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
+                        let pubkey_id = shorten_string(pubkey_id);
+                        info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
+                        handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
+                    }
+                }
+                _ => handle_sender_request(&mut write, bytes.to_vec(), &pool, &pubkey_id).await?,
             }
         }
         None => (),
     }
+    // match read_stream_to_string(&mut read).await? {
+    //     Some(data) => {
+    //         let mut parts = data.split_whitespace();
+    //         let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
+    //         if operation == RECEIVE {
+    //             let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
+    //             let pubkey_id = shorten_string(pubkey_id);
+    //             info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
+    //             handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
+    //         } else {
+    //             handle_sender_request(&mut write, &data, &pool, &pubkey_id).await?;
+    //         }
+    //     }
+    //     None => (),
+    // }
     info!("Closing stream");
     write.close().await?;
     Ok(())
@@ -92,13 +111,6 @@ fn init_logging() {
     println!("Logging initialized");
 }
 
-async fn read_stream_to_string(read: &mut Stream) -> Result<Option<String>> {
-    match read.next().await {
-        Some(msg) => Ok(Some(msg?.to_string())),
-        None => Ok(None),
-    }
-}
-
 async fn handle_receiver_request(
     write: &mut Sink,
     read: &mut Stream,
@@ -107,9 +119,9 @@ async fn handle_receiver_request(
 ) -> Result<()> {
     let buffered_req = pool.peek_req(pubkey_id).await?;
     write.send(Message::binary(buffered_req)).await?;
-
-    if let Some(response) = read_stream_to_string(read).await? {
-        pool.push_res(pubkey_id, response.as_bytes().to_vec()).await?;
+    if let Some(bytes) = read.next().await {
+        let bytes = bytes?.into_data();
+        pool.push_res(pubkey_id, bytes).await?;
     }
 
     Ok(())
@@ -117,11 +129,11 @@ async fn handle_receiver_request(
 
 async fn handle_sender_request(
     write: &mut Sink,
-    data: &str,
+    data: Vec<u8>,
     pool: &DbPool,
     pubkey_id: &str,
 ) -> Result<()> {
-    pool.push_req(pubkey_id, data.as_bytes().to_vec()).await?;
+    pool.push_req(pubkey_id, data).await?;
     debug!("pushed req");
     let response = pool.peek_res(pubkey_id).await?;
     debug!("peek req");

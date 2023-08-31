@@ -322,6 +322,8 @@ pub struct Context {
     input_type: InputType,
     sequence: Sequence,
     payee: ScriptBuf,
+    #[cfg(feature = "v2")]
+    e: bitcoin::secp256k1::SecretKey,
 }
 
 macro_rules! check_eq {
@@ -348,6 +350,7 @@ impl Context {
     /// Call this method with response from receiver to continue BIP78 flow. If the response is
     /// valid you will get appropriate PSBT that you should sign and broadcast.
     #[inline]
+    #[cfg(not(feature = "v2"))]
     pub fn process_response(
         self,
         response: &mut impl std::io::Read,
@@ -356,6 +359,19 @@ impl Context {
         response.read_to_string(&mut res_str).map_err(InternalValidationError::Io)?;
         let proposal = Psbt::from_str(&res_str).map_err(InternalValidationError::Psbt)?;
 
+        // process in non-generic function
+        self.process_proposal(proposal).map(Into::into).map_err(Into::into)
+    }
+
+    #[cfg(feature = "v2")]
+    pub fn process_response(
+        self,
+        response: &mut impl std::io::Read,
+    ) -> Result<Psbt, ValidationError> {
+        let mut res_buf = Vec::new();
+        response.read_to_end(&mut res_buf).map_err(InternalValidationError::Io)?;
+        let psbt = crate::v2::decrypt_message_b(&mut res_buf, self.e);
+        let proposal = Psbt::deserialize(&psbt).expect("PSBT deserialization failed");
         // process in non-generic function
         self.process_proposal(proposal).map(Into::into).map_err(Into::into)
     }
@@ -833,13 +849,20 @@ pub(crate) fn from_psbt_and_uri(
     let sequence = zeroth_input.txin.sequence;
     let txout = zeroth_input.previous_txout().expect("We already checked this above");
     let input_type = InputType::from_spent_input(txout, zeroth_input.psbtin).unwrap();
-    let url = uri.extras._endpoint;
+    let rs_base64 = crate::v2::subdir(uri.extras._endpoint.as_str()).to_string();
+    log::debug!("rs_base64: {:?}", rs_base64);
+    let b64_config = bitcoin::base64::Config::new(bitcoin::base64::CharacterSet::UrlSafe, false);
+    let rs = bitcoin::base64::decode_config(rs_base64, b64_config).unwrap();
+    log::debug!("rs: {:?}", rs.len());
+    let rs = bitcoin::secp256k1::PublicKey::from_slice(&rs).unwrap();
     let body = serialize_v2_body(
         &psbt,
         disable_output_substitution,
         fee_contribution,
         params.min_fee_rate,
     );
+    let (body, e) = crate::v2::encrypt_message_a(&body, rs);
+    let url = uri.extras._endpoint;
     Ok((
         Request { url, body },
         Context {
@@ -850,6 +873,7 @@ pub(crate) fn from_psbt_and_uri(
             input_type,
             sequence,
             min_fee_rate: params.min_fee_rate,
+            e,
         },
     ))
 }
@@ -857,6 +881,7 @@ pub(crate) fn from_psbt_and_uri(
 #[cfg(test)]
 mod tests {
     #[test]
+    #[cfg(not(feature = "v2"))]
     fn official_vectors() {
         use std::str::FromStr;
 

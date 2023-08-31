@@ -56,7 +56,7 @@ impl App {
         log::debug!("Sending request");
         write.send(Message::binary(req.body)).await?;
         log::debug!("Awaiting response");
-        let buffer = read.next().await.unwrap()?.into_text()?;
+        let buffer = read.next().await.unwrap()?.into_data();
         let mut response = std::io::Cursor::new(&buffer);
         self.process_pj_response(ctx, &mut response)?;
         write.close().await?;
@@ -189,14 +189,11 @@ impl App {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::connect_async;
         use tokio_tungstenite::tungstenite::Message;
-        
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let mut rng = bitcoin::secp256k1::rand::thread_rng();
-        let key = bitcoin::secp256k1::KeyPair::new(&secp, &mut rng);
-        let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
-        let pubkey_base64 = base64::encode_config(key.public_key().to_string(), b64_config);
+        use tokio::io::AsyncReadExt;
 
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg, Some(&pubkey_base64))?;
+        let context = payjoin::receive::ProposalContext::new();
+        let pj_uri_string =
+            self.construct_payjoin_uri(amount_arg, Some(&context.subdirectory()))?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -208,18 +205,20 @@ impl App {
         let (mut write, mut read) = stream.split();
         // enroll receiver
         log::debug!("Generating ephemeral keypair");
-        let enroll_string = format!("{} {}", payjoin::v2::RECEIVE, pubkey_base64);
-        write.send(Message::binary(enroll_string.as_bytes())).await?;
+        write.send(Message::binary(context.enroll_string().as_bytes())).await?;
         log::debug!("Enrolled receiver, awaiting request");
         let buffer = read.next().await.unwrap()?;
         log::debug!("Received request");
-        let proposal = UncheckedProposal::from_streamed(&buffer.into_data())
+        let (proposal, e) = context
+            .parse_proposal(&mut buffer.into_data())
             .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
         let payjoin_psbt = self
             .process_proposal(proposal)
             .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
-        let payjoin_psbt_ser = base64::encode(&payjoin_psbt.serialize());
-        write.send(Message::binary(payjoin_psbt_ser)).await?;
+        let mut payjoin_bytes = payjoin_psbt.serialize();
+        log::debug!("payjoin_bytes: {:?}", payjoin_bytes);
+        let payload = payjoin::v2::encrypt_message_b(&mut payjoin_bytes, e);
+        write.send(Message::binary(payload)).await?;
         write.close().await?;
         Ok(())
     }
@@ -348,10 +347,7 @@ impl App {
             headers,
         )?;
 
-        let payjoin_proposal_psbt = self.process_proposal(proposal)?;
-        log::debug!("Receiver's Payjoin proposal PSBT Rsponse: {:#?}", payjoin_proposal_psbt);
-
-        let payload = base64::encode(&payjoin_proposal_psbt.serialize());
+        let payload = self.process_proposal(proposal)?;
         log::info!("successful response");
         Ok(Response::text(payload))
     }
