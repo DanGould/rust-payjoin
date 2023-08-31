@@ -16,13 +16,15 @@ edition = "2018"
 send = []
 receive = ["rand"]
 base64 = ["bitcoin/base64"]
-v2 = []
+v2 = ["serde", "serde_json"]
 
 [dependencies]
 bitcoin = { version = "0.30.0", features = ["base64"] }
 bip21 = "0.3.1"
 log = { version = "0.4.14"}
 rand = { version = "0.8.4", optional = true }
+serde = { version = "1.0", optional = true }
+serde_json = { version = "1.0", optional = true }
 url = "2.2.2"
 
 [dev-dependencies]
