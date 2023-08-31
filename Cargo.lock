@@ -1713,6 +1713,8 @@ dependencies = [
  "env_logger",
  "log",
  "rand",
+ "serde",
+ "serde_json",
  "url",
 ]
 

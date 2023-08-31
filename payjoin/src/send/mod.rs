@@ -710,6 +710,30 @@ fn determine_fee_contribution(
     })
 }
 
+#[cfg(feature = "v2")]
+fn serialize_v2_body(
+    psbt: &Psbt,
+    disable_output_substitution: bool,
+    fee_contribution: Option<(bitcoin::Amount, usize)>,
+    min_feerate: FeeRate,
+) -> Vec<u8> {
+    use serde_json::json;
+
+    let params = crate::optional_parameters::Params {
+        v: 2,
+        disable_output_substitution,
+        additional_fee_contribution: fee_contribution,
+        min_feerate,
+    };
+
+    let body = json!({
+        "psbt": serialize_psbt(psbt),
+        "params": serde_json::to_value(params).unwrap(),
+    });
+
+    serde_json::to_vec(&body).unwrap()
+}
+
 fn serialize_url(
     endpoint: String,
     disable_output_substitution: bool,
@@ -734,11 +758,19 @@ fn serialize_url(
     Ok(url)
 }
 
-fn serialize_psbt(psbt: &Psbt) -> Vec<u8> {
+fn serialize_psbt(psbt: &Psbt) -> String {
     let bytes = psbt.serialize();
-    bitcoin::base64::encode(bytes).into_bytes()
+    bitcoin::base64::encode(bytes)
 }
 
+fn to_feerate(feerate: f32) -> FeeRate { FeeRate::from_sat_per_kwu((feerate * 250.0_f32) as u64) }
+
+fn serialize_minfeerate(min_feerate: FeeRate) -> f32 {
+    min_feerate.to_sat_per_kwu() as f32 / 250.0_f32
+}
+
+#[cfg(feature = "send")]
+#[cfg(not(feature = "v2"))]
 pub(crate) fn from_psbt_and_uri(
     mut psbt: Psbt,
     uri: crate::uri::PjUri<'_>,
@@ -766,6 +798,48 @@ pub(crate) fn from_psbt_and_uri(
     )
     .map_err(InternalCreateRequestError::Url)?;
     let body = serialize_psbt(&psbt);
+    Ok((
+        Request { url, body },
+        Context {
+            original_psbt: psbt,
+            disable_output_substitution,
+            fee_contribution,
+            payee,
+            input_type,
+            sequence,
+            min_fee_rate: params.min_fee_rate,
+        },
+    ))
+}
+
+#[cfg(all(feature = "send", feature = "v2"))]
+pub(crate) fn from_psbt_and_uri(
+    mut psbt: Psbt,
+    uri: crate::uri::PjUri<'_>,
+    params: Configuration,
+) -> Result<(Request, Context), CreateRequestError> {
+    log::debug!("v2 confirmed");
+    psbt.validate_input_utxos(true).map_err(InternalCreateRequestError::InvalidOriginalInput)?;
+    let disable_output_substitution =
+        uri.extras.disable_output_substitution || params.disable_output_substitution;
+    let payee = uri.address.script_pubkey();
+
+    check_single_payee(&psbt, &payee, uri.amount)?;
+    let fee_contribution = determine_fee_contribution(&psbt, &payee, &params)?;
+    clear_unneeded_fields(&mut psbt);
+
+    let zeroth_input = psbt.input_pairs().next().ok_or(InternalCreateRequestError::NoInputs)?;
+
+    let sequence = zeroth_input.txin.sequence;
+    let txout = zeroth_input.previous_txout().expect("We already checked this above");
+    let input_type = InputType::from_spent_input(txout, zeroth_input.psbtin).unwrap();
+    let url = uri.extras._endpoint;
+    let body = serialize_v2_body(
+        &psbt,
+        disable_output_substitution,
+        fee_contribution,
+        params.min_fee_rate,
+    );
     Ok((
         Request { url, body },
         Context {

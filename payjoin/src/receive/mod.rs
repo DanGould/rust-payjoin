@@ -273,15 +273,14 @@ use bitcoin::psbt::Psbt;
 use bitcoin::{Amount, FeeRate, OutPoint, Script, TxOut};
 
 mod error;
-mod optional_parameters;
 
 pub use error::{Error, RequestError, SelectionError};
 use error::{InternalRequestError, InternalSelectionError};
-use optional_parameters::Params;
 use rand::seq::SliceRandom;
 use rand::Rng;
 
 use crate::input_type::InputType;
+use crate::optional_parameters::Params;
 use crate::psbt::PsbtExt;
 
 pub trait Headers {
@@ -297,7 +296,9 @@ pub trait Headers {
 /// transaction with get_transaction_to_schedule_broadcast() and schedule, followed by checking
 /// that the transaction can be broadcast with check_can_broadcast. Otherwise it is safe to
 /// call assume_interactive_receive to proceed with validation.
+#[cfg_attr(feature = "v2", derive(serde::Deserialize))]
 pub struct UncheckedProposal {
+    #[cfg_attr(feature = "v2", serde(deserialize_with = "deserialize_psbt"))]
     psbt: Psbt,
     params: Params,
 }
@@ -326,24 +327,34 @@ pub struct MaybeInputsSeen {
     params: Params,
 }
 
+pub(crate) fn deserialize_psbt<'de, D>(deserializer: D) -> Result<Psbt, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let buf = <String as serde::Deserialize>::deserialize(deserializer)?;
+    let base64 = bitcoin::base64::decode(buf.as_bytes())
+        .map_err(|e| D::Error::custom(format!("Base64 decoding error: {:?}", e)))?;
+    let unchecked_psbt = Psbt::deserialize(&base64)
+        .map_err(|e| D::Error::custom(format!("Psbt deserialization error: {:?}", e)))?;
+    Ok(unchecked_psbt)
+}
+
+#[cfg(feature = "v2")]
 impl UncheckedProposal {
-    #[cfg(feature = "v2")]
-    pub fn from_base64(buf: &[u8]) -> Result<Self, RequestError> {
-        let base64 = bitcoin::base64::decode(buf).map_err(InternalRequestError::Base64)?;
-        let unchecked_psbt = Psbt::deserialize(&base64).map_err(InternalRequestError::Psbt)?;
+    pub fn from_streamed(streamed: &[u8]) -> Result<Self, RequestError> {
+        let mut proposal = serde_json::from_slice::<UncheckedProposal>(streamed)
+            .map_err(InternalRequestError::Json)?;
+        proposal.psbt = proposal.psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
+        log::debug!("Received original psbt: {:?}", proposal.psbt);
+        log::debug!("Received request with params: {:?}", proposal.params);
 
-        let psbt = unchecked_psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
-        log::debug!("Received original psbt: {:?}", psbt);
-
-        // TODO accept parameters
-        // let pairs = url::form_urlencoded::parse(query.as_bytes());
-        // let params = Params::from_query_pairs(pairs).map_err(InternalRequestError::SenderParams)?;
-        // log::debug!("Received request with params: {:?}", params);
-
-        Ok(UncheckedProposal { psbt, params: Params::default() })
+        Ok(proposal)
     }
+}
 
-    #[cfg(not(feature = "v2"))]
+impl UncheckedProposal {
     pub fn from_request(
         mut body: impl std::io::Read,
         query: &str,
