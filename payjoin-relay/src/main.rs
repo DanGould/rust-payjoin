@@ -83,19 +83,23 @@ async fn handle_connection_impl(incoming_session: IncomingSession, pool: DbPool)
                 let (mut write, mut read) = stream?;
                 info!("Accepted BI stream for pubkey_id {}", pubkey_id);
 
-                match read_stream_to_string(&mut read).await? {
-                    Some(data) => {
-                        let mut parts = data.split_whitespace();
-                        let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
-                        if operation == RECEIVE {
-                            let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
-                            let pubkey_id = shorten_string(pubkey_id);
-                            info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
-                            handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
-                        } else {
-                            handle_sender_request(&mut write, &data, &pool, &pubkey_id).await?;
+                let mut buffer = vec![0; MAX_BUFFER_SIZE];
+                match read.read(&mut buffer).await? {
+                    Some(bytes_read) => {
+                        match std::str::from_utf8(&buffer[..bytes_read]) {
+                            Ok(message) => {
+                                let mut parts = message.split_whitespace();
+                                let operation = parts.next().ok_or(anyhow::anyhow!("No operation"))?;
+                                if operation == RECEIVE {
+                                    let pubkey_id = parts.next().ok_or(anyhow::anyhow!("No pubkey_id"))?;
+                                    let pubkey_id = shorten_string(pubkey_id);
+                                    info!("Received receiver enroll request for pubkey_id {}", pubkey_id);
+                                    handle_receiver_request(&mut write, &mut read, &pool, &pubkey_id).await?;
+                                }
+                            }
+                            _ => handle_sender_request(&mut write, buffer[..bytes_read].to_vec(), &pool, &pubkey_id).await?
                         }
-                    }
+                    },
                     None => continue,
                 }
 
@@ -115,14 +119,6 @@ fn init_logging() {
     println!("Logging initialized");
 }
 
-async fn read_stream_to_string(read: &mut RecvStream) -> Result<Option<String>> {
-    let mut buffer = vec![0; MAX_BUFFER_SIZE];
-    match read.read(&mut buffer).await? {
-        Some(bytes_read) => Ok(Some(std::str::from_utf8(&buffer[..bytes_read])?.to_string())),
-        None => Ok(None),
-    }
-}
-
 async fn handle_receiver_request(
     write: &mut SendStream,
     read: &mut RecvStream,
@@ -131,9 +127,9 @@ async fn handle_receiver_request(
 ) -> Result<()> {
     let buffered_req = pool.peek_req(pubkey_id).await?;
     write.write_all(&buffered_req).await?;
-
-    if let Some(response) = read_stream_to_string(read).await? {
-        pool.push_res(pubkey_id, response.as_bytes().to_vec()).await?;
+    let mut buffer = vec![0; MAX_BUFFER_SIZE];
+    if let Some(bytes_read) = read.read(&mut buffer).await? {
+        pool.push_res(pubkey_id, buffer[..bytes_read].to_vec()).await?;
     }
 
     Ok(())
@@ -141,11 +137,11 @@ async fn handle_receiver_request(
 
 async fn handle_sender_request(
     write: &mut SendStream,
-    data: &str,
+    data: Vec<u8>,
     pool: &DbPool,
     pubkey_id: &str,
 ) -> Result<()> {
-    pool.push_req(pubkey_id, data.as_bytes().to_vec()).await?;
+    pool.push_req(pubkey_id, data).await?;
     debug!("pushed req");
     let response = pool.peek_res(pubkey_id).await?;
     debug!("peek req");

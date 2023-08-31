@@ -278,6 +278,7 @@ pub use error::{Error, RequestError, SelectionError};
 use error::{InternalRequestError, InternalSelectionError};
 use rand::seq::SliceRandom;
 use rand::Rng;
+use serde::Serialize;
 
 use crate::input_type::InputType;
 use crate::optional_parameters::Params;
@@ -285,6 +286,45 @@ use crate::psbt::PsbtExt;
 
 pub trait Headers {
     fn get_header(&self, key: &str) -> Option<&str>;
+}
+
+#[cfg(feature = "v2")]
+pub struct ProposalContext {
+    s: bitcoin::secp256k1::KeyPair,
+}
+
+impl ProposalContext {
+    pub fn new() -> Self {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let (sk, _) = secp.generate_keypair(&mut rand::rngs::OsRng);
+        ProposalContext { s: bitcoin::secp256k1::KeyPair::from_secret_key(&secp, &sk) }
+    }
+
+    pub fn subdirectory(&self) -> String {
+        let pubkey = &self.s.public_key().serialize();
+        let b64_config =
+            bitcoin::base64::Config::new(bitcoin::base64::CharacterSet::UrlSafe, false);
+        let pubkey_base64 = bitcoin::base64::encode_config(pubkey, b64_config);
+        pubkey_base64
+    }
+
+    pub fn enroll_string(&self) -> String {
+        format!("{} {}", crate::v2::RECEIVE, self.subdirectory())
+    }
+
+    pub fn parse_proposal(
+        self,
+        encrypted_proposal: &mut [u8],
+    ) -> Result<(UncheckedProposal, bitcoin::secp256k1::PublicKey), RequestError> {
+        let (proposal, e) = crate::v2::decrypt_message_a(encrypted_proposal, self.s.secret_key());
+        let mut proposal = serde_json::from_slice::<UncheckedProposal>(&proposal)
+            .map_err(InternalRequestError::Json)?;
+        proposal.psbt = proposal.psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
+        log::debug!("Received original psbt: {:?}", proposal.psbt);
+        log::debug!("Received request with params: {:?}", proposal.params);
+
+        Ok((proposal, e))
+    }
 }
 
 /// The sender's original PSBT and optional parameters
@@ -341,20 +381,8 @@ where
     Ok(unchecked_psbt)
 }
 
-#[cfg(feature = "v2")]
 impl UncheckedProposal {
-    pub fn from_streamed(streamed: &[u8]) -> Result<Self, RequestError> {
-        let mut proposal = serde_json::from_slice::<UncheckedProposal>(streamed)
-            .map_err(InternalRequestError::Json)?;
-        proposal.psbt = proposal.psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
-        log::debug!("Received original psbt: {:?}", proposal.psbt);
-        log::debug!("Received request with params: {:?}", proposal.params);
-
-        Ok(proposal)
-    }
-}
-
-impl UncheckedProposal {
+    #[cfg(not(feature = "v2"))]
     pub fn from_request(
         mut body: impl std::io::Read,
         query: &str,

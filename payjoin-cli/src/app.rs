@@ -46,6 +46,7 @@ impl App {
     pub async fn send_payjoin(&self, bip21: &str) -> Result<()> {
         use std::net::{Ipv6Addr, SocketAddr};
 
+        use tokio::io::AsyncReadExt;
         use wtransport::{ClientConfig, Endpoint};
 
         let (req, ctx) = self.create_pj_request(bip21)?;
@@ -64,6 +65,7 @@ impl App {
         let connection = Endpoint::client(config)?.connect(&req.url).await?;
         let (mut write, mut read) = connection.open_bi().await?.await?;
         log::debug!("Sending request");
+        log::debug!("body.len(): {}", req.body.len());
         write.write(&req.body).await?;
         log::debug!("Awaiting response");
         let mut buffer = vec![0; 65536];
@@ -197,12 +199,11 @@ impl App {
 
     #[cfg(feature = "v2")]
     pub async fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let mut rng = bitcoin::secp256k1::rand::thread_rng();
-        let key = bitcoin::secp256k1::KeyPair::new(&secp, &mut rng);
-        let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
-        let pubkey_base64 = base64::encode_config(key.public_key().to_string(), b64_config);
-        let pj_uri_string = self.construct_payjoin_uri(amount_arg, Some(&pubkey_base64))?;
+        use tokio::io::AsyncReadExt;
+
+        let context = payjoin::receive::ProposalContext::new();
+        let pj_uri_string =
+            self.construct_payjoin_uri(amount_arg, Some(&context.subdirectory()))?;
         println!(
             "Listening at {}. Configured to accept payjoin at BIP 21 Payjoin Uri:",
             self.config.pj_host
@@ -213,19 +214,24 @@ impl App {
         // enroll receiver
         let (mut write, mut read) = connection.open_bi().await?.await?;
         log::debug!("Generating ephemeral keypair");
-        let enroll_string = format!("{} {}", payjoin::v2::RECEIVE, pubkey_base64);
-        write.write_all(enroll_string.as_bytes()).await?;
+        write.write_all(context.enroll_string().as_bytes()).await?;
         log::debug!("Enrolled receiver, awaiting request");
-        let mut buffer = vec![0; 65536].into_boxed_slice();
+        let mut buffer = vec![0; 65536];
         let len = read.read(&mut buffer).await?.unwrap();
+        log::debug!("read len: {}", len);
+        log::debug!("buffer.len(): {}", buffer.len());
+        buffer.truncate(len);
         log::debug!("Received request");
-        let proposal = UncheckedProposal::from_streamed(&buffer[..len])
+        let (proposal, e) = context
+            .parse_proposal(&mut buffer)
             .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
         let payjoin_psbt = self
             .process_proposal(proposal)
             .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
-        let payjoin_psbt_ser = base64::encode(&payjoin_psbt.serialize());
-        write.write_all(payjoin_psbt_ser.as_bytes()).await?;
+        let mut payjoin_bytes = payjoin_psbt.serialize();
+        log::debug!("payjoin_bytes: {:?}", payjoin_bytes);
+        let payload = payjoin::v2::encrypt_message_b(&mut payjoin_bytes, e);
+        write.write_all(&payload).await?;
         write.finish().await?;
         Ok(())
     }
@@ -376,10 +382,7 @@ impl App {
             headers,
         )?;
 
-        let payjoin_proposal_psbt = self.process_proposal(proposal)?;
-        log::debug!("Receiver's Payjoin proposal PSBT Rsponse: {:#?}", payjoin_proposal_psbt);
-
-        let payload = base64::encode(&payjoin_proposal_psbt.serialize());
+        let payload = self.process_proposal(proposal)?;
         log::info!("successful response");
         Ok(Response::text(payload))
     }
