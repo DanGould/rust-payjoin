@@ -326,16 +326,34 @@ impl<'a> RequestBuilder<'a> {
         let sequence = zeroth_input.txin.sequence;
         let txout = zeroth_input.previous_txout().expect("We already checked this above");
         let input_type = InputType::from_spent_input(txout, zeroth_input.psbtin).unwrap();
-        let url = serialize_url(
-            self.uri.extras._endpoint.into(),
-            disable_output_substitution,
-            fee_contribution,
-            self.min_fee_rate,
-        )
-        .map_err(InternalCreateRequestError::Url)?;
-        let body = serialize_psbt(&psbt);
+
+        #[cfg(not(feature = "v2"))]
+        let request = {
+            let url = serialize_url(
+                self.uri.extras._endpoint.into(),
+                disable_output_substitution,
+                fee_contribution,
+                self.min_fee_rate,
+            )
+            .map_err(InternalCreateRequestError::Url)?;
+            let body = serialize_psbt(&psbt).as_bytes().to_vec();
+            Request { url, body }
+        };
+
+        #[cfg(feature = "v2")]
+        let request = {
+            let url = self.uri.extras._endpoint;
+            let body = serialize_v2_body(
+                &psbt,
+                disable_output_substitution,
+                fee_contribution,
+                self.min_fee_rate,
+            );
+            Request { url, body }
+        };
+
         Ok((
-            Request { url, body },
+            request,
             Context {
                 original_psbt: psbt,
                 disable_output_substitution,
@@ -353,6 +371,7 @@ impl<'a> RequestBuilder<'a> {
 ///
 /// You need to send this request over HTTP(S) to the receiver.
 #[non_exhaustive]
+#[derive(Debug)]
 pub struct Request {
     /// URL to send the request to.
     ///
@@ -371,6 +390,7 @@ pub struct Request {
 ///
 /// This type is used to process the response. Get it from [`RequestBuilder`](crate::send::RequestBuilder)'s build methods.
 /// Then you only need to call [`.process_response()`](crate::send::Context::process_response()) on it to continue BIP78 flow.
+#[derive(Debug)]
 pub struct Context {
     original_psbt: Psbt,
     disable_output_substitution: bool,
@@ -768,6 +788,31 @@ fn determine_fee_contribution(
     })
 }
 
+#[cfg(feature = "v2")]
+fn serialize_v2_body(
+    psbt: &Psbt,
+    disable_output_substitution: bool,
+    fee_contribution: Option<(bitcoin::Amount, usize)>,
+    min_feerate: FeeRate,
+) -> Vec<u8> {
+    use serde_json::json;
+
+    let params = crate::optional_parameters::Params {
+        v: 2,
+        disable_output_substitution,
+        additional_fee_contribution: fee_contribution,
+        min_feerate,
+    };
+
+    let body = json!({
+        "psbt": serialize_psbt(psbt),
+        "params": serde_json::to_value(params).unwrap(),
+    });
+
+    serde_json::to_vec(&body).unwrap()
+}
+
+#[cfg(not(feature = "v2"))]
 fn serialize_url(
     endpoint: String,
     disable_output_substitution: bool,
@@ -792,9 +837,15 @@ fn serialize_url(
     Ok(url)
 }
 
-fn serialize_psbt(psbt: &Psbt) -> Vec<u8> {
+fn serialize_psbt(psbt: &Psbt) -> String {
     let bytes = psbt.serialize();
-    bitcoin::base64::encode(bytes).into_bytes()
+    bitcoin::base64::encode(bytes)
+}
+
+fn to_feerate(feerate: f32) -> FeeRate { FeeRate::from_sat_per_kwu((feerate * 250.0_f32) as u64) }
+
+fn serialize_minfeerate(min_feerate: FeeRate) -> f32 {
+    min_feerate.to_sat_per_kwu() as f32 / 250.0_f32
 }
 
 #[cfg(test)]

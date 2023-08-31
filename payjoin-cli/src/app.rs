@@ -108,14 +108,14 @@ impl App {
     #[cfg(not(feature = "v2"))]
     pub fn send_payjoin(&self, bip21: &str, fee_rate: &f32) -> Result<()> {
         let (req, ctx) = self.create_pj_request(bip21, fee_rate)?;
-
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
             .build()
             .with_context(|| "Failed to build reqwest http client")?;
+        let body = String::from_utf8(req.body.clone()).unwrap();
         let mut response = client
             .post(req.url)
-            .body(req.body)
+            .body(body)
             .header("Content-Type", "text/plain")
             .send()
             .with_context(|| "HTTP request failed")?;

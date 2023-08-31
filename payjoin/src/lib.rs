@@ -30,6 +30,8 @@ pub mod send;
 #[cfg(any(feature = "send", feature = "receive"))]
 pub(crate) mod input_type;
 #[cfg(any(feature = "send", feature = "receive"))]
+pub(crate) mod optional_parameters;
+#[cfg(any(feature = "send", feature = "receive"))]
 pub(crate) mod psbt;
 mod uri;
 #[cfg(any(feature = "send", feature = "receive"))]
