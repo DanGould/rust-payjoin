@@ -207,12 +207,13 @@ impl App {
         log::debug!("ws parsed");
         let (mut write, mut read) = stream.split();
         // enroll receiver
+        log::debug!("Generating ephemeral keypair");
         let enroll_string = format!("{} {}", payjoin::v2::RECEIVE, pubkey_base64);
         write.send(Message::binary(enroll_string.as_bytes())).await?;
         log::debug!("Enrolled receiver, awaiting request");
         let buffer = read.next().await.unwrap()?;
         log::debug!("Received request");
-        let proposal = UncheckedProposal::from_base64(&buffer.into_data())
+        let proposal = UncheckedProposal::from_streamed(&buffer.into_data())
             .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
         let payjoin_psbt = self
             .process_proposal(proposal)

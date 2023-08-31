@@ -47,7 +47,7 @@ pub(crate) enum InternalRequestError {
     InvalidContentType(String),
     InvalidContentLength(std::num::ParseIntError),
     ContentLengthTooLarge(u64),
-    SenderParams(super::optional_parameters::Error),
+    SenderParams(crate::optional_parameters::Error),
     /// The raw PSBT fails bip78-specific validation.
     InconsistentPsbt(crate::psbt::InconsistentPsbt),
     /// The prevtxout is missing
@@ -65,6 +65,9 @@ pub(crate) enum InternalRequestError {
     /// Original PSBT input has been seen before. Only automatic receivers, aka "interactive" in the spec
     /// look out for these to prevent probing attacks.
     InputSeen(bitcoin::OutPoint),
+    /// Serde deserialization failed
+    #[cfg(feature = "v2")]
+    Json(serde_json::Error),
 }
 
 impl From<InternalRequestError> for RequestError {
@@ -96,7 +99,7 @@ impl fmt::Display for RequestError {
                 &format!("Content length too large: {}.", length),
             ),
             InternalRequestError::SenderParams(e) => match e {
-                super::optional_parameters::Error::UnknownVersion => write_error(
+                crate::optional_parameters::Error::UnknownVersion => write_error(
                     f,
                     "version-unsupported",
                     "This version of payjoin is not supported.",
@@ -125,6 +128,8 @@ impl fmt::Display for RequestError {
                 write_error(f, "original-psbt-rejected", &format!("Input Type Error: {}.", e)),
             InternalRequestError::InputSeen(_) =>
                 write_error(f, "original-psbt-rejected", "The receiver rejected the original PSBT."),
+            #[cfg(feature = "v2")]
+            InternalRequestError::Json(e) => write_error(f, "json-error", e),
         }
     }
 }
