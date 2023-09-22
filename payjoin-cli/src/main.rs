@@ -73,6 +73,12 @@ fn cli() -> ArgMatches {
             .long("rpcpass")
             .help("The password for the bitcoin node"))
         .subcommand_required(true)
+        .arg(Arg::new("ohttp_config")
+            .long("ohttp-config")
+            .help("The ohttp config file"))
+        .arg(Arg::new("ohttp_proxy")
+            .long("ohttp-proxy")
+            .help("The ohttp proxy url"))
         .subcommand(
             Command::new("send")
                 .arg_required_else_help(true)

@@ -1,7 +1,9 @@
-use anyhow::Result;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
 use axum::body::Bytes;
 use axum::extract::Path;
-use axum::http::StatusCode;
+use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
 use axum::Router;
 use payjoin::v2::MAX_BUFFER_SIZE;
@@ -15,8 +17,9 @@ use crate::db::DbPool;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
     let pool = DbPool::new(std::time::Duration::from_secs(30)).await?;
-
-    let app = Router::new()
+    let ohttp = Arc::new(init_ohttp()?);
+    let ohttp_config = ohttp_config(&*ohttp)?;
+    let target_resource = Router::new()
         .route(
             "/:id",
             post({
@@ -36,8 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         );
 
+    let ohttp_gateway = Router::new()
+        .route("/", post(move |body| handle_ohttp(body, target_resource, ohttp)))
+        .route("/ohttp-keys", get(move || get_ohttp_config(ohttp_config)));
+
     println!("Serverless payjoin relay awaiting HTTP connection on port 8080");
-    axum::Server::bind(&"0.0.0.0:8080".parse()?).serve(app.into_make_service()).await?;
+    axum::Server::bind(&"0.0.0.0:8080".parse()?).serve(ohttp_gateway.into_make_service()).await?;
+    //hyper::Server::bind(&"0.0.0.0:8080").serve()
     Ok(())
 }
 
@@ -48,6 +56,79 @@ fn init_logging() {
     tracing_subscriber::fmt().with_target(true).with_level(true).with_env_filter(env_filter).init();
 
     println!("Logging initialized");
+}
+
+fn init_ohttp() -> Result<ohttp::Server> {
+    use ohttp::hpke::{Aead, Kdf, Kem};
+    use ohttp::{KeyId, SymmetricSuite};
+
+    const KEY_ID: KeyId = 1;
+    const KEM: Kem = Kem::X25519Sha256;
+    const SYMMETRIC: &[SymmetricSuite] =
+        &[SymmetricSuite::new(Kdf::HkdfSha256, Aead::ChaCha20Poly1305)];
+
+    // create or read from file
+    let server_config = ohttp::KeyConfig::new(KEY_ID, KEM, Vec::from(SYMMETRIC)).unwrap();
+    let encoded_config = server_config.encode().unwrap();
+    let b64_config = payjoin::bitcoin::base64::encode_config(
+        &encoded_config,
+        payjoin::bitcoin::base64::Config::new(
+            payjoin::bitcoin::base64::CharacterSet::UrlSafe,
+            false,
+        ),
+    );
+    tracing::info!("ohttp server config base64 UrlSafe: {:?}", b64_config);
+    ohttp::Server::new(server_config).with_context(|| "Failed to initialize ohttp server")
+}
+
+async fn handle_ohttp(
+    enc_request: Bytes,
+    mut target: Router,
+    ohttp: Arc<ohttp::Server>,
+) -> (StatusCode, Vec<u8>) {
+    use axum::body::Body;
+    use http::Uri;
+    use tower_service::Service;
+
+    // decapsulate
+    let (bhttp_req, res_ctx) = ohttp.decapsulate(&enc_request).unwrap();
+    let mut cursor = std::io::Cursor::new(bhttp_req);
+    let req = bhttp::Message::read_bhttp(&mut cursor).unwrap();
+    // let parsed_request: httparse::Request = httparse::Request::new(&mut vec![]).parse(cursor).unwrap();
+    // // handle request
+    // Request::new
+    let uri = Uri::builder()
+        .scheme(req.control().scheme().unwrap())
+        .authority(req.control().authority().unwrap())
+        .path_and_query(req.control().path().unwrap())
+        .build()
+        .unwrap();
+    let body = req.content().to_vec();
+    let mut request = Request::builder().uri(uri).method(req.control().method().unwrap());
+    for header in req.header().fields() {
+        request = request.header(header.name(), header.value())
+    }
+    let request = request.body(Body::from(body)).unwrap();
+
+    let response = target.call(request).await.unwrap();
+
+    let (parts, body) = response.into_parts();
+    let mut bhttp_res = bhttp::Message::response(parts.status.as_u16());
+    let full_body = hyper::body::to_bytes(body).await.unwrap();
+    bhttp_res.write_content(&full_body);
+    let mut bhttp_bytes = Vec::new();
+    bhttp_res.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes).unwrap();
+    let ohttp_res = res_ctx.encapsulate(&bhttp_bytes).unwrap();
+    (StatusCode::OK, ohttp_res)
+}
+
+fn ohttp_config(server: &ohttp::Server) -> Result<String> {
+    use payjoin::bitcoin::base64;
+
+    let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
+    let encoded_config =
+        server.config().encode().with_context(|| "Failed to encode ohttp config")?;
+    Ok(base64::encode_config(&encoded_config, b64_config))
 }
 
 async fn post_fallback(Path(id): Path<String>, body: Bytes, pool: DbPool) -> (StatusCode, Vec<u8>) {
@@ -70,8 +151,11 @@ async fn post_fallback(Path(id): Path<String>, body: Bytes, pool: DbPool) -> (St
     }
 }
 
+async fn get_ohttp_config(config: String) -> (StatusCode, String) { (StatusCode::OK, config) }
+
 async fn get_request(Path(id): Path<String>, pool: DbPool) -> (StatusCode, Vec<u8>) {
     let id = shorten_string(&id);
+    tracing::debug!("peek request for id: {}", id);
     match pool.peek_req(&id).await {
         Some(res) => match res {
             Ok(buffered_req) => (StatusCode::OK, buffered_req),

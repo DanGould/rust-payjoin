@@ -11,7 +11,10 @@ use clap::ArgMatches;
 use config::{Config, File, FileFormat};
 use payjoin::bitcoin::psbt::Psbt;
 use payjoin::bitcoin::{self, base64};
-use payjoin::receive::{Error, PayjoinProposal, ProvisionalProposal, UncheckedProposal};
+use payjoin::receive::{
+    EnrollContext, Error, PayjoinProposal, ProvisionalProposal, UncheckedProposal,
+};
+use payjoin::send::RequestContext;
 #[cfg(not(feature = "v2"))]
 use rouille::{Request, Response};
 use serde::{Deserialize, Serialize};
@@ -44,7 +47,7 @@ impl App {
 
     #[cfg(feature = "v2")]
     pub fn send_payjoin(&self, bip21: &str) -> Result<()> {
-        let (req, ctx) = self.create_pj_request(bip21)?;
+        let req_ctx = self.create_pj_request(bip21)?;
 
         let client = reqwest::blocking::Client::builder()
             .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
@@ -52,55 +55,52 @@ impl App {
             .with_context(|| "Failed to build reqwest http client")?;
 
         log::debug!("Awaiting response");
-        let res = Self::long_poll_post(&client, req)?;
-        let mut res = std::io::Cursor::new(&res);
-        self.process_pj_response(ctx, &mut res)?;
+        let res = self.long_poll_post(&client, req_ctx)?;
+        self.process_pj_response(res)?;
         Ok(())
     }
 
     #[cfg(feature = "v2")]
     fn long_poll_post(
+        &self,
         client: &reqwest::blocking::Client,
-        req: payjoin::send::Request,
-    ) -> Result<Vec<u8>, reqwest::Error> {
+        req_ctx: payjoin::send::RequestContext<'_>,
+    ) -> Result<Psbt> {
         loop {
+            let (req, ctx) = req_ctx.extract_v2(&self.config.ohttp_proxy)?;
             let response = client
-                .post(req.url.as_str())
+                .post(req.url)
                 .body(req.body.clone())
                 .header("Content-Type", "text/plain")
                 .send()?;
 
-            if response.status() == reqwest::StatusCode::OK {
-                let body = response.bytes()?.to_vec();
-                return Ok(body);
-            } else if response.status() == reqwest::StatusCode::ACCEPTED {
+            let bytes = response.bytes()?;
+            let mut cursor = std::io::Cursor::new(bytes);
+            let psbt = ctx.process_response(&mut cursor)?;
+            if let Some(psbt) = psbt {
+                return Ok(psbt);
+            } else {
                 log::info!("No response yet for POST payjoin request, retrying some seconds");
                 std::thread::sleep(std::time::Duration::from_secs(5));
-            } else {
-                log::error!("Unexpected response status: {}", response.status());
-                // TODO handle error
-                panic!("Unexpected response status: {}", response.status())
             }
         }
     }
 
     #[cfg(feature = "v2")]
     fn long_poll_get(
+        &self,
         client: &reqwest::blocking::Client,
-        url: &str,
-    ) -> Result<reqwest::blocking::Response, reqwest::Error> {
+        enroll_context: &mut EnrollContext,
+    ) -> Result<UncheckedProposal, reqwest::Error> {
         loop {
-            let response = client.get(url).send()?;
-
-            if response.status() == reqwest::StatusCode::OK {
-                return Ok(response);
-            } else if response.status() == reqwest::StatusCode::ACCEPTED {
-                log::info!("No response yet for GET payjoin request, retrying in 5 seconds");
-                std::thread::sleep(std::time::Duration::from_secs(5));
-            } else {
-                log::error!("Unexpected response status: {}", response.status());
-                // TODO handle error
-                panic!("Unexpected response status: {}", response.status())
+            let (enroll_body, context) = enroll_context.enroll_body();
+            let ohttp_response = client.post(&self.config.ohttp_proxy).body(enroll_body).send()?;
+            let ohttp_response = ohttp_response.bytes()?;
+            let proposal =
+                enroll_context.parse_relay_response(ohttp_response.as_ref(), context).unwrap();
+            match proposal {
+                Some(proposal) => return Ok(proposal),
+                None => std::thread::sleep(std::time::Duration::from_secs(5)),
             }
         }
     }
@@ -124,10 +124,7 @@ impl App {
         Ok(())
     }
 
-    fn create_pj_request(
-        &self,
-        bip21: &str,
-    ) -> Result<(payjoin::send::Request, payjoin::send::Context)> {
+    fn create_pj_request<'a>(&self, bip21: &'a str) -> Result<RequestContext<'a>> {
         let uri = payjoin::Uri::try_from(bip21)
             .map_err(|e| anyhow!("Failed to create URI from BIP21: {}", e))?;
 
@@ -169,22 +166,16 @@ impl App {
             .psbt;
         let psbt = Psbt::from_str(&psbt).with_context(|| "Failed to load PSBT from base64")?;
         log::debug!("Original psbt: {:#?}", psbt);
-
-        let (req, ctx) = payjoin::send::RequestBuilder::from_psbt_and_uri(psbt, uri)
+        let req_ctx = payjoin::send::RequestBuilder::from_psbt_and_uri(psbt, uri)
             .with_context(|| "Failed to build payjoin request")?
             .build_recommended(fee_rate)
             .with_context(|| "Failed to build payjoin request")?;
 
-        Ok((req, ctx))
+        Ok(req_ctx)
     }
 
-    fn process_pj_response(
-        &self,
-        ctx: payjoin::send::Context,
-        response: &mut impl std::io::Read,
-    ) -> Result<bitcoin::Txid> {
+    fn process_pj_response(&self, psbt: Psbt) -> Result<bitcoin::Txid> {
         // TODO display well-known errors and log::debug the rest
-        let psbt = ctx.process_response(response).with_context(|| "Failed to process response")?;
         log::debug!("Proposed psbt: {:#?}", psbt);
         let psbt = self
             .bitcoind
@@ -220,7 +211,11 @@ impl App {
 
     #[cfg(feature = "v2")]
     pub fn receive_payjoin(self, amount_arg: &str) -> Result<()> {
-        let context = payjoin::receive::ProposalContext::new();
+        let mut context = EnrollContext::from_relay_config(
+            &self.config.pj_endpoint,
+            &self.config.ohttp_config,
+            &self.config.ohttp_proxy,
+        );
         let pj_uri_string =
             self.construct_payjoin_uri(amount_arg, Some(&context.subdirectory()))?;
         println!(
@@ -233,24 +228,24 @@ impl App {
             .danger_accept_invalid_certs(self.config.danger_accept_invalid_certs)
             .build()
             .with_context(|| "Failed to build reqwest http client")?;
-        log::debug!("Awaiting request");
-        let receive_endpoint = format!("{}/{}", self.config.pj_endpoint, context.receive_subdir());
-        let res = Self::long_poll_get(&client, &receive_endpoint)?;
-
+        log::debug!("Awaiting proposal");
+        let res = self.long_poll_get(&client, &mut context)?;
         log::debug!("Received request");
-        let proposal = context
-            .parse_relay_response(res)
-            .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
         let payjoin_proposal = self
-            .process_proposal(proposal)
-            .map_err(|e| anyhow!("Failed to process UncheckedProposal {}", e))?;
+            .process_proposal(res)
+            .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
 
-        let body = payjoin_proposal.serialize_body();
-        let _ = client
-            .post(receive_endpoint)
+        let receive_endpoint = format!("{}/{}", self.config.pj_endpoint, context.receive_subdir());
+        let (body, ohttp_ctx) =
+            payjoin_proposal.extract_v2_req(&self.config.ohttp_config, &receive_endpoint);
+        let res = client
+            .post(&self.config.ohttp_proxy)
             .body(body)
             .send()
             .with_context(|| "HTTP request failed")?;
+        let res = res.bytes()?;
+        let res = payjoin_proposal.deserialize_res(res.to_vec(), ohttp_ctx);
+        log::debug!("Received response {:?}", res);
         Ok(())
     }
 
@@ -287,14 +282,15 @@ impl App {
         let amount = Amount::from_sat(amount_arg.parse()?);
         //let subdir = self.config.pj_endpoint + pubkey.map_or(&String::from(""), |s| &format!("/{}", s));
         let pj_uri_string = format!(
-            "{}?amount={}&pj={}",
+            "{}?amount={}&pj={}&ohttp={}",
             pj_receiver_address.to_qr_uri(),
             amount.to_btc(),
             format!(
                 "{}{}",
                 self.config.pj_endpoint,
                 pubkey.map_or(String::from(""), |s| format!("/{}", s))
-            )
+            ),
+            self.config.ohttp_config,
         );
 
         // to check uri validity
@@ -473,6 +469,19 @@ impl App {
     }
 }
 
+fn serialize_request_to_bytes(req: reqwest::Request) -> Vec<u8> {
+    let mut serialized_request =
+        format!("{} {} HTTP/1.1\r\n", req.method(), req.url()).into_bytes();
+
+    for (name, value) in req.headers().iter() {
+        let header_line = format!("{}: {}\r\n", name.as_str(), value.to_str().unwrap());
+        serialized_request.extend(header_line.as_bytes());
+    }
+
+    serialized_request.extend(b"\r\n");
+    serialized_request
+}
+
 struct SeenInputs {
     set: OutPointSet,
     file: std::fs::File,
@@ -512,6 +521,8 @@ pub(crate) struct AppConfig {
     pub bitcoind_cookie: Option<String>,
     pub bitcoind_rpcuser: String,
     pub bitcoind_rpcpass: String,
+    pub ohttp_config: String,
+    pub ohttp_proxy: String,
 
     // send-only
     pub danger_accept_invalid_certs: bool,
@@ -544,6 +555,16 @@ impl AppConfig {
             .set_override_option(
                 "bitcoind_rpcpass",
                 matches.get_one::<String>("rpcpass").map(|s| s.as_str()),
+            )?
+            .set_default("ohttp_config", "")?
+            .set_override_option(
+                "ohttp_config",
+                matches.get_one::<String>("ohttp_config").map(|s| s.as_str()),
+            )?
+            .set_default("ohttp_proxy", "")?
+            .set_override_option(
+                "ohttp_proxy",
+                matches.get_one::<String>("ohttp_proxy").map(|s| s.as_str()),
             )?
             // Subcommand defaults without which file serialization fails.
             .set_default("danger_accept_invalid_certs", false)?

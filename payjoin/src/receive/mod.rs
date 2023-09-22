@@ -271,7 +271,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
 use bitcoin::psbt::Psbt;
-use bitcoin::{Amount, FeeRate, OutPoint, Script, TxOut};
+use bitcoin::{base64, secp256k1, Amount, FeeRate, OutPoint, Script, TxOut};
 
 mod error;
 
@@ -279,6 +279,7 @@ pub use error::{Error, RequestError, SelectionError};
 use error::{InternalRequestError, InternalSelectionError};
 use rand::seq::SliceRandom;
 use rand::Rng;
+use url::Url;
 
 use crate::input_type::InputType;
 use crate::optional_parameters::Params;
@@ -289,15 +290,30 @@ pub trait Headers {
 }
 
 #[cfg(feature = "v2")]
-pub struct ProposalContext {
+pub struct EnrollContext {
+    relay_url: Url,
+    ohttp_config: Vec<u8>,
+    ohttp_proxy: Url,
     s: bitcoin::secp256k1::KeyPair,
 }
 
-impl ProposalContext {
-    pub fn new() -> Self {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
+impl EnrollContext {
+    pub fn from_relay_config(
+        relay_url: &str,
+        ohttp_config_base64: &str,
+        ohttp_proxy_url: &str,
+    ) -> Self {
+        let ohttp_config = base64::decode_config(ohttp_config_base64, base64::URL_SAFE).unwrap();
+        let ohttp_proxy = Url::parse(ohttp_proxy_url).unwrap();
+        let relay_url = Url::parse(relay_url).unwrap();
+        let secp = secp256k1::Secp256k1::new();
         let (sk, _) = secp.generate_keypair(&mut rand::rngs::OsRng);
-        ProposalContext { s: bitcoin::secp256k1::KeyPair::from_secret_key(&secp, &sk) }
+        EnrollContext {
+            ohttp_config,
+            ohttp_proxy,
+            relay_url,
+            s: secp256k1::KeyPair::from_secret_key(&secp, &sk),
+        }
     }
 
     pub fn subdirectory(&self) -> String {
@@ -312,13 +328,32 @@ impl ProposalContext {
         format!("{}/{}", self.subdirectory(), crate::v2::RECEIVE)
     }
 
+    pub fn enroll_body(&mut self) -> (Vec<u8>, ohttp::ClientResponse) {
+        let receive_endpoint = self.receive_subdir();
+        log::debug!("{}{}", self.relay_url.as_str(), receive_endpoint);
+        let (ohttp_req, ctx) = crate::v2::ohttp_encapsulate(
+            &self.ohttp_config,
+            "GET",
+            format!("{}{}", self.relay_url.as_str(), receive_endpoint).as_str(),
+            None,
+        );
+
+        (ohttp_req, ctx)
+    }
+
     pub fn parse_relay_response(
-        self,
+        &self,
         mut body: impl std::io::Read,
-    ) -> Result<UncheckedProposal, RequestError> {
+        context: ohttp::ClientResponse,
+    ) -> Result<Option<UncheckedProposal>, RequestError> {
         let mut buf = Vec::new();
         let _ = body.read_to_end(&mut buf);
-        let (proposal, e) = crate::v2::decrypt_message_a(&mut buf, self.s.secret_key());
+        let response = crate::v2::ohttp_decapsulate(context, &buf);
+        if response.is_empty() {
+            log::debug!("response is empty");
+            return Ok(None);
+        }
+        let (proposal, e) = crate::v2::decrypt_message_a(&response, self.s.secret_key());
         let mut proposal = serde_json::from_slice::<UncheckedProposal>(&proposal)
             .map_err(InternalRequestError::Json)?;
         proposal.psbt = proposal.psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
@@ -326,7 +361,7 @@ impl ProposalContext {
         log::debug!("Received original psbt: {:?}", proposal.psbt);
         log::debug!("Received request with params: {:?}", proposal.params);
 
-        Ok(proposal)
+        Ok(Some(proposal))
     }
 }
 
@@ -642,14 +677,27 @@ impl PayjoinProposal {
 
     pub fn psbt(&self) -> &Psbt { &self.payjoin_psbt }
 
-    pub fn serialize_body(&self) -> Vec<u8> {
-        match self.v2_context {
-            Some(e) => {
-                let mut payjoin_bytes = self.payjoin_psbt.serialize();
-                crate::v2::encrypt_message_b(&mut payjoin_bytes, e)
-            }
-            None => bitcoin::base64::encode(self.payjoin_psbt.serialize()).as_bytes().to_vec(),
-        }
+    pub fn extract_v1_req(&self) -> String {
+        bitcoin::base64::encode(self.payjoin_psbt.serialize())
+    }
+
+    #[cfg(feature = "v2")]
+    pub fn extract_v2_req(
+        &self,
+        ohttp_config: &str,
+        receive_endpoint: &str,
+    ) -> (Vec<u8>, ohttp::ClientResponse) {
+        let e = self.v2_context.unwrap(); // TODO make v2 only
+        let mut payjoin_bytes = self.payjoin_psbt.serialize();
+        let body = crate::v2::encrypt_message_b(&mut payjoin_bytes, e);
+        let ohttp_config = bitcoin::base64::decode_config(ohttp_config, base64::URL_SAFE).unwrap();
+        dbg!(receive_endpoint);
+        crate::v2::ohttp_encapsulate(&ohttp_config, "POST", receive_endpoint, Some(&body))
+    }
+
+    pub fn deserialize_res(&self, res: Vec<u8>, ohttp_context: ohttp::ClientResponse) -> Vec<u8> {
+        // display success or failure
+        crate::v2::ohttp_decapsulate(ohttp_context, &res)
     }
 }
 
