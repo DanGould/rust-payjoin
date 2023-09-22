@@ -85,6 +85,8 @@ mod integration {
                 bitcoin::FeeRate::ZERO,
                 false,
             )
+            .unwrap()
+            .extract_v1()
             .unwrap();
         let headers = HeaderMock::from_vec(&req.body);
 

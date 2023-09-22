@@ -26,6 +26,7 @@ impl Payjoin {
 pub struct PayjoinParams {
     pub(crate) _endpoint: Url,
     pub(crate) disable_output_substitution: bool,
+    pub(crate) ohttp_config: Option<ohttp::KeyConfig>,
 }
 
 pub type Uri<'a, NetworkValidation> = bip21::Uri<'a, NetworkValidation, Payjoin>;
@@ -112,6 +113,7 @@ impl<'a> bip21::de::DeserializeParams<'a> for Payjoin {
 pub struct DeserializationState {
     pj: Option<Url>,
     pjos: Option<bool>,
+    ohttp: Option<ohttp::KeyConfig>,
 }
 
 #[derive(Debug)]
@@ -135,6 +137,17 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
         <Self::Value as bip21::DeserializationError>::Error,
     > {
         match key {
+            "ohttp" if self.ohttp.is_none() => {
+                let base64_config = Cow::try_from(value).map_err(InternalPjParseError::NotUtf8)?;
+                let config_bytes =
+                    bitcoin::base64::decode_config(&*base64_config, bitcoin::base64::URL_SAFE)
+                        .map_err(InternalPjParseError::NotBase64)?;
+                let config = ohttp::KeyConfig::decode(&config_bytes)
+                    .map_err(InternalPjParseError::BadOhttp)?;
+                self.ohttp = Some(config);
+                Ok(bip21::de::ParamKind::Known)
+            }
+            "ohttp" => Err(PjParseError(InternalPjParseError::MultipleParams("ohttp"))),
             "pj" if self.pj.is_none() => {
                 let endpoint = Cow::try_from(value).map_err(InternalPjParseError::NotUtf8)?;
                 let url = Url::parse(&endpoint).map_err(InternalPjParseError::BadEndpoint)?;
@@ -159,10 +172,10 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
     fn finalize(
         self,
     ) -> std::result::Result<Self::Value, <Self::Value as bip21::DeserializationError>::Error> {
-        match (self.pj, self.pjos) {
-            (None, None) => Ok(Payjoin::Unsupported),
-            (None, Some(_)) => Err(PjParseError(InternalPjParseError::MissingEndpoint)),
-            (Some(endpoint), pjos) => {
+        match (self.pj, self.pjos, self.ohttp) {
+            (None, None, _) => Ok(Payjoin::Unsupported),
+            (None, Some(_), _) => Err(PjParseError(InternalPjParseError::MissingEndpoint)),
+            (Some(endpoint), pjos, None) => {
                 if endpoint.scheme() == "https"
                     || endpoint.scheme() == "http"
                         && endpoint.domain().unwrap_or_default().ends_with(".onion")
@@ -170,11 +183,27 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
                     Ok(Payjoin::Supported(PayjoinParams {
                         _endpoint: endpoint,
                         disable_output_substitution: pjos.unwrap_or(false),
+                        ohttp_config: None,
+                    }))
+                } else {
+                    Err(PjParseError(InternalPjParseError::UnsecureEndpoint))
+                }
+            }
+            (Some(endpoint), pjos, Some(ohttp)) => {
+                if endpoint.scheme() == "https"
+                    || endpoint.scheme() == "http"
+                        && endpoint.domain().unwrap_or_default().ends_with(".onion")
+                {
+                    Ok(Payjoin::Supported(PayjoinParams {
+                        _endpoint: endpoint,
+                        disable_output_substitution: pjos.unwrap_or(false),
+                        ohttp_config: Some(ohttp),
                     }))
                 } else if endpoint.scheme() == "http" {
                     Ok(Payjoin::V2Only(PayjoinParams {
                         _endpoint: endpoint,
                         disable_output_substitution: pjos.unwrap_or(false),
+                        ohttp_config: Some(ohttp),
                     }))
                 } else {
                     Err(PjParseError(InternalPjParseError::UnsecureEndpoint))
@@ -193,7 +222,9 @@ impl std::fmt::Display for PjParseError {
             }
             InternalPjParseError::MissingEndpoint => write!(f, "Missing payjoin endpoint"),
             InternalPjParseError::NotUtf8(_) => write!(f, "Endpoint is not valid UTF-8"),
+            InternalPjParseError::NotBase64(_) => write!(f, "ohttp config is not valid base64"),
             InternalPjParseError::BadEndpoint(_) => write!(f, "Endpoint is not valid"),
+            InternalPjParseError::BadOhttp(_) => write!(f, "ohttp config is not valid"),
             InternalPjParseError::UnsecureEndpoint => {
                 write!(f, "Endpoint scheme is not secure (https or onion)")
             }
@@ -207,7 +238,9 @@ enum InternalPjParseError {
     MultipleParams(&'static str),
     MissingEndpoint,
     NotUtf8(core::str::Utf8Error),
+    NotBase64(bitcoin::base64::DecodeError),
     BadEndpoint(url::ParseError),
+    BadOhttp(ohttp::Error),
     UnsecureEndpoint,
 }
 

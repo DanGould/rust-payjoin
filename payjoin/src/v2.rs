@@ -58,7 +58,7 @@ pub fn encrypt_message_a(msg: &[u8], s: PublicKey) -> (Vec<u8>, SecretKey) {
     (message_a, e_sec)
 }
 
-pub fn decrypt_message_a(message_a: &mut [u8], s: SecretKey) -> (Vec<u8>, PublicKey) {
+pub fn decrypt_message_a(message_a: &[u8], s: SecretKey) -> (Vec<u8>, PublicKey) {
     // let message a = [pubkey/AD][nonce][authentication tag][ciphertext]
     let e = PublicKey::from_slice(&message_a[..33]).expect("invalid public key");
     log::debug!("e: {:?}", e);
@@ -106,4 +106,34 @@ pub fn decrypt_message_b(message_b: &mut Vec<u8>, e: SecretKey) -> Vec<u8> {
     let payload = Payload { msg: &message_b[45..], aad: &re.serialize() };
     let buffer = cipher.decrypt(&nonce, payload).expect("decryption failed");
     buffer
+}
+
+pub fn ohttp_encapsulate(
+    ohttp_config: &[u8],
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+) -> (Vec<u8>, ohttp::ClientResponse) {
+    let ctx = ohttp::ClientRequest::from_encoded_config(ohttp_config).unwrap();
+    let url = url::Url::parse(url).expect("invalid url");
+    let mut bhttp_message = bhttp::Message::request(
+        method.as_bytes().to_vec(),
+        url.scheme().as_bytes().to_vec(),
+        url.authority().as_bytes().to_vec(),
+        url.path().as_bytes().to_vec(),
+    );
+    if let Some(body) = body {
+        bhttp_message.write_content(body);
+    }
+    let mut bhttp_req = Vec::new();
+    let _ = bhttp_message.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_req);
+    ctx.encapsulate(&bhttp_req).expect("encapsulation failed")
+}
+
+/// decapsulate ohttp, bhttp response and return http response body and status code
+pub fn ohttp_decapsulate(res_ctx: ohttp::ClientResponse, ohttp_body: &[u8]) -> Vec<u8> {
+    let bhttp_body = res_ctx.decapsulate(ohttp_body).expect("decapsulation failed");
+    let mut r = std::io::Cursor::new(bhttp_body);
+    let response = bhttp::Message::read_bhttp(&mut r).expect("read bhttp failed");
+    response.content().to_vec()
 }

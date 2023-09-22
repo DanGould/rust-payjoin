@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, StatusCode};
+use hyper::{Body, Method, Request, Response, StatusCode, Uri};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
@@ -16,10 +17,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     let pool = DbPool::new(std::time::Duration::from_secs(30)).await?;
+    let ohttp = Arc::new(init_ohttp()?);
     let make_svc = make_service_fn(|_| {
         let pool = pool.clone();
+        let ohttp = ohttp.clone();
         async move {
-            let handler = move |req| handle_web_req(pool.clone(), req);
+            let handler = move |req| handle_ohttp_gateway(req, pool.clone(), ohttp.clone());
             Ok::<_, hyper::Error>(service_fn(handler))
         }
     });
@@ -38,16 +41,34 @@ fn init_logging() {
     println!("Logging initialized");
 }
 
-async fn handle_web_req(pool: DbPool, req: Request<Body>) -> Result<Response<Body>> {
-    let path = req.uri().path().to_string();
-    let (parts, body) = req.into_parts();
+fn init_ohttp() -> Result<ohttp::Server> {
+    use ohttp::hpke::{Aead, Kdf, Kem};
+    use ohttp::{KeyId, SymmetricSuite};
 
-    let path_segments: Vec<&str> = path.split('/').collect();
-    dbg!(&path_segments);
-    let mut response = match (parts.method, path_segments.as_slice()) {
-        (Method::POST, &["", id]) => post_fallback(id, body, pool).await,
-        (Method::GET, &["", id, "receive"]) => get_request(id, pool).await,
-        (Method::POST, &["", id, "receive"]) => post_payjoin(id, body, pool).await,
+    const KEY_ID: KeyId = 1;
+    const KEM: Kem = Kem::X25519Sha256;
+    const SYMMETRIC: &[SymmetricSuite] =
+        &[SymmetricSuite::new(Kdf::HkdfSha256, Aead::ChaCha20Poly1305)];
+
+    // create or read from file
+    let server_config = ohttp::KeyConfig::new(KEY_ID, KEM, Vec::from(SYMMETRIC))?;
+    let encoded_config = server_config.encode()?;
+    let b64_config = base64::encode_config(
+        encoded_config,
+        base64::Config::new(base64::CharacterSet::UrlSafe, false),
+    );
+    tracing::info!("ohttp server config base64 UrlSafe: {:?}", b64_config);
+    Ok(ohttp::Server::new(server_config)?)
+}
+
+async fn handle_ohttp_gateway(
+    req: Request<Body>,
+    pool: DbPool,
+    ohttp: Arc<ohttp::Server>,
+) -> Result<Response<Body>> {
+    let mut response = match (req.method(), req.uri().path()) {
+        (&Method::POST, "/") => handle_ohttp(req.into_body(), pool, ohttp).await,
+        (&Method::GET, "/ohttp-config") => Ok(get_ohttp_config(ohttp_config(&ohttp)?).await),
         _ => Ok(not_found()),
     }
     .unwrap_or_else(|e| e.to_response());
@@ -58,6 +79,57 @@ async fn handle_web_req(pool: DbPool, req: Request<Body>) -> Result<Response<Bod
         .insert("Access-Control-Allow-Origin", hyper::header::HeaderValue::from_static("*"));
 
     Ok(response)
+}
+
+async fn handle_ohttp(
+    body: Body,
+    pool: DbPool,
+    ohttp: Arc<ohttp::Server>,
+) -> Result<Response<Body>, HandlerError> {
+    // decapsulate
+    let ohttp_body =
+        hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
+
+    let (bhttp_req, res_ctx) = ohttp.decapsulate(&ohttp_body).unwrap();
+    let mut cursor = std::io::Cursor::new(bhttp_req);
+    let req = bhttp::Message::read_bhttp(&mut cursor).unwrap();
+    let uri = Uri::builder()
+        .scheme(req.control().scheme().unwrap())
+        .authority(req.control().authority().unwrap())
+        .path_and_query(req.control().path().unwrap())
+        .build()
+        .unwrap();
+    let body = req.content().to_vec();
+    let mut http_req = Request::builder().uri(uri).method(req.control().method().unwrap());
+    for header in req.header().fields() {
+        http_req = http_req.header(header.name(), header.value())
+    }
+    let request = http_req.body(Body::from(body)).unwrap();
+
+    let response = handle_http(pool, request).await?;
+
+    let (parts, body) = response.into_parts();
+    let mut bhttp_res = bhttp::Message::response(parts.status.as_u16());
+    let full_body = hyper::body::to_bytes(body).await.unwrap();
+    bhttp_res.write_content(&full_body);
+    let mut bhttp_bytes = Vec::new();
+    bhttp_res.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes).unwrap();
+    let ohttp_res = res_ctx.encapsulate(&bhttp_bytes).unwrap();
+    Ok(Response::new(Body::from(ohttp_res)))
+}
+
+async fn handle_http(pool: DbPool, req: Request<Body>) -> Result<Response<Body>, HandlerError> {
+    let path = req.uri().path().to_string();
+    let (parts, body) = req.into_parts();
+
+    let path_segments: Vec<&str> = path.split('/').collect();
+    dbg!(&path_segments);
+    match (parts.method, path_segments.as_slice()) {
+        (Method::POST, &["", id]) => post_fallback(id, body, pool).await,
+        (Method::GET, &["", id, "receive"]) => get_request(id, pool).await,
+        (Method::POST, &["", id, "receive"]) => post_payjoin(id, body, pool).await,
+        _ => Ok(not_found()),
+    }
 }
 
 enum HandlerError {
@@ -133,4 +205,16 @@ fn not_found() -> Response<Body> {
     res
 }
 
+async fn get_ohttp_config(config: String) -> Response<Body> {
+    let mut res = Response::default();
+    *res.body_mut() = Body::from(config);
+    res
+}
+
 fn shorten_string(input: &str) -> String { input.chars().take(8).collect() }
+
+fn ohttp_config(server: &ohttp::Server) -> Result<String> {
+    let b64_config = base64::Config::new(base64::CharacterSet::UrlSafe, false);
+    let encoded_config = server.config().encode()?;
+    Ok(base64::encode_config(encoded_config, b64_config))
+}
