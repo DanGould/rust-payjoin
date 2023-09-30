@@ -402,13 +402,15 @@ impl<'a> RequestContext<'a> {
             self.fee_contribution,
             self.min_fee_rate,
         );
-        let (body, e) = crate::v2::encrypt_message_a(&body, rs);
+        let (body, e) =
+            crate::v2::encrypt_message_a(&body, rs).map_err(InternalCreateRequestError::V2)?;
         let (body, ohttp_res) = crate::v2::ohttp_encapsulate(
             &self.uri.extras.ohttp_config.clone().unwrap().encode().unwrap(),
             "POST",
             url.as_str(),
             Some(&body),
-        );
+        )
+        .map_err(InternalCreateRequestError::V2)?;
         log::debug!("ohttp_proxy_url: {:?}", ohttp_proxy_url);
         let url = Url::parse(ohttp_proxy_url).map_err(InternalCreateRequestError::Url)?;
         Ok((
@@ -505,12 +507,14 @@ impl ContextV2 {
     ) -> Result<Option<Psbt>, ValidationError> {
         let mut res_buf = Vec::new();
         response.read_to_end(&mut res_buf).map_err(InternalValidationError::Io)?;
-        let mut res_buf = crate::v2::ohttp_decapsulate(self.ohttp_res, &res_buf);
-        let psbt = crate::v2::decrypt_message_b(&mut res_buf, self.e);
+        let mut res_buf = crate::v2::ohttp_decapsulate(self.ohttp_res, &res_buf)
+            .map_err(InternalValidationError::V2)?;
+        let psbt = crate::v2::decrypt_message_b(&mut res_buf, self.e)
+            .map_err(InternalValidationError::V2)?;
         if psbt.is_empty() {
             return Ok(None);
         }
-        let proposal = Psbt::deserialize(&psbt).expect("PSBT deserialization failed");
+        let proposal = Psbt::deserialize(&psbt).map_err(InternalValidationError::Psbt)?;
         let processed_proposal = self.context_v1.process_proposal(proposal)?;
         Ok(Some(processed_proposal))
     }
@@ -528,7 +532,7 @@ impl ContextV1 {
     ) -> Result<Psbt, ValidationError> {
         let mut res_str = String::new();
         response.read_to_string(&mut res_str).map_err(InternalValidationError::Io)?;
-        let proposal = Psbt::from_str(&res_str).map_err(InternalValidationError::Psbt)?;
+        let proposal = Psbt::from_str(&res_str).map_err(InternalValidationError::PsbtParse)?;
 
         // process in non-generic function
         self.process_proposal(proposal).map(Into::into).map_err(Into::into)

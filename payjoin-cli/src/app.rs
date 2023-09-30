@@ -91,13 +91,14 @@ impl App {
         &self,
         client: &reqwest::blocking::Client,
         enroll_context: &mut EnrollContext,
-    ) -> Result<UncheckedProposal, reqwest::Error> {
+    ) -> Result<UncheckedProposal> {
         loop {
-            let (enroll_body, context) = enroll_context.enroll_body();
+            let (enroll_body, context) = enroll_context.enroll_body()?;
             let ohttp_response = client.post(&self.config.ohttp_proxy).body(enroll_body).send()?;
             let ohttp_response = ohttp_response.bytes()?;
-            let proposal =
-                enroll_context.parse_relay_response(ohttp_response.as_ref(), context).unwrap();
+            let proposal = enroll_context
+                .parse_relay_response(ohttp_response.as_ref(), context)
+                .map_err(|e| anyhow!("parse error {}", e))?;
             match proposal {
                 Some(proposal) => return Ok(proposal),
                 None => std::thread::sleep(std::time::Duration::from_secs(5)),
@@ -235,8 +236,11 @@ impl App {
             .map_err(|e| anyhow!("Failed to parse into UncheckedProposal {}", e))?;
 
         let receive_endpoint = format!("{}/{}", self.config.pj_endpoint, context.receive_subdir());
-        let (body, ohttp_ctx) =
-            payjoin_proposal.extract_v2_req(&self.config.ohttp_config, &receive_endpoint);
+        let ohttp_config =
+            bitcoin::base64::decode_config(&self.config.ohttp_config, base64::URL_SAFE)?;
+        let (body, ohttp_ctx) = payjoin_proposal
+            .extract_v2_req(&ohttp_config, &receive_endpoint)
+            .map_err(|e| anyhow!("v2 req extraction failed {}", e))?;
         let res = client
             .post(&self.config.ohttp_proxy)
             .body(body)

@@ -54,8 +54,11 @@ fn init_ohttp() -> Result<ohttp::Server> {
     let server_config = ohttp::KeyConfig::new(KEY_ID, KEM, Vec::from(SYMMETRIC))?;
     let encoded_config = server_config.encode()?;
     let b64_config = base64::encode_config(
-        encoded_config,
-        base64::Config::new(base64::CharacterSet::UrlSafe, false),
+        &encoded_config,
+        base64::Config::new(
+            base64::CharacterSet::UrlSafe,
+            false,
+        ),
     );
     tracing::info!("ohttp server config base64 UrlSafe: {:?}", b64_config);
     Ok(ohttp::Server::new(server_config)?)
@@ -88,33 +91,32 @@ async fn handle_ohttp(
 ) -> Result<Response<Body>, HandlerError> {
     // decapsulate
     let ohttp_body =
-        hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
+        hyper::body::to_bytes(body).await.map_err(|e| HandlerError::BadRequest(e.into()))?;
 
-    let (bhttp_req, res_ctx) = ohttp.decapsulate(&ohttp_body).unwrap();
+    let (bhttp_req, res_ctx) = ohttp.decapsulate(&ohttp_body).map_err(|e| HandlerError::BadRequest(e.into()))?;
     let mut cursor = std::io::Cursor::new(bhttp_req);
-    let req = bhttp::Message::read_bhttp(&mut cursor).unwrap();
+    let req = bhttp::Message::read_bhttp(&mut cursor).map_err(|e| HandlerError::BadRequest(e.into()))?;
     let uri = Uri::builder()
-        .scheme(req.control().scheme().unwrap())
-        .authority(req.control().authority().unwrap())
-        .path_and_query(req.control().path().unwrap())
-        .build()
-        .unwrap();
+        .scheme(req.control().scheme().unwrap_or_default())
+        .authority(req.control().authority().unwrap_or_default())
+        .path_and_query(req.control().path().unwrap_or_default())
+        .build()?;
     let body = req.content().to_vec();
-    let mut http_req = Request::builder().uri(uri).method(req.control().method().unwrap());
+    let mut http_req = Request::builder().uri(uri).method(req.control().method().unwrap_or_default());
     for header in req.header().fields() {
         http_req = http_req.header(header.name(), header.value())
     }
-    let request = http_req.body(Body::from(body)).unwrap();
+    let request = http_req.body(Body::from(body))?;
 
     let response = handle_http(pool, request).await?;
 
     let (parts, body) = response.into_parts();
     let mut bhttp_res = bhttp::Message::response(parts.status.as_u16());
-    let full_body = hyper::body::to_bytes(body).await.unwrap();
+    let full_body = hyper::body::to_bytes(body).await.map_err(|e| HandlerError::InternalServerError(e.into()))?;
     bhttp_res.write_content(&full_body);
     let mut bhttp_bytes = Vec::new();
-    bhttp_res.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes).unwrap();
-    let ohttp_res = res_ctx.encapsulate(&bhttp_bytes).unwrap();
+    bhttp_res.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes).map_err(|e| HandlerError::InternalServerError(e.into()))?;
+    let ohttp_res = res_ctx.encapsulate(&bhttp_bytes).map_err(|e| HandlerError::InternalServerError(e.into()))?;
     Ok(Response::new(Body::from(ohttp_res)))
 }
 
@@ -134,16 +136,22 @@ async fn handle_http(pool: DbPool, req: Request<Body>) -> Result<Response<Body>,
 
 enum HandlerError {
     PayloadTooLarge,
-    InternalServerError,
-    BadRequest,
+    InternalServerError(Box<dyn std::error::Error>),
+    BadRequest(Box<dyn std::error::Error>),
 }
 
 impl HandlerError {
     fn to_response(&self) -> Response<Body> {
         let status = match self {
             HandlerError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::BadRequest => StatusCode::BAD_REQUEST,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::InternalServerError(e) => {
+                tracing::error!("Internal server error: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            Self::BadRequest(e) => {
+                tracing::error!("Bad request: {}", e);
+                StatusCode::BAD_REQUEST
+            },
         };
 
         let mut res = Response::default();
@@ -153,12 +161,12 @@ impl HandlerError {
 }
 
 impl From<hyper::http::Error> for HandlerError {
-    fn from(_: hyper::http::Error) -> Self { HandlerError::InternalServerError }
+    fn from(e: hyper::http::Error) -> Self { HandlerError::InternalServerError(e.into()) }
 }
 
 async fn post_fallback(id: &str, body: Body, pool: DbPool) -> Result<Response<Body>, HandlerError> {
     let id = shorten_string(id);
-    let req = hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
+    let req = hyper::body::to_bytes(body).await.map_err(|e| HandlerError::InternalServerError(e.into()))?;
 
     if req.len() > MAX_BUFFER_SIZE {
         return Err(HandlerError::PayloadTooLarge);
@@ -166,13 +174,13 @@ async fn post_fallback(id: &str, body: Body, pool: DbPool) -> Result<Response<Bo
 
     match pool.push_req(&id, req.into()).await {
         Ok(_) => (),
-        Err(_) => return Err(HandlerError::BadRequest),
+        Err(e) => return Err(HandlerError::BadRequest(e.into())),
     };
 
     match pool.peek_res(&id).await {
         Some(result) => match result {
             Ok(buffered_res) => Ok(Response::new(Body::from(buffered_res))),
-            Err(_) => Err(HandlerError::BadRequest),
+            Err(e) => Err(HandlerError::BadRequest(e.into())),
         },
         None => Ok(Response::builder().status(StatusCode::ACCEPTED).body(Body::empty())?),
     }
@@ -183,7 +191,7 @@ async fn get_request(id: &str, pool: DbPool) -> Result<Response<Body>, HandlerEr
     match pool.peek_req(&id).await {
         Some(result) => match result {
             Ok(buffered_req) => Ok(Response::new(Body::from(buffered_req))),
-            Err(_) => Err(HandlerError::BadRequest),
+            Err(e) => Err(HandlerError::BadRequest(e.into())),
         },
         None => Ok(Response::builder().status(StatusCode::ACCEPTED).body(Body::empty())?),
     }
@@ -191,11 +199,11 @@ async fn get_request(id: &str, pool: DbPool) -> Result<Response<Body>, HandlerEr
 
 async fn post_payjoin(id: &str, body: Body, pool: DbPool) -> Result<Response<Body>, HandlerError> {
     let id = shorten_string(id);
-    let res = hyper::body::to_bytes(body).await.map_err(|_| HandlerError::InternalServerError)?;
+    let res = hyper::body::to_bytes(body).await.map_err(|e| HandlerError::InternalServerError(e.into()))?;
 
     match pool.push_res(&id, res.into()).await {
         Ok(_) => Ok(Response::builder().status(StatusCode::NO_CONTENT).body(Body::empty())?),
-        Err(_) => Err(HandlerError::BadRequest),
+        Err(e) => Err(HandlerError::BadRequest(e.into())),
     }
 }
 
