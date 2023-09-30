@@ -68,8 +68,8 @@ fn init_ohttp() -> Result<ohttp::Server> {
         &[SymmetricSuite::new(Kdf::HkdfSha256, Aead::ChaCha20Poly1305)];
 
     // create or read from file
-    let server_config = ohttp::KeyConfig::new(KEY_ID, KEM, Vec::from(SYMMETRIC)).unwrap();
-    let encoded_config = server_config.encode().unwrap();
+    let server_config = ohttp::KeyConfig::new(KEY_ID, KEM, Vec::from(SYMMETRIC))?;
+    let encoded_config = server_config.encode()?;
     let b64_config = payjoin::bitcoin::base64::encode_config(
         &encoded_config,
         payjoin::bitcoin::base64::Config::new(
@@ -83,43 +83,53 @@ fn init_ohttp() -> Result<ohttp::Server> {
 
 async fn handle_ohttp(
     enc_request: Bytes,
-    mut target: Router,
+    target: Router,
     ohttp: Arc<ohttp::Server>,
 ) -> (StatusCode, Vec<u8>) {
+    match handle_ohttp_inner(enc_request, target, ohttp).await {
+        Ok(res) => res,
+        Err(e) => {
+            tracing::error!("ohttp error: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, vec![])
+        }
+    }
+}
+
+async fn handle_ohttp_inner(
+    enc_request: Bytes,
+    mut target: Router,
+    ohttp: Arc<ohttp::Server>,
+) -> Result<(StatusCode, Vec<u8>)> {
     use axum::body::Body;
     use http::Uri;
     use tower_service::Service;
 
-    // decapsulate
-    let (bhttp_req, res_ctx) = ohttp.decapsulate(&enc_request).unwrap();
+    let (bhttp_req, res_ctx) = ohttp.decapsulate(&enc_request)?;
     let mut cursor = std::io::Cursor::new(bhttp_req);
-    let req = bhttp::Message::read_bhttp(&mut cursor).unwrap();
-    // let parsed_request: httparse::Request = httparse::Request::new(&mut vec![]).parse(cursor).unwrap();
-    // // handle request
-    // Request::new
+    let req = bhttp::Message::read_bhttp(&mut cursor)?;
     let uri = Uri::builder()
-        .scheme(req.control().scheme().unwrap())
-        .authority(req.control().authority().unwrap())
-        .path_and_query(req.control().path().unwrap())
-        .build()
-        .unwrap();
+        .scheme(req.control().scheme().unwrap_or_default())
+        .authority(req.control().authority().unwrap_or_default())
+        .path_and_query(req.control().path().unwrap_or_default())
+        .build()?;
     let body = req.content().to_vec();
-    let mut request = Request::builder().uri(uri).method(req.control().method().unwrap());
+    let mut request =
+        Request::builder().uri(uri).method(req.control().method().unwrap_or_default());
     for header in req.header().fields() {
         request = request.header(header.name(), header.value())
     }
-    let request = request.body(Body::from(body)).unwrap();
+    let request = request.body(Body::from(body))?;
 
-    let response = target.call(request).await.unwrap();
+    let response = target.call(request).await?;
 
     let (parts, body) = response.into_parts();
     let mut bhttp_res = bhttp::Message::response(parts.status.as_u16());
-    let full_body = hyper::body::to_bytes(body).await.unwrap();
+    let full_body = hyper::body::to_bytes(body).await?;
     bhttp_res.write_content(&full_body);
     let mut bhttp_bytes = Vec::new();
-    bhttp_res.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes).unwrap();
-    let ohttp_res = res_ctx.encapsulate(&bhttp_bytes).unwrap();
-    (StatusCode::OK, ohttp_res)
+    bhttp_res.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes)?;
+    let ohttp_res = res_ctx.encapsulate(&bhttp_bytes)?;
+    Ok((StatusCode::OK, ohttp_res))
 }
 
 fn ohttp_config(server: &ohttp::Server) -> Result<String> {
