@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 native-tls-vendored = ["reqwest/native-tls-vendored"]
 local-https = ["rcgen", "rouille/ssl"]
+v2 = ["payjoin/v2"]
 
 [dependencies]
 anyhow = "1.0.70"

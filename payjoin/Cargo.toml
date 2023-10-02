@@ -16,6 +16,7 @@ edition = "2018"
 send = []
 receive = ["rand"]
 base64 = ["bitcoin/base64"]
+v2 = []
 
 [dependencies]
 bitcoin = { version = "0.30.0", features = ["base64"] }
