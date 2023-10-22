@@ -307,8 +307,14 @@ impl EnrollContext {
         let ohttp_config = base64::decode_config(ohttp_config_base64, base64::URL_SAFE).unwrap();
         let ohttp_proxy = Url::parse(ohttp_proxy_url).unwrap();
         let relay_url = Url::parse(relay_url).unwrap();
+        // TODO REMOVE! FOR DEMO PURPOSES ONLY!
         let secp = secp256k1::Secp256k1::new();
-        let (sk, _) = secp.generate_keypair(&mut rand::rngs::OsRng);
+        //let (sk, _) = secp.generate_keypair(&mut rand::rngs::OsRng);
+        let sk = secp256k1::SecretKey::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000011",
+        )
+        .unwrap();
+
         EnrollContext {
             ohttp_config,
             ohttp_proxy,
