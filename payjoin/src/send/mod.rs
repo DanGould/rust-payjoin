@@ -515,6 +515,7 @@ impl ContextV2 {
             return Ok(None);
         }
         let proposal = Psbt::deserialize(&psbt).map_err(InternalValidationError::Psbt)?;
+        dbg!(&proposal);
         let processed_proposal = self.context_v1.process_proposal(proposal)?;
         Ok(Some(processed_proposal))
     }

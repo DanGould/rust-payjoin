@@ -654,6 +654,7 @@ impl OutputsUnknown {
 }
 
 /// A mutable checked proposal that the receiver may contribute inputs to to make a payjoin.
+#[derive(Debug)]
 pub struct ProvisionalProposal {
     original_psbt: Psbt,
     payjoin_psbt: Psbt,
