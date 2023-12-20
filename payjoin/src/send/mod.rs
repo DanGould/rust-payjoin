@@ -313,14 +313,13 @@ impl<'a> RequestBuilder<'a> {
             self.psbt.validate().map_err(InternalCreateRequestError::InconsistentOriginalPsbt)?;
         psbt.validate_input_utxos(true)
             .map_err(InternalCreateRequestError::InvalidOriginalInput)?;
-        let endpoint = self.uri.endpoint().clone();
-        #[cfg(feature = "v2")]
-        let ohttp_config = self.uri.ohttp_config();
+        let uri = self.uri;
+        let endpoint = uri.endpoint();
         let disable_output_substitution =
-            self.uri.disable_output_substitution() || self.disable_output_substitution;
-        let payee = self.uri.address().script_pubkey();
+            uri.disable_output_substitution() || self.disable_output_substitution;
+        let payee = uri.address().script_pubkey();
 
-        check_single_payee(&psbt, &payee, self.uri.amount())?;
+        check_single_payee(&psbt, &payee, uri.amount())?;
         let fee_contribution = determine_fee_contribution(
             &psbt,
             &payee,
@@ -346,7 +345,7 @@ impl<'a> RequestBuilder<'a> {
             psbt,
             endpoint: endpoint.unwrap().clone(),
             #[cfg(feature = "v2")]
-            ohttp_config,
+            ohttp_config: uri.ohttp_config(),
             disable_output_substitution,
             fee_contribution,
             payee,

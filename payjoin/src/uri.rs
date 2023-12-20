@@ -108,7 +108,7 @@ pub enum Payjoin {
 
 impl Payjoin {
     /// Check if payjoin is supported.
-    pub fn pj_is_supported(&self) -> bool {
+    fn pj_is_supported(&self) -> bool {
         match self {
             Payjoin::Supported(_) => true,
             Payjoin::V2Only(_) => true,
@@ -140,14 +140,32 @@ impl Payjoin {
 }
 
 pub struct PayjoinParams {
-    pub(crate) endpoint: Url,
-    pub(crate) disable_output_substitution: bool,
+    endpoint: Url,
+    disable_output_substitution: bool,
     #[cfg(feature = "v2")]
-    pub(crate) ohttp_config: Option<ohttp::KeyConfig>,
+    ohttp_config: Option<ohttp::KeyConfig>,
 }
 
 impl PayjoinParams {
     pub fn is_output_substitution_disabled(&self) -> bool { self.disable_output_substitution }
+}
+
+impl From<bip21::Uri<'_, NetworkChecked, PayjoinParams>>
+    for PayjoinUri<'_, NetworkChecked, Payjoin>
+{
+    fn from(value: bip21::Uri<'_, NetworkChecked, PayjoinParams>) -> Self {
+        let pj_uri = PjUriBuilder::new(
+            value.address,
+            value.extras.endpoint,
+            value.amount,
+            None,
+            None,
+            #[cfg(feature = "v2")]
+            value.extras.ohttp_config.unwrap(),
+        )
+        .build();
+        pj_uri
+    }
 }
 
 impl bip21::de::DeserializationError for Payjoin {
@@ -353,6 +371,75 @@ impl<'a> bip21::SerializeParams for &'a PayjoinParams {
         .into_iter()
     }
 }
+/// Builder for `bip21::Uri` with `PayjoinParams`.
+///
+/// `amount` parameter is optional and can be changed with `[PjUriBuilder::amount]`.
+///
+/// `ohttp_config` parameter is required only for v2 payjoin.
+pub struct PjUriBuilder {
+    /// Address you want to receive funds to.
+    ///
+    /// Must be a valid bitcoin address.
+    address: Address,
+    /// Payjoing endpoint url listening for payjoin requests.
+    ///
+    /// Must be a valid url that can be parsed
+    /// with `[Payjoin::Url::parse]`.
+    pj_endpoint: Url,
+    /// Amount you want to receive.
+    ///
+    /// If `None` the amount will be left unspecified.
+    amount: Option<Amount>,
+    /// Message
+    message: Option<String>,
+    /// Label
+    pub(crate) label: Option<String>,
+    #[cfg(feature = "v2")]
+    /// Config for ohttp.
+    ///
+    /// `[PjUriBuilder::decode_ohttp_config]` can be used to convert
+    /// base64 string to `ohttp::KeyConfig`.
+    ///
+    /// Required only for v2 payjoin.
+    ohttp_config: ohttp::KeyConfig,
+}
+
+impl PjUriBuilder {
+    /// Create a new `PjUriBuilder` with required parameters.
+    pub fn new(
+        address: Address,
+        pj_endpoint: Url,
+        amount: Option<Amount>,
+        message: Option<String>,
+        label: Option<String>,
+        #[cfg(feature = "v2")] ohttp_config: ohttp::KeyConfig,
+    ) -> Self {
+        Self {
+            address,
+            pj_endpoint,
+            amount,
+            message,
+            label,
+            #[cfg(feature = "v2")]
+            ohttp_config,
+        }
+    }
+    pub fn build<'a>(self) -> PayjoinUri<'a, NetworkChecked, Payjoin> {
+        let pj_params = PayjoinParams {
+            endpoint: self.pj_endpoint,
+            disable_output_substitution: false,
+            #[cfg(feature = "v2")]
+            ohttp_config: Some(self.ohttp_config),
+        };
+        let pj_extras = Payjoin::Supported(pj_params);
+        let mut uri = PayjoinUri::with_extras(self.address, pj_extras);
+        let amount = self.amount.clone();
+        uri.set_amount(&amount);
+        uri.set_label(self.label.unwrap_or_default());
+        uri.set_message(self.message.unwrap_or_default());
+        uri
+    }
+}
 
 #[cfg(feature = "v2")]
 fn encode_ohttp_config(config: &ohttp::KeyConfig) -> Result<String, PjParseError> {
@@ -404,9 +491,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "v2"))]
     fn test_valid_uris() {
-        let https = "https://example.com";
-        let onion = "http://vjdpwgybvubne5hda6v4c5iaeeevhge6jvo3w2cl6eocbwwvwxp7b7qd.onion";
+        use std::str::FromStr;
+
+        use url::Url;
+
+        use crate::PjUriBuilder;
+        let https = "https://example.com/";
+        let onion = "http://vjdpwgybvubne5hda6v4c5iaeeevhge6jvo3w2cl6eocbwwvwxp7b7qd.onion/";
 
         let base58 = "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX";
         let bech32_upper = "BITCOIN:TB1Q6D3A2W975YNY0ASUVD9A67NER4NKS58FF0Q8G4";
@@ -418,6 +511,24 @@ mod tests {
                 // TODO shuffle params
                 let uri = format!("{}?amount=1&pj={}", address, pj);
                 assert!(PayjoinUri::try_from(&*uri).is_ok());
+            }
+        }
+
+        let base58 = "12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX";
+        let bech32_upper = "TB1Q6D3A2W975YNY0ASUVD9A67NER4NKS58FF0Q8G4";
+        let bech32_lower = "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4";
+
+        for address in [base58, bech32_upper, bech32_lower].iter() {
+            for pj in [https, onion].iter() {
+                let address = bitcoin::Address::from_str(address).unwrap().assume_checked();
+                let amount = Some(bitcoin::Amount::ONE_BTC);
+                let uri =
+                    PjUriBuilder::new(address.clone(), Url::parse(pj).unwrap(), amount, None, None)
+                        .build();
+                assert_eq!(uri.address(), &address);
+                assert_eq!(uri.amount().unwrap(), bitcoin::Amount::ONE_BTC);
+                assert_eq!(uri.pj_is_supported(), true);
+                assert_eq!(uri.endpoint().unwrap().to_string(), pj.to_string());
             }
         }
     }
