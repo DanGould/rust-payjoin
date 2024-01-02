@@ -5,13 +5,20 @@ use bitcoin::address::{Error, NetworkChecked, NetworkUnchecked};
 use bitcoin::Network;
 use url::Url;
 
+/// Payjoin enum represents a payjoin object.
+///
+/// Used in building a `bip21::Uri` with `uri::PayjoinParams`.
 pub enum Payjoin {
+    /// Represents a supported payjoin endpoint.
     Supported(PayjoinParams),
+    /// Represents a payjoin endpoint that supports only v2.
     V2Only(PayjoinParams),
+    /// Represents a payjoin endpoint that is not supported.
     Unsupported,
 }
 
 impl Payjoin {
+    /// Check if payjoin is supported.
     pub fn pj_is_supported(&self) -> bool {
         match self {
             Payjoin::Supported(_) => true,
