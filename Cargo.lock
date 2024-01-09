@@ -1619,6 +1619,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ohttp"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d404c89598adef31d0de34addb7c0d8760bf79f2ce0c94b87f2120f982639b3"
+dependencies = [
+ "aead 0.4.3",
+ "aes-gcm 0.9.4",
+ "byteorder",
+ "chacha20poly1305 0.8.0",
+ "hex",
+ "hkdf 0.11.0",
+ "hpke",
+ "lazy_static",
+ "log",
+ "rand",
+ "serde",
+ "serde_derive",
+ "sha2 0.9.9",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1704,7 +1727,7 @@ dependencies = [
  "chacha20poly1305 0.10.1",
  "env_logger",
  "log",
- "ohttp",
+ "ohttp 0.5.0",
  "rand",
  "rustls",
  "serde",
@@ -1748,7 +1771,7 @@ dependencies = [
  "bitcoin",
  "hyper",
  "hyper-rustls",
- "ohttp",
+ "ohttp 0.4.0",
  "rcgen",
  "rustls",
  "sqlx",
