@@ -1,9 +1,98 @@
 use std::borrow::Cow;
 use std::convert::TryFrom;
 
-use bitcoin::address::{Error, NetworkChecked, NetworkUnchecked};
-use bitcoin::Network;
+use bip21::{DeserializationError, DeserializeParams};
+use bitcoin::address::{Error, NetworkChecked, NetworkUnchecked, NetworkValidation};
+use bitcoin::{Address, Amount, Network};
 use url::Url;
+
+/// Payjoin Uri represents a bip21 uri with additional
+/// payjoin parameters.
+pub struct PayjoinUri<
+    'a,
+    N: NetworkValidation,
+    P: DeserializeParams<'a> + DeserializationError + Sized,
+> {
+    inner: bip21::Uri<'a, N, P>,
+}
+
+impl<'a, N: NetworkValidation, P: DeserializeParams<'a> + DeserializationError + Sized>
+    From<bip21::Uri<'a, N, P>> for PayjoinUri<'a, N, P>
+{
+    fn from(value: bip21::Uri<'a, N, P>) -> Self { Self { inner: value } }
+}
+
+impl<'a> PayjoinUri<'a, NetworkUnchecked, Payjoin> {
+    /// Marks network of this address as checked.
+    pub fn assume_checked(self) -> PayjoinUri<'a, NetworkChecked, Payjoin> {
+        let checked_address = self.inner.address.assume_checked();
+        let mut uri = bip21::Uri::with_extras(checked_address, self.inner.extras);
+        uri.amount = self.inner.amount;
+        uri.label = self.inner.label;
+        uri.message = self.inner.message;
+        uri.into()
+    }
+    /// Checks whether network of this address is as required.
+    pub fn require_network(
+        self,
+        network: Network,
+    ) -> Result<PayjoinUri<'a, NetworkChecked, Payjoin>, Error> {
+        let checked_address = self.inner.address.require_network(network)?;
+        let mut uri = bip21::Uri::with_extras(checked_address, self.inner.extras);
+        uri.amount = self.inner.amount;
+        uri.label = self.inner.label;
+        uri.message = self.inner.message;
+        Ok(uri.into())
+    }
+}
+
+impl<'a, N: NetworkValidation> PayjoinUri<'a, N, Payjoin> {
+    /// Returns the receiver bitcoin address from this uri.
+    pub fn address(&self) -> &Address<N> { &self.inner.address }
+    /// Returns the amount in bitcoin from this uri.
+    pub fn amount(&self) -> Option<Amount> { self.inner.amount }
+    /// Returns the endpoint url from this uri.
+    pub fn endpoint(&self) -> Option<&Url> { self.inner.extras.endpoint() }
+    /// Sets the amount in bitcoin for this uri.
+    pub fn set_amount(&mut self, amount: &Option<Amount>) { self.inner.amount = *amount; }
+    /// Sets the label for this uri.
+    pub fn set_label(&mut self, label: String) {
+        self.inner.label = Some(bip21::Param::from(label));
+    }
+    /// Sets the message for this uri.
+    pub fn set_message(&mut self, message: String) {
+        self.inner.message = Some(bip21::Param::from(message));
+    }
+    /// Returns whether output substitution is disabled for this uri.
+    pub fn disable_output_substitution(&self) -> bool {
+        self.inner.extras.disable_output_substitution()
+    }
+    /// Returns whether payjoin is supported for this uri.
+    pub fn pj_is_supported(&self) -> bool { self.inner.extras.pj_is_supported() }
+    #[cfg(feature = "v2")]
+    /// Returns the ohttp config for this uri.
+    pub fn ohttp_config(&self) -> Option<ohttp::KeyConfig> { self.inner.extras.ohttp_config() }
+}
+
+impl<'a> PayjoinUri<'a, NetworkChecked, Payjoin> {
+    fn with_extras(address: Address<NetworkChecked>, extras: Payjoin) -> Self {
+        Self { inner: bip21::Uri::with_extras(address, extras) }
+    }
+}
+
+impl<'a> TryFrom<&'a str> for PayjoinUri<'a, NetworkUnchecked, Payjoin> {
+    type Error = PjParseError;
+
+    fn try_from(s: &'a str) -> Result<Self, Self::Error> {
+        let uri =
+            bip21::Uri::try_from(s).map_err(|_e| PjParseError(InternalPjParseError::BadPjOs))?;
+        Ok(uri.into())
+    }
+}
+
+impl ToString for PayjoinUri<'_, NetworkChecked, Payjoin> {
+    fn to_string(&self) -> String { self.inner.to_string() }
+}
 
 /// Payjoin enum represents a payjoin object.
 ///
