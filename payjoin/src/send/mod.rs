@@ -152,9 +152,8 @@ use url::Url;
 
 use crate::input_type::InputType;
 use crate::psbt::PsbtExt;
-use crate::uri::UriExt;
 use crate::weight::{varint_size, ComputeWeight};
-use crate::PjUri;
+use crate::Uri;
 
 // See usize casts
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
@@ -166,7 +165,7 @@ type InternalResult<T> = Result<T, InternalValidationError>;
 
 pub struct RequestBuilder<'a> {
     psbt: Psbt,
-    uri: PjUri<'a>,
+    uri: Uri<'a, NetworkChecked>,
     disable_output_substitution: bool,
     fee_contribution: Option<(bitcoin::Amount, Option<usize>)>,
     clamp_fee_contribution: bool,
@@ -183,9 +182,6 @@ impl<'a> RequestBuilder<'a> {
         psbt: Psbt,
         uri: crate::Uri<'a, NetworkChecked>,
     ) -> Result<Self, CreateRequestError> {
-        let uri = uri
-            .check_pj_supported()
-            .map_err(|_| InternalCreateRequestError::UriDoesNotSupportPayjoin)?;
         Ok(Self {
             psbt,
             uri,

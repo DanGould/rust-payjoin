@@ -41,10 +41,7 @@
 //!     endpoint_arg
 //! );
 //! let pj_uri = Uri::from_str(&pj_uri_string)
-//!     .map_err(|e| anyhow!("Constructed a bad URI string from args: {}", e))?;
-//! let _pj_uri = pj_uri
-//!     .check_pj_supported()
-//!     .map_err(|e| anyhow!("Constructed URI does not support payjoin: {}", e))?;
+//!     .map_err(|e| anyhow!("Constructed a bad payjoin URI string from args: {}", e))?;
 //! ```
 //!
 //! ### 2. Listen for a sender's request on the `pj` endpoint
