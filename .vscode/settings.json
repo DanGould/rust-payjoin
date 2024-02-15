@@ -1,0 +1,11 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./payjoin/Cargo.toml"
+    ],
+    "rust-analyzer.cargo.features": [
+        "send",
+        "receive",
+        "v2",
+        "danger-local-https"
+    ]
+}
