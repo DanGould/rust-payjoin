@@ -73,12 +73,11 @@ impl AppTrait for App {
     async fn receive_payjoin(self, amount_arg: &str, is_retry: bool) -> Result<()> {
         use payjoin::receive::v2::Enroller;
 
-        let ohttp_keys =
-            fetch_ohttp_keys(&self.config.ohttp_relay, &self.config.pj_endpoint).await?;
+        let ohttp_keys = unwrap_ohttp_keys_or_else_fetch(&self.config).await?;
         let mut enrolled = if !is_retry {
             let mut enroller = Enroller::from_directory_config(
                 self.config.pj_endpoint.clone(),
-                &self.config.ohttp_config,
+                ohttp_keys.clone(),
                 self.config.ohttp_relay.clone(),
             );
             let (req, ctx) =
@@ -307,6 +306,14 @@ impl App {
     }
 }
 
+async fn unwrap_ohttp_keys_or_else_fetch(config: &AppConfig) -> Result<payjoin::OhttpKeys> {
+    if let Some(keys) = config.ohttp_keys.clone() {
+        Ok(keys)
+    } else {
+        fetch_ohttp_keys(&config.ohttp_relay, &config.pj_endpoint).await
+    }
+}
+
 async fn fetch_ohttp_keys(proxy: &Url, pj_endpoint: &Url) -> Result<payjoin::OhttpKeys> {
     use anyhow::ensure;
 
@@ -316,7 +323,6 @@ async fn fetch_ohttp_keys(proxy: &Url, pj_endpoint: &Url) -> Result<payjoin::Oht
         http_proxy(&proxy)?.get(ohttp_keys_url.as_str()).call().map_err(map_ureq_err)
     })
     .await??;
-
     ensure!(res.status() == 200, "Failed to connect to target {}", res.status());
     let mut body = Vec::new();
     let _ = res.into_reader().read_to_end(&mut body)?;
