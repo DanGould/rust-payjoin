@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace};
 
 pub const DEFAULT_DIR_PORT: u16 = 8080;
-pub const DEFAULT_DB_HOST: &str = "localhost:6379";
+pub const DEFAULT_DB_HOST: &str = "0.0.0.0:6379";
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 const MAX_BUFFER_SIZE: usize = 65536;
@@ -76,7 +76,10 @@ fn init_server(bind_addr: &SocketAddr) -> Result<Builder<hyper_rustls::TlsAccept
         (Ok(cert), Ok(key)) => (cert, key),
         _ => {
             // Generate new certificate if existing ones are not found or readable
-            let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
+            let cert = rcgen::generate_simple_self_signed(vec![
+                "0.0.0.0".to_string(),
+                "localhost".to_string(),
+            ])?;
             let cert_der = cert.serialize_der()?;
             let key_der = cert.serialize_private_key_der();
 
