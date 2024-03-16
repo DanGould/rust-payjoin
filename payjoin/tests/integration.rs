@@ -253,9 +253,8 @@ mod integration {
         async fn v2_to_v2() {
             std::env::set_var("RUST_LOG", "debug");
             init_tracing();
-            let ohttp_relay =
-                Url::parse(&format!("https://localhost:{}", find_free_port())).unwrap();
-            let directory = Url::parse(&format!("https://localhost:{}", find_free_port())).unwrap();
+            let ohttp_relay = Url::parse(&format!("https://0.0.0.0:{}", find_free_port())).unwrap();
+            let directory = Url::parse(&format!("https://0.0.0.0:{}", find_free_port())).unwrap();
             tokio::select!(
                 _ = ohttp_relay::listen_tcp(ohttp_relay.port().unwrap(), http::Uri::from_str(directory.as_str()).unwrap()) => assert!(false, "Ohttp relay is long running"),
                 _ = init_directory(directory.port().unwrap()) => assert!(false, "Directory server is long running"),
@@ -351,9 +350,8 @@ mod integration {
         async fn v1_to_v2() {
             std::env::set_var("RUST_LOG", "debug");
             init_tracing();
-            let ohttp_relay =
-                Url::parse(&format!("https://localhost:{}", find_free_port())).unwrap();
-            let directory = Url::parse(&format!("https://localhost:{}", find_free_port())).unwrap();
+            let ohttp_relay = Url::parse(&format!("https://0.0.0.0:{}", find_free_port())).unwrap();
+            let directory = Url::parse(&format!("https://0.0.0.0:{}", find_free_port())).unwrap();
             tokio::select!(
                 _ = ohttp_relay::listen_tcp(ohttp_relay.port().unwrap(), http::Uri::from_str(directory.as_str()).unwrap()) => assert!(false, "Ohttp relay is long running"),
                 _ = init_directory(directory.port().unwrap()) => assert!(false, "Directory server is long running"),
