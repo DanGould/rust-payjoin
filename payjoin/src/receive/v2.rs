@@ -275,8 +275,12 @@ impl UncheckedProposal {
         let unchecked_psbt = Psbt::from_str(base64).map_err(InternalRequestError::ParsePsbt)?;
         let psbt = unchecked_psbt.validate().map_err(InternalRequestError::InconsistentPsbt)?;
         log::debug!("Received original psbt: {:?}", psbt);
-        let params = Params::from_query_pairs(url::form_urlencoded::parse(query.as_bytes()))
+        let mut params = Params::from_query_pairs(url::form_urlencoded::parse(query.as_bytes()))
             .map_err(InternalRequestError::SenderParams)?;
+        // V1 senders to V2 receivers must disable output substitution
+        if params.v == 1 && !params.disable_output_substitution {
+            params.disable_output_substitution = true;
+        }
         log::debug!("Received request with params: {:?}", params);
         let inner = super::UncheckedProposal { psbt, params };
         Ok(Self { inner, context })
