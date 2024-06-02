@@ -209,9 +209,9 @@ impl Enrolled {
             log::debug!("response is empty");
             return Ok(None);
         }
-        match String::from_utf8(response.clone()) {
-            Ok(response) => Ok(Some(self.extract_proposal_from_v1(response)?)),
-            Err(_) => Ok(Some(self.extract_proposal_from_v2(response)?)),
+        match crate::v2::decrypt_message_a(&response, self.s.secret_key()) {
+            Ok((payload_bytes, e)) => Ok(Some(self.extract_proposal_from_v2(payload_bytes, e)?)),
+            Err(_) => Ok(Some(self.extract_proposal_from_v1(response)?)),
         }
     }
 
@@ -222,15 +222,15 @@ impl Enrolled {
         Ok(crate::v2::ohttp_encapsulate(&mut self.ohttp_keys, "GET", &fallback_target, None)?)
     }
 
-    fn extract_proposal_from_v1(&self, response: String) -> Result<UncheckedProposal, Error> {
+    fn extract_proposal_from_v1(&self, response: Vec<u8>) -> Result<UncheckedProposal, Error> {
+        let payload = String::from_utf8(response).map_err(InternalRequestError::Utf8)?;
         let context = self.build_context(None);
-        Ok(UncheckedProposal::from_payload(response, context)?)
+        Ok(UncheckedProposal::from_payload(payload, context)?)
     }
 
-    fn extract_proposal_from_v2(&self, response: Vec<u8>) -> Result<UncheckedProposal, Error> {
-        let (payload_bytes, e) = crate::v2::decrypt_message_a(&response, self.s.secret_key())?;
-        let context = self.build_context(Some(e));
+    fn extract_proposal_from_v2(&self, payload_bytes: Vec<u8>, e: PublicKey) -> Result<UncheckedProposal, Error> {
         let payload = String::from_utf8(payload_bytes).map_err(InternalRequestError::Utf8)?;
+        let context = self.build_context(Some(e));
         Ok(UncheckedProposal::from_payload(payload, context)?)
     }
 
@@ -278,7 +278,7 @@ impl UncheckedProposal {
         let mut params = Params::from_query_pairs(url::form_urlencoded::parse(query.as_bytes()))
             .map_err(InternalRequestError::SenderParams)?;
         // V1 senders to V2 receivers must disable output substitution
-        if params.v == 1 && !params.disable_output_substitution {
+        if params.v == 1 {
             params.disable_output_substitution = true;
         }
         log::debug!("Received request with params: {:?}", params);
