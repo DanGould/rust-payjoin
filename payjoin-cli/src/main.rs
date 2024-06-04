@@ -34,6 +34,10 @@ async fn main() -> Result<()> {
             let is_retry = matches.get_one::<bool>("retry").unwrap_or(&false);
             app.receive_payjoin(amount, *is_retry).await?;
         }
+        #[cfg(feature = "v2")]
+        Some(("resume", _)) => {
+            app.resume_payjoins().await?;
+        }
         _ => unreachable!(), // If all subcommands are defined above, anything else is unreachabe!()
     }
 
