@@ -1,33 +1,37 @@
 use bitcoincore_rpc::jsonrpc::serde_json;
 use payjoin::receive::v2::ActiveSession;
 use payjoin::send::RequestContext;
-use sled::IVec;
+use sled::{IVec, Tree};
 use url::Url;
 
 use super::*;
 
 impl Database {
     pub(crate) fn insert_recv_session(&self, session: ActiveSession) -> Result<()> {
+        let recv_tree: Tree = self.0.open_tree("recv_sessions")?;
         let key = &session.public_key().serialize();
         let value = serde_json::to_string(&session).map_err(Error::Serialize)?;
-        self.0.insert(key.as_slice(), IVec::from(value.as_str()))?;
-        self.0.flush()?;
+        recv_tree.insert(key.as_slice(), IVec::from(value.as_str()))?;
+        recv_tree.flush()?;
         Ok(())
     }
 
-    pub(crate) fn get_recv_session(&self) -> Result<Option<ActiveSession>> {
-        if let Some(ivec) = self.0.get("recv_sessions")? {
+    pub(crate) fn get_recv_sessions(&self) -> Result<Vec<ActiveSession>> {
+        let recv_tree: Tree = self.0.open_tree("recv_sessions")?;
+        let mut sessions = Vec::new();
+        for item in recv_tree.iter() {
+            let (_, value) = item?;
             let session: ActiveSession =
-                serde_json::from_slice(&ivec).map_err(Error::Deserialize)?;
-            Ok(Some(session))
-        } else {
-            Ok(None)
+                serde_json::from_slice(&value).map_err(Error::Deserialize)?;
+            sessions.push(session);
         }
+        Ok(sessions)
     }
 
     pub(crate) fn clear_recv_session(&self) -> Result<()> {
-        self.0.remove("recv_sessions")?;
-        self.0.flush()?;
+        let recv_tree: Tree = self.0.open_tree("recv_sessions")?;
+        recv_tree.clear()?;
+        recv_tree.flush()?;
         Ok(())
     }
 
@@ -36,14 +40,28 @@ impl Database {
         session: &mut RequestContext,
         pj_url: &Url,
     ) -> Result<()> {
+        let send_tree: Tree = self.0.open_tree("send_sessions")?;
         let value = serde_json::to_string(session).map_err(Error::Serialize)?;
-        self.0.insert(pj_url.to_string(), IVec::from(value.as_str()))?;
-        self.0.flush()?;
+        send_tree.insert(pj_url.to_string(), IVec::from(value.as_str()))?;
+        send_tree.flush()?;
         Ok(())
     }
 
+    pub(crate) fn get_send_sessions(&self) -> Result<Vec<RequestContext>> {
+        let send_tree: Tree = self.0.open_tree("send_sessions")?;
+        let mut sessions = Vec::new();
+        for item in send_tree.iter() {
+            let (_, value) = item?;
+            let session: RequestContext =
+                serde_json::from_slice(&value).map_err(Error::Deserialize)?;
+            sessions.push(session);
+        }
+        Ok(sessions)
+    }
+
     pub(crate) fn get_send_session(&self, pj_url: &Url) -> Result<Option<RequestContext>> {
-        if let Some(ivec) = self.0.get(pj_url.to_string())? {
+        let send_tree: Tree = self.0.open_tree("send_sessions")?;
+        if let Some(ivec) = send_tree.get(pj_url.to_string())? {
             let session: RequestContext =
                 serde_json::from_slice(&ivec).map_err(Error::Deserialize)?;
             Ok(Some(session))
@@ -53,8 +71,9 @@ impl Database {
     }
 
     pub(crate) fn clear_send_session(&self, pj_url: &Url) -> Result<()> {
-        self.0.remove(pj_url.to_string())?;
-        self.0.flush()?;
+        let send_tree: Tree = self.0.open_tree("send_sessions")?;
+        send_tree.remove(pj_url.to_string())?;
+        send_tree.flush()?;
         Ok(())
     }
 }
