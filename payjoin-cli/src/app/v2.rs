@@ -153,12 +153,11 @@ impl App {
         Ok(())
     }
 
-    pub async fn resume_payjoins(self) -> Result<()> {
-        let sessions = self.db.get_recv_sessions()?;
+    pub async fn resume_payjoins(&self) -> Result<()> {
+        let recv_sessions = self.db.get_recv_sessions()?;
         let self_clone = self.clone();
-        for recv_session in sessions {
+        for recv_session in recv_sessions {
             let self_clone = self_clone.clone();
-            println!("Resuming Payjoin session: {}", recv_session.public_key());
             tokio::task::spawn(async move {
                 self_clone.spawn_payjoin_receiver(recv_session, None).await
             });
