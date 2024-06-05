@@ -74,13 +74,7 @@ impl<'a> RequestBuilder<'a> {
     /// An HTTP client will own the Request data while Context sticks around so
     /// a `(Request, Context)` tuple is returned from `RequestBuilder::build()`
     /// to keep them separated.
-    pub fn from_psbt_and_uri(
-        psbt: Psbt,
-        uri: Uri<'a, NetworkChecked>,
-    ) -> Result<Self, CreateRequestError> {
-        let uri = uri
-            .check_pj_supported()
-            .map_err(|_| InternalCreateRequestError::UriDoesNotSupportPayjoin)?;
+    pub fn from_psbt_and_uri(psbt: Psbt, uri: PjUri<'a>) -> Result<Self, CreateRequestError> {
         Ok(Self {
             psbt,
             uri,
@@ -396,6 +390,8 @@ impl RequestContext {
         let secp = bitcoin::secp256k1::Secp256k1::new();
         self.e.public_key(&secp)
     }
+
+    pub fn endpoint(&self) -> &Url { &&self.endpoint }
 }
 
 #[cfg(feature = "v2")]
