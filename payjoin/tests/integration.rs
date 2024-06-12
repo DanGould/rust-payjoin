@@ -282,6 +282,7 @@ mod integration {
         use std::sync::Arc;
         use std::time::Duration;
 
+        use bitcoin::Address;
         use http::StatusCode;
         use payjoin::receive::v2::{
             ActiveSession, PayjoinProposal, SessionInitializer, UncheckedProposal,
@@ -329,7 +330,11 @@ mod integration {
                 let agent = Arc::new(http_agent(cert_der.clone()).unwrap());
                 wait_for_service_ready(directory.clone(), agent.clone()).await.unwrap();
                 let mock_ohttp_relay = directory.clone(); // pass through to directory
+                let mock_address = Address::from_str("tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4")
+                    .unwrap()
+                    .assume_checked();
                 let mut bad_initializer = SessionInitializer::new(
+                    mock_address,
                     directory,
                     bad_ohttp_keys,
                     mock_ohttp_relay,
@@ -372,14 +377,16 @@ mod integration {
 
                 // **********************
                 // Inside the Receiver:
-                let mut session =
-                    initialize_session(directory.clone(), ohttp_keys.clone(), cert_der).await?;
+                let address = receiver.get_new_address(None, None)?.assume_checked();
+                let mut session = initialize_session(
+                    address,
+                    directory.clone(),
+                    ohttp_keys.clone(),
+                    cert_der.clone(),
+                )
+                .await?;
                 println!("session: {:#?}", &session);
-                let pj_uri_string = create_receiver_pj_uri_string(
-                    &receiver,
-                    ohttp_keys,
-                    session.pj_url().as_str(),
-                )?;
+                let pj_uri_string = session.pj_uri_builder().build().to_string();
 
                 // **********************
                 // Inside the Sender:
@@ -467,15 +474,13 @@ mod integration {
                 let ohttp_keys =
                     payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
                         .await?;
+                let address = receiver.get_new_address(None, None)?.assume_checked();
 
                 let mut session =
-                    initialize_session(directory, ohttp_keys.clone(), cert_der.clone()).await?;
+                    initialize_session(address, directory, ohttp_keys.clone(), cert_der.clone())
+                        .await?;
 
-                let pj_uri_string = create_receiver_pj_uri_string(
-                    &receiver,
-                    ohttp_keys,
-                    session.pj_url().as_str(),
-                )?;
+                let pj_uri_string = session.pj_uri_builder().build().to_string();
 
                 // **********************
                 // Inside the V1 Sender:
@@ -584,12 +589,14 @@ mod integration {
         }
 
         async fn initialize_session(
+            address: Address,
             directory: Url,
             ohttp_keys: OhttpKeys,
             cert_der: Vec<u8>,
         ) -> Result<ActiveSession, BoxError> {
             let mock_ohttp_relay = directory.clone(); // pass through to directory
             let mut initializer = SessionInitializer::new(
+                address,
                 directory.clone(),
                 ohttp_keys,
                 mock_ohttp_relay.clone(),
@@ -606,18 +613,14 @@ mod integration {
         /// The receiver outputs a string to be passed to the sender as a string or QR code
         fn create_receiver_pj_uri_string(
             receiver: &bitcoincore_rpc::Client,
+            address: Address,
             ohttp_keys: OhttpKeys,
             fallback_target: &str,
         ) -> Result<String, BoxError> {
-            let pj_receiver_address = receiver.get_new_address(None, None)?.assume_checked();
-            Ok(PjUriBuilder::new(
-                pj_receiver_address,
-                Url::parse(&fallback_target).unwrap(),
-                Some(ohttp_keys),
-            )
-            .amount(Amount::ONE_BTC)
-            .build()
-            .to_string())
+            Ok(PjUriBuilder::new(address, Url::parse(&fallback_target).unwrap(), Some(ohttp_keys))
+                .amount(Amount::ONE_BTC)
+                .build()
+                .to_string())
         }
 
         fn handle_directory_proposal(
@@ -799,7 +802,7 @@ mod integration {
             pj_uri: &Uri<'_, NetworkChecked>,
         ) -> Result<Psbt, BoxError> {
             let mut outputs = HashMap::with_capacity(1);
-            outputs.insert(pj_uri.address.to_string(), pj_uri.amount.unwrap());
+            outputs.insert(pj_uri.address.to_string(), pj_uri.amount.unwrap_or(Amount::ONE_BTC));
             let options = bitcoincore_rpc::json::WalletCreateFundedPsbtOptions {
                 lock_unspent: Some(true),
                 fee_rate: Some(Amount::from_sat(2000)),

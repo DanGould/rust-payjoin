@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use bitcoincore_rpc::RpcApi;
 use payjoin::bitcoin::consensus::encode::serialize_hex;
 use payjoin::bitcoin::psbt::Psbt;
-use payjoin::bitcoin::Amount;
+use payjoin::bitcoin::{Address, Amount};
 use payjoin::receive::v2::ActiveSession;
 use payjoin::{base64, bitcoin, Error, PjUriBuilder};
 
@@ -66,8 +66,10 @@ impl AppTrait for App {
     async fn receive_payjoin(self, amount_arg: &str, is_retry: bool) -> Result<()> {
         use payjoin::receive::v2::SessionInitializer;
 
+        let address = self.bitcoind()?.get_new_address(None, None)?.assume_checked();
         let ohttp_keys = unwrap_ohttp_keys_or_else_fetch(&self.config).await?;
         let mut initializer = SessionInitializer::new(
+            address,
             self.config.pj_directory.clone(),
             ohttp_keys.clone(),
             self.config.ohttp_relay.clone(),
@@ -89,20 +91,26 @@ impl AppTrait for App {
             .process_res(ohttp_response.bytes().await?.to_vec().as_slice(), ctx)
             .map_err(|_| anyhow!("Enrollment failed"))?;
         self.db.insert_recv_session(session.clone())?;
-        self.spawn_payjoin_receiver(session).await
+        let amount = Amount::from_sat(amount_arg.parse()?);
+        self.spawn_payjoin_receiver(session, Some(amount)).await
     }
 }
 
 impl App {
-    async fn spawn_payjoin_receiver(&self, mut session: ActiveSession) -> Result<()> {
+    async fn spawn_payjoin_receiver(
+        &self,
+        mut session: ActiveSession,
+        amount: Option<Amount>,
+    ) -> Result<()> {
         println!("Receive session established");
-
-        let address = self.bitcoind()?.get_new_address(None, None)?.assume_checked();
-        let amount = Amount::from_sat(amount_arg.parse()?);
-        let pj_uri = session.pj_uri_builder(address).amount(amount).build();
+        let mut pj_uri_builder = session.pj_uri_builder();
+        if let Some(amount) = amount {
+            pj_uri_builder = pj_uri_builder.amount(amount);
+        }
+        let pj_uri = pj_uri_builder.build();
 
         println!("Request Payjoin by sharing this Payjoin Uri:");
-        println!("{}", pj_uri.as_str());
+        println!("{}", pj_uri.to_string());
 
         let res = self.long_poll_fallback(&mut session).await?;
         println!("Fallback transaction received. Consider broadcasting this to get paid if the Payjoin fails:");
@@ -134,11 +142,10 @@ impl App {
         Ok(())
     }
 
-impl App {
     pub async fn resume_payjoins(&self) -> Result<()> {
         let session = self.db.get_recv_session()?.ok_or(anyhow!("No session found"))?;
         println!("Resuming Payjoin session: {}", session.public_key());
-        self.spawn_payjoin_receiver(session).await
+        self.spawn_payjoin_receiver(session, None).await
     }
 
     async fn long_poll_post(&self, req_ctx: &mut payjoin::send::RequestContext) -> Result<Psbt> {
