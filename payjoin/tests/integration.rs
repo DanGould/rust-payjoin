@@ -393,6 +393,15 @@ mod integration {
                 println!("session: {:#?}", &session);
                 let pj_uri_string = session.pj_uri_builder().build().to_string();
 
+                // Poll receive request
+                let (req, ctx) = session.extract_req()?;
+                let response = agent.post(req.url).body(req.body).send().await?;
+                assert!(response.status().is_success());
+                let proposal =
+                    session.process_res(response.bytes().await?.to_vec().as_slice(), ctx).unwrap();
+                // No proposal yet since sender has not responded
+                assert!(proposal.is_none());
+
                 // **********************
                 // Inside the Sender:
                 // Create a funded PSBT (not broadcasted) to address with amount given in the pj_uri
@@ -403,7 +412,7 @@ mod integration {
                     .unwrap();
                 let psbt = build_original_psbt(&sender, &pj_uri)?;
                 let (Request { url, body, .. }, send_ctx) =
-                    RequestBuilder::from_psbt_and_uri(psbt, pj_uri)?
+                    RequestBuilder::from_psbt_and_uri(psbt.clone(), pj_uri.clone())?
                         .build_with_additional_fee(
                             Amount::from_sat(10000),
                             None,
@@ -422,6 +431,12 @@ mod integration {
                 assert!(response.status().is_success());
                 // no response body yet since we are async and pushed fallback_psbt to the buffer
 
+                // Replay post fallback to get the response
+                let response = agent.post(url.clone()).body(body.clone()).send().await?;
+                let checked_payjoin_proposal_psbt =
+                    send_ctx.process_response(&mut response.bytes().await?.to_vec().as_slice())?;
+                assert!(checked_payjoin_proposal_psbt.is_none());
+
                 // **********************
                 // Inside the Receiver:
 
@@ -436,7 +451,6 @@ mod integration {
                 let response = agent.post(req.url).body(req.body).send().await?;
                 let res = response.bytes().await?.to_vec();
                 let _response = payjoin_proposal.deserialize_res(res, ctx)?;
-                // response should be 204 http
 
                 // **********************
                 // Inside the Sender:
@@ -444,6 +458,9 @@ mod integration {
 
                 // Replay post fallback to get the response
                 let response = agent.post(url).body(body).send().await?;
+                let (_, send_ctx) = RequestBuilder::from_psbt_and_uri(psbt, pj_uri)?
+                    .build_with_additional_fee(Amount::from_sat(10000), None, FeeRate::ZERO, false)?
+                    .extract_v2(directory.to_owned())?;
                 let checked_payjoin_proposal_psbt = send_ctx
                     .process_response(&mut response.bytes().await?.to_vec().as_slice())?
                     .unwrap();
