@@ -337,7 +337,7 @@ mod integration {
                     directory,
                     bad_ohttp_keys,
                     mock_ohttp_relay,
-                    Duration::from_secs(60),
+                    Some(Duration::from_secs(60)),
                 );
                 let (req, _ctx) = bad_initializer.extract_req().expect("Failed to extract request");
                 agent.post(req.url).body(req.body).send().await
@@ -621,7 +621,7 @@ mod integration {
                 directory.clone(),
                 ohttp_keys,
                 mock_ohttp_relay.clone(),
-                Duration::from_secs(60),
+                Some(Duration::from_secs(60)),
             );
             let (req, ctx) = initializer.extract_req()?;
             println!("enroll req: {:#?}", &req);

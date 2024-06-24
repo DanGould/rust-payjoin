@@ -111,11 +111,14 @@ impl PjUriBuilder {
         address: Address,
         origin: Url,
         #[cfg(feature = "v2")] ohttp_keys: Option<OhttpKeys>,
+        #[cfg(feature = "v2")] expiry: Option<std::time::SystemTime>,
     ) -> Self {
         #[allow(unused_mut)]
         let mut pj = origin;
         #[cfg(feature = "v2")]
         let _ = pj.set_ohttp(ohttp_keys);
+        #[cfg(feature = "v2")]
+        let _ = pj.set_exp(expiry);
         Self { address, amount: None, message: None, label: None, pj, pjos: false }
     }
     /// Set the amount you want to receive.
@@ -243,9 +246,14 @@ impl<'a> bip21::de::DeserializationState<'a> for DeserializationState {
             (None, None) => Ok(MaybePayjoinExtras::Unsupported),
             (None, Some(_)) => Err(InternalPjParseError::MissingEndpoint.into()),
             (Some(endpoint), pjos) => {
-                if endpoint.scheme() == "https"
-                    || endpoint.scheme() == "http"
-                        && endpoint.domain().unwrap_or_default().ends_with(".onion")
+                #[cfg(feature = "v2")]
+                let is_fragment_ok = endpoint.ohttp().is_ok() && endpoint.exp().is_ok();
+                #[cfg(not(feature = "v2"))]
+                let is_fragment_ok = true;
+                if is_fragment_ok
+                    && (endpoint.scheme() == "https"
+                        || endpoint.scheme() == "http"
+                            && endpoint.domain().unwrap_or_default().ends_with(".onion"))
                 {
                     Ok(MaybePayjoinExtras::Supported(PayjoinExtras {
                         endpoint,
@@ -350,6 +358,8 @@ mod tests {
                 let builder = PjUriBuilder::new(
                     address.clone(),
                     Url::parse(pj).unwrap(),
+                    #[cfg(feature = "v2")]
+                    None,
                     #[cfg(feature = "v2")]
                     None,
                 )

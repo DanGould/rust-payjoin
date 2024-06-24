@@ -299,6 +299,14 @@ impl RequestContext {
         ohttp_relay: Url,
     ) -> Result<(Request, ContextV2), CreateRequestError> {
         use crate::uri::UrlExt;
+
+        if let Some(expiry) =
+            self.endpoint.exp().map_err(|_| InternalCreateRequestError::PercentEncoding)?
+        {
+            if std::time::SystemTime::now() > expiry {
+                return Err(InternalCreateRequestError::Expired(expiry).into());
+            }
+        }
         let rs = Self::rs_pubkey_from_dir_endpoint(&self.endpoint)?;
         let url = self.endpoint.clone();
         let body = serialize_v2_body(

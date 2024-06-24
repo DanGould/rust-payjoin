@@ -9,6 +9,8 @@ use crate::OhttpKeys;
 pub(crate) trait UrlExt {
     fn ohttp(&self) -> Result<Option<OhttpKeys>, PercentDecodeError>;
     fn set_ohttp(&mut self, ohttp: Option<OhttpKeys>) -> Result<(), PercentDecodeError>;
+    fn exp(&self) -> Result<Option<std::time::SystemTime>, PercentDecodeError>;
+    fn set_exp(&mut self, exp: Option<std::time::SystemTime>) -> Result<(), PercentDecodeError>;
 }
 
 // Characters '=' and '&' conflict with BIP21 URI parameters and must be percent-encoded
@@ -55,6 +57,50 @@ impl UrlExt for Url {
         self.set_fragment(if encoded_fragment.is_empty() { None } else { Some(&encoded_fragment) });
         Ok(())
     }
+
+    /// Retrieve the exp parameter from the URL fragment
+    fn exp(&self) -> Result<Option<std::time::SystemTime>, PercentDecodeError> {
+        if let Some(fragment) = self.fragment() {
+            let decoded_fragment =
+                percent_encoding::percent_decode_str(fragment)?.decode_utf8_lossy();
+            for param in decoded_fragment.split('&') {
+                if let Some(value) = param.strip_prefix("exp=") {
+                    if let Ok(timestamp) = value.parse::<u64>() {
+                        return Ok(Some(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(timestamp),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Set the exp parameter in the URL fragment
+    fn set_exp(&mut self, exp: Option<std::time::SystemTime>) -> Result<(), PercentDecodeError> {
+        let fragment = self.fragment().unwrap_or("").to_string();
+        let mut fragment =
+            percent_encoding::percent_decode_str(&fragment)?.decode_utf8_lossy().to_string();
+        if let Some(start) = fragment.find("exp=") {
+            let end = fragment[start..].find('&').map_or(fragment.len(), |i| start + i);
+            fragment.replace_range(start..end, "");
+            if fragment.ends_with('&') {
+                fragment.pop();
+            }
+        }
+        if let Some(exp) = exp {
+            let timestamp = exp.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let new_exp = format!("exp={}", timestamp);
+            if !fragment.is_empty() {
+                fragment.push('&');
+            }
+            fragment.push_str(&new_exp);
+        }
+        let encoded_fragment =
+            percent_encoding::utf8_percent_encode(&fragment, BIP21_CONFLICTING).to_string();
+        self.set_fragment(if encoded_fragment.is_empty() { None } else { Some(&encoded_fragment) });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +128,22 @@ mod tests {
         assert_eq!(retrieved_ohttp, Some(ohttp_keys));
 
         let _ = url.set_ohttp(None);
+        assert_eq!(url.fragment(), None);
+    }
+
+    #[test]
+    fn test_exp_get_set() {
+        let mut url = Url::parse("https://example.com").unwrap();
+
+        let exp_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1720547781);
+        let _ = url.set_exp(Some(exp_time));
+        assert_eq!(url.fragment(), Some("exp%3D1720547781"));
+
+        let retrieved_exp = url.exp().unwrap();
+        assert_eq!(retrieved_exp, Some(exp_time));
+
+        let _ = url.set_exp(None);
         assert_eq!(url.fragment(), None);
     }
 
