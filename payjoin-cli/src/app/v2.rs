@@ -84,7 +84,7 @@ impl AppTrait for App {
             self.config.pj_directory.clone(),
             ohttp_keys.clone(),
             self.config.ohttp_relay.clone(),
-            std::time::Duration::from_secs(60 * 60),
+            Some(std::time::Duration::from_secs(60 * 60)),
         );
         let (req, ctx) =
             initializer.extract_req().map_err(|e| anyhow!("Failed to extract request {}", e))?;
