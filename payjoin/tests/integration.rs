@@ -345,317 +345,257 @@ mod integration {
         }
 
         #[tokio::test]
-        async fn test_session_expiration() {
-            std::env::set_var("RUST_LOG", "debug");
-            init_tracing();
-            let (cert, key) = local_cert_key();
-            let ohttp_relay_port = find_free_port();
-            let ohttp_relay =
-                Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let directory_port = find_free_port();
-            let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
-            let gateway_origin = http::Uri::from_str(directory.as_str()).unwrap();
-            tokio::select!(
-            _ = ohttp_relay::listen_tcp(ohttp_relay_port, gateway_origin) => assert!(false, "Ohttp relay is long running"),
-            _ = init_directory(directory_port, (cert.clone(), key)) => assert!(false, "Directory server is long running"),
-            res = do_expiration_tests(ohttp_relay, directory, cert) => assert!(res.is_ok(), "v2 send receive failed: {:#?}", res)
-            );
-
-            async fn do_expiration_tests(
-                ohttp_relay: Url,
-                directory: Url,
-                cert_der: Vec<u8>,
-            ) -> Result<(), BoxError> {
-                let (_bitcoind, sender, receiver) = init_bitcoind_sender_receiver()?;
-                let agent = Arc::new(http_agent(cert_der.clone())?);
-                wait_for_service_ready(ohttp_relay.clone(), agent.clone()).await.unwrap();
-                wait_for_service_ready(directory.clone(), agent.clone()).await.unwrap();
-                let ohttp_keys =
-                    payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
-                        .await?;
-
-                // **********************
-                // Inside the Receiver:
-                let address = receiver.get_new_address(None, None)?.assume_checked();
-                // test session with expiry in the past
-                let mut session = initialize_session(
-                    address.clone(),
-                    directory.clone(),
-                    ohttp_keys.clone(),
-                    cert_der,
-                    Some(Duration::from_secs(0)),
-                )
-                .await?;
-                assert!(session.extract_req().is_err(), "Expired receive session should error");
-                let pj_uri = session.pj_uri_builder().build();
-
-                // **********************
-                // Inside the Sender:
-                let psbt = build_original_psbt(&sender, &pj_uri)?;
-                // Test that an expired pj_url errors
-                let expired_pj_uri = payjoin::PjUriBuilder::new(
-                    address,
-                    directory.clone(),
-                    Some(ohttp_keys),
-                    Some(std::time::SystemTime::now()),
-                )
-                .build();
-                let mut expired_req_ctx = RequestBuilder::from_psbt_and_uri(psbt, expired_pj_uri)?
-                    .build_non_incentivizing()?;
-                assert!(
-                    expired_req_ctx.extract_v2(directory.to_owned()).is_err(),
-                    "Expired send session should error"
-                );
-                Ok(())
-            }
-        }
-
-        #[tokio::test]
-        async fn v2_to_v2() {
-            std::env::set_var("RUST_LOG", "debug");
-            init_tracing();
-            let (cert, key) = local_cert_key();
-            let ohttp_relay_port = find_free_port();
-            let ohttp_relay =
-                Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let directory_port = find_free_port();
-            let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
-            let gateway_origin = http::Uri::from_str(directory.as_str()).unwrap();
-            tokio::select!(
-            _ = ohttp_relay::listen_tcp(ohttp_relay_port, gateway_origin) => assert!(false, "Ohttp relay is long running"),
-            _ = init_directory(directory_port, (cert.clone(), key)) => assert!(false, "Directory server is long running"),
-            res = do_v2_send_receive(ohttp_relay, directory, cert) => assert!(res.is_ok(), "v2 send receive failed: {:#?}", res)
-            );
-
-            async fn do_v2_send_receive(
-                ohttp_relay: Url,
-                directory: Url,
-                cert_der: Vec<u8>,
-            ) -> Result<(), BoxError> {
-                let (_bitcoind, sender, receiver) = init_bitcoind_sender_receiver()?;
-                let agent = Arc::new(http_agent(cert_der.clone())?);
-                wait_for_service_ready(ohttp_relay.clone(), agent.clone()).await.unwrap();
-                wait_for_service_ready(directory.clone(), agent.clone()).await.unwrap();
-                let ohttp_keys =
-                    payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
-                        .await?;
-                // **********************
-                // Inside the Receiver:
-                let address = receiver.get_new_address(None, None)?.assume_checked();
-
-                // test session with expiry in the future
-                let mut session = initialize_session(
-                    address.clone(),
-                    directory.clone(),
-                    ohttp_keys.clone(),
-                    cert_der.clone(),
-                    None,
-                )
-                .await?;
-                println!("session: {:#?}", &session);
-                let pj_uri_string = session.pj_uri_builder().build().to_string();
-                // Poll receive request
-                let (req, ctx) = session.extract_req()?;
-                let response = agent.post(req.url).body(req.body).send().await?;
-                assert!(response.status().is_success());
-                let response_body =
-                    session.process_res(response.bytes().await?.to_vec().as_slice(), ctx).unwrap();
-                // No proposal yet since sender has not responded
-                assert!(response_body.is_none());
-
-                // **********************
-                // Inside the Sender:
-                // Create a funded PSBT (not broadcasted) to address with amount given in the pj_uri
-                let pj_uri = Uri::from_str(&pj_uri_string)
-                    .unwrap()
-                    .assume_checked()
-                    .check_pj_supported()
-                    .unwrap();
-                let psbt = build_original_psbt(&sender, &pj_uri)?;
-                let mut req_ctx = RequestBuilder::from_psbt_and_uri(psbt.clone(), pj_uri.clone())?
-                    .build_with_additional_fee(
-                        Amount::from_sat(10000),
-                        None,
-                        FeeRate::ZERO,
-                        false,
-                    )?;
-                let (Request { url, body, .. }, send_ctx) =
-                    req_ctx.extract_v2(directory.to_owned())?;
-                let response = agent
-                    .post(url.clone())
-                    .header("Content-Type", payjoin::V1_REQ_CONTENT_TYPE)
-                    .body(body.clone())
-                    .send()
-                    .await
-                    .unwrap();
-                log::info!("Response: {:#?}", &response);
-                assert!(response.status().is_success());
-                let response_body =
-                    send_ctx.process_response(&mut response.bytes().await?.to_vec().as_slice())?;
-                // No response body yet since we are async and pushed fallback_psbt to the buffer
-                assert!(response_body.is_none());
-
-                // **********************
-                // Inside the Receiver:
-
-                // GET fallback psbt
-                let (req, ctx) = session.extract_req()?;
-                let response = agent.post(req.url).body(req.body).send().await?;
-                // POST payjoin
-                let proposal =
-                    session.process_res(response.bytes().await?.to_vec().as_slice(), ctx)?.unwrap();
-                let mut payjoin_proposal = handle_directory_proposal(receiver, proposal);
-                assert!(!payjoin_proposal.is_output_substitution_disabled());
-                let (req, ctx) = payjoin_proposal.extract_v2_req()?;
-                let response = agent.post(req.url).body(req.body).send().await?;
-                let res = response.bytes().await?.to_vec();
-                payjoin_proposal.process_res(res, ctx)?;
-
-                // **********************
-                // Inside the Sender:
-                // Sender checks, signs, finalizes, extracts, and broadcasts
-
-                // Replay post fallback to get the response
-                let (Request { url, body, .. }, send_ctx) =
-                    req_ctx.extract_v2(directory.to_owned())?;
-                let response = agent.post(url).body(body).send().await?;
-                let checked_payjoin_proposal_psbt = send_ctx
-                    .process_response(&mut response.bytes().await?.to_vec().as_slice())?
-                    .unwrap();
-                let payjoin_tx = extract_pj_tx(&sender, checked_payjoin_proposal_psbt)?;
-                sender.send_raw_transaction(&payjoin_tx)?;
-                log::info!("sent");
-                Ok(())
-            }
-        }
-
-        #[tokio::test]
-        async fn v1_to_v2() {
-            std::env::set_var("RUST_LOG", "debug");
-            init_tracing();
-            let (cert, key) = local_cert_key();
-            let ohttp_relay_port = find_free_port();
-            let ohttp_relay =
-                Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let directory_port = find_free_port();
-            let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
-            let gateway_origin = http::Uri::from_str(directory.as_str()).unwrap();
-            tokio::select!(
-            _ = ohttp_relay::listen_tcp(ohttp_relay_port, gateway_origin) => assert!(false, "Ohttp relay is long running"),
-            _ = init_directory(directory_port, (cert.clone(), key)) => assert!(false, "Directory server is long running"),
-            res = do_v1_to_v2(ohttp_relay, directory, cert) => assert!(res.is_ok()),
-            );
-
-            async fn do_v1_to_v2(
-                ohttp_relay: Url,
-                directory: Url,
-                cert_der: Vec<u8>,
-            ) -> Result<(), BoxError> {
-                let (_bitcoind, sender, receiver) = init_bitcoind_sender_receiver()?;
-                let agent: Arc<Client> = Arc::new(http_agent(cert_der.clone())?);
-                wait_for_service_ready(ohttp_relay.clone(), agent.clone()).await?;
-                wait_for_service_ready(directory.clone(), agent.clone()).await?;
-                let ohttp_keys =
-                    payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
-                        .await?;
-                let address = receiver.get_new_address(None, None)?.assume_checked();
-
-                let mut session = initialize_session(
-                    address,
-                    directory,
-                    ohttp_keys.clone(),
-                    cert_der.clone(),
-                    None,
-                )
-                .await?;
-
-                let pj_uri_string = session.pj_uri_builder().build().to_string();
-
-                // **********************
-                // Inside the V1 Sender:
-                // Create a funded PSBT (not broadcasted) to address with amount given in the pj_uri
-                let pj_uri = Uri::from_str(&pj_uri_string)
-                    .unwrap()
-                    .assume_checked()
-                    .check_pj_supported()
-                    .unwrap();
-                let psbt = build_original_psbt(&sender, &pj_uri)?;
-                let (Request { url, body, .. }, send_ctx) =
-                    RequestBuilder::from_psbt_and_uri(psbt, pj_uri)?
-                        .build_with_additional_fee(
-                            Amount::from_sat(10000),
-                            None,
-                            FeeRate::ZERO,
-                            false,
-                        )?
-                        .extract_v1()?;
-                log::info!("send fallback v1 to offline receiver fail");
-                let res = agent
-                    .post(url.clone())
-                    .header("Content-Type", payjoin::V1_REQ_CONTENT_TYPE)
-                    .body(body.clone())
-                    .send()
-                    .await;
-                assert!(res.as_ref().unwrap().status() == StatusCode::SERVICE_UNAVAILABLE);
-
-                // **********************
-                // Inside the Receiver:
-                let agent_clone: Arc<Client> = agent.clone();
-                let receiver_loop = tokio::task::spawn(async move {
-                    let agent_clone = agent_clone.clone();
-                    let (response, ctx) = loop {
-                        let (req, ctx) = session.extract_req().unwrap();
-                        let response = agent_clone.post(req.url).body(req.body).send().await?;
-
-                        if response.status() == 200 {
-                            break (response.bytes().await?.to_vec(), ctx);
-                        } else if response.status() == 202 {
-                            log::info!(
-                                "No response yet for POST payjoin request, retrying some seconds"
-                            );
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        } else {
-                            log::error!("Unexpected response status: {}", response.status());
-                            panic!("Unexpected response status: {}", response.status())
-                        }
-                    };
-                    let proposal = session.process_res(response.as_slice(), ctx).unwrap().unwrap();
-                    let mut payjoin_proposal = handle_directory_proposal(receiver, proposal);
-                    assert!(payjoin_proposal.is_output_substitution_disabled());
-                    // Respond with payjoin psbt within the time window the sender is willing to wait
-                    // this response would be returned as http response to the sender
-                    let (req, ctx) = payjoin_proposal.extract_v2_req().unwrap();
-                    let response = agent_clone.post(req.url).body(req.body).send().await?;
-                    payjoin_proposal
-                        .process_res(response.bytes().await?.to_vec(), ctx)
-                        .map_err(|e| e.to_string())?;
-                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-                });
-
-                // **********************
-                // send fallback v1 to online receiver
-                log::info!("send fallback v1 to online receiver should succeed");
-                let response = agent
-                    .post(url)
-                    .header("Content-Type", payjoin::V1_REQ_CONTENT_TYPE)
-                    .body(body)
-                    .send()
+        async fn test_session_expiration() -> Result<(), BoxError> {
+            let (ohttp_relay, directory, cert_der, _key) = setup_test_environment();
+            let (_bitcoind, sender, receiver) = init_bitcoind_sender_receiver()?;
+            let agent = Arc::new(http_agent(cert_der.clone())?);
+            wait_for_service_ready(ohttp_relay.clone(), agent.clone()).await.unwrap();
+            wait_for_service_ready(directory.clone(), agent.clone()).await.unwrap();
+            let ohttp_keys =
+                payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
                     .await?;
-                log::info!("Response: {:#?}", &response);
-                assert!(response.status().is_success());
 
-                let res = response.bytes().await?.to_vec();
-                let checked_payjoin_proposal_psbt =
-                    send_ctx.process_response(&mut res.as_slice())?;
-                let payjoin_tx = extract_pj_tx(&sender, checked_payjoin_proposal_psbt)?;
-                sender.send_raw_transaction(&payjoin_tx)?;
-                log::info!("sent");
-                assert!(
-                    receiver_loop.await.is_ok(),
-                    "The spawned task panicked or returned an error"
+            // **********************
+            // Inside the Receiver:
+            let address = receiver.get_new_address(None, None)?.assume_checked();
+            // test session with expiry in the past
+            let mut session = initialize_session(
+                address.clone(),
+                directory.clone(),
+                ohttp_keys.clone(),
+                cert_der,
+                Some(Duration::from_secs(0)),
+            )
+            .await?;
+            assert!(session.extract_req().is_err(), "Expired receive session should error");
+            let pj_uri = session.pj_uri_builder().build();
+
+            // **********************
+            // Inside the Sender:
+            let psbt = build_original_psbt(&sender, &pj_uri)?;
+            // Test that an expired pj_url errors
+            let expired_pj_uri = payjoin::PjUriBuilder::new(
+                address,
+                directory.clone(),
+                Some(ohttp_keys),
+                Some(std::time::SystemTime::now()),
+            )
+            .build();
+            let mut expired_req_ctx = RequestBuilder::from_psbt_and_uri(psbt, expired_pj_uri)?
+                .build_non_incentivizing()?;
+            assert!(
+                expired_req_ctx.extract_v2(directory.to_owned()).is_err(),
+                "Expired send session should error"
+            );
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn v2_to_v2() -> Result<(), BoxError> {
+            let (ohttp_relay, directory, cert_der, _key) = setup_test_environment();
+            let (_bitcoind, sender, receiver) = init_bitcoind_sender_receiver()?;
+            let agent = Arc::new(http_agent(cert_der.clone())?);
+            wait_for_service_ready(ohttp_relay.clone(), agent.clone()).await.unwrap();
+            wait_for_service_ready(directory.clone(), agent.clone()).await.unwrap();
+            let ohttp_keys =
+                payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
+                    .await?;
+            // **********************
+            // Inside the Receiver:
+            let address = receiver.get_new_address(None, None)?.assume_checked();
+
+            // test session with expiry in the future
+            let mut session = initialize_session(
+                address.clone(),
+                directory.clone(),
+                ohttp_keys.clone(),
+                cert_der.clone(),
+                None,
+            )
+            .await?;
+            println!("session: {:#?}", &session);
+            let pj_uri_string = session.pj_uri_builder().build().to_string();
+            // Poll receive request
+            let (req, ctx) = session.extract_req()?;
+            let response = agent.post(req.url).body(req.body).send().await?;
+            assert!(response.status().is_success());
+            let response_body =
+                session.process_res(response.bytes().await?.to_vec().as_slice(), ctx).unwrap();
+            // No proposal yet since sender has not responded
+            assert!(response_body.is_none());
+
+            // **********************
+            // Inside the Sender:
+            // Create a funded PSBT (not broadcasted) to address with amount given in the pj_uri
+            let pj_uri = Uri::from_str(&pj_uri_string)
+                .unwrap()
+                .assume_checked()
+                .check_pj_supported()
+                .unwrap();
+            let psbt = build_original_psbt(&sender, &pj_uri)?;
+            let mut req_ctx = RequestBuilder::from_psbt_and_uri(psbt.clone(), pj_uri.clone())?
+                .build_with_additional_fee(Amount::from_sat(10000), None, FeeRate::ZERO, false)?;
+            let (Request { url, body, .. }, send_ctx) = req_ctx.extract_v2(directory.to_owned())?;
+            let response = agent
+                .post(url.clone())
+                .header("Content-Type", payjoin::V1_REQ_CONTENT_TYPE)
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            log::info!("Response: {:#?}", &response);
+            assert!(response.status().is_success());
+            let response_body =
+                send_ctx.process_response(&mut response.bytes().await?.to_vec().as_slice())?;
+            // No response body yet since we are async and pushed fallback_psbt to the buffer
+            assert!(response_body.is_none());
+
+            // **********************
+            // Inside the Receiver:
+
+            // GET fallback psbt
+            let (req, ctx) = session.extract_req()?;
+            let response = agent.post(req.url).body(req.body).send().await?;
+            // POST payjoin
+            let proposal =
+                session.process_res(response.bytes().await?.to_vec().as_slice(), ctx)?.unwrap();
+            let mut payjoin_proposal = handle_directory_proposal(receiver, proposal);
+            assert!(!payjoin_proposal.is_output_substitution_disabled());
+            let (req, ctx) = payjoin_proposal.extract_v2_req()?;
+            let response = agent.post(req.url).body(req.body).send().await?;
+            let res = response.bytes().await?.to_vec();
+            payjoin_proposal.process_res(res, ctx)?;
+
+            // **********************
+            // Inside the Sender:
+            // Sender checks, signs, finalizes, extracts, and broadcasts
+
+            // Replay post fallback to get the response
+            let (Request { url, body, .. }, send_ctx) = req_ctx.extract_v2(directory.to_owned())?;
+            let response = agent.post(url).body(body).send().await?;
+            let checked_payjoin_proposal_psbt = send_ctx
+                .process_response(&mut response.bytes().await?.to_vec().as_slice())?
+                .unwrap();
+            let payjoin_tx = extract_pj_tx(&sender, checked_payjoin_proposal_psbt)?;
+            sender.send_raw_transaction(&payjoin_tx)?;
+            log::info!("sent");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn v1_to_v2() -> Result<(), BoxError> {
+            let (ohttp_relay, directory, cert_der, _key) = setup_test_environment();
+            let (_bitcoind, sender, receiver) = init_bitcoind_sender_receiver()?;
+            let agent: Arc<Client> = Arc::new(http_agent(cert_der.clone())?);
+            wait_for_service_ready(ohttp_relay.clone(), agent.clone()).await?;
+            wait_for_service_ready(directory.clone(), agent.clone()).await?;
+            let ohttp_keys =
+                payjoin::io::fetch_ohttp_keys(ohttp_relay, directory.clone(), cert_der.clone())
+                    .await?;
+            let address = receiver.get_new_address(None, None)?.assume_checked();
+
+            let mut session =
+                initialize_session(address, directory, ohttp_keys.clone(), cert_der.clone(), None)
+                    .await?;
+
+            let pj_uri_string = session.pj_uri_builder().build().to_string();
+
+            // **********************
+            // Inside the V1 Sender:
+            // Create a funded PSBT (not broadcasted) to address with amount given in the pj_uri
+            let pj_uri = Uri::from_str(&pj_uri_string)
+                .unwrap()
+                .assume_checked()
+                .check_pj_supported()
+                .unwrap();
+            let psbt = build_original_psbt(&sender, &pj_uri)?;
+            let (Request { url, body, .. }, send_ctx) =
+                RequestBuilder::from_psbt_and_uri(psbt, pj_uri)?
+                    .build_with_additional_fee(Amount::from_sat(10000), None, FeeRate::ZERO, false)?
+                    .extract_v1()?;
+            log::info!("send fallback v1 to offline receiver fail");
+            let res = agent
+                .post(url.clone())
+                .header("Content-Type", payjoin::V1_REQ_CONTENT_TYPE)
+                .body(body.clone())
+                .send()
+                .await;
+            assert!(res.as_ref().unwrap().status() == StatusCode::SERVICE_UNAVAILABLE);
+
+            // **********************
+            // Inside the Receiver:
+            let agent_clone: Arc<Client> = agent.clone();
+            let receiver_loop = tokio::task::spawn(async move {
+                let agent_clone = agent_clone.clone();
+                let (response, ctx) = loop {
+                    let (req, ctx) = session.extract_req().unwrap();
+                    let response = agent_clone.post(req.url).body(req.body).send().await?;
+
+                    if response.status() == 200 {
+                        break (response.bytes().await?.to_vec(), ctx);
+                    } else if response.status() == 202 {
+                        log::info!(
+                            "No response yet for POST payjoin request, retrying some seconds"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    } else {
+                        log::error!("Unexpected response status: {}", response.status());
+                        panic!("Unexpected response status: {}", response.status())
+                    }
+                };
+                let proposal = session.process_res(response.as_slice(), ctx).unwrap().unwrap();
+                let mut payjoin_proposal = handle_directory_proposal(receiver, proposal);
+                assert!(payjoin_proposal.is_output_substitution_disabled());
+                // Respond with payjoin psbt within the time window the sender is willing to wait
+                // this response would be returned as http response to the sender
+                let (req, ctx) = payjoin_proposal.extract_v2_req().unwrap();
+                let response = agent_clone.post(req.url).body(req.body).send().await?;
+                payjoin_proposal
+                    .process_res(response.bytes().await?.to_vec(), ctx)
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+            });
+
+            // **********************
+            // send fallback v1 to online receiver
+            log::info!("send fallback v1 to online receiver should succeed");
+            let response = agent
+                .post(url)
+                .header("Content-Type", payjoin::V1_REQ_CONTENT_TYPE)
+                .body(body)
+                .send()
+                .await?;
+            log::info!("Response: {:#?}", &response);
+            assert!(response.status().is_success());
+
+            let res = response.bytes().await?.to_vec();
+            let checked_payjoin_proposal_psbt = send_ctx.process_response(&mut res.as_slice())?;
+            let payjoin_tx = extract_pj_tx(&sender, checked_payjoin_proposal_psbt)?;
+            sender.send_raw_transaction(&payjoin_tx)?;
+            log::info!("sent");
+            assert!(receiver_loop.await.is_ok(), "The spawned task panicked or returned an error");
+            Ok(())
+        }
+
+        fn setup_test_environment() -> (Url, Url, Vec<u8>, Vec<u8>) {
+            std::env::set_var("RUST_LOG", "debug");
+            init_tracing();
+            let (cert, key) = local_cert_key();
+            let ohttp_relay_port = find_free_port();
+            let ohttp_relay =
+                Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
+            let directory_port = find_free_port();
+            let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
+            let gateway_origin = http::Uri::from_str(directory.as_str()).unwrap();
+            let cert_clone = cert.clone();
+            let key_clone = key.clone();
+            tokio::spawn(async move {
+                tokio::select!(
+                    _ = ohttp_relay::listen_tcp(ohttp_relay_port, gateway_origin) => assert!(false, "Ohttp relay is long running"),
+                    _ = init_directory(directory_port, (cert_clone, key_clone)) => assert!(false, "Directory server is long running"),
                 );
-                Ok(())
-            }
+            });
+            (ohttp_relay, directory, cert, key)
         }
 
         async fn init_directory(
