@@ -147,6 +147,7 @@ mod e2e {
         use std::time::Duration;
 
         use http::StatusCode;
+        use log::debug;
         use once_cell::sync::{Lazy, OnceCell};
         use reqwest::{Client, ClientBuilder};
         use testcontainers::clients::Cli;
@@ -161,7 +162,6 @@ mod e2e {
         static TESTS_TIMEOUT: Lazy<Duration> = Lazy::new(|| Duration::from_secs(20));
         static WAIT_SERVICE_INTERVAL: Lazy<Duration> = Lazy::new(|| Duration::from_secs(3));
 
-        env::set_var("RUST_LOG", "debug");
         init_tracing();
         let (cert, key) = local_cert_key();
         let ohttp_relay_port = find_free_port();
@@ -443,7 +443,7 @@ mod e2e {
 
                 match request_result.status() {
                     StatusCode::OK => {
-                        println!("READY {}", service_url);
+                        debug!("READY {}", service_url);
                         return Ok(());
                     }
                     StatusCode::NOT_FOUND => return Err("Endpoint not found".into()),
@@ -459,7 +459,7 @@ mod e2e {
             let timeout = Duration::from_secs(2);
             let db = docker.run(Redis::default());
             let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
-            println!("Database running on {}", db.get_host_port_ipv4(6379));
+            debug!("Database running on {}", db.get_host_port_ipv4(6379));
             payjoin_directory::listen_tcp_with_tls(port, db_host, timeout, local_cert_key).await
         }
 

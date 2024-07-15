@@ -8,7 +8,7 @@ mod integration {
     use bitcoin::{Amount, FeeRate, OutPoint};
     use bitcoind::bitcoincore_rpc::core_rpc_json::{AddressType, WalletProcessPsbtResult};
     use bitcoind::bitcoincore_rpc::{self, RpcApi};
-    use log::{log_enabled, Level};
+    use log::{debug, log_enabled, Level};
     use once_cell::sync::{Lazy, OnceCell};
     use payjoin::send::RequestBuilder;
     use payjoin::{Request, Uri};
@@ -21,7 +21,6 @@ mod integration {
 
     #[cfg(not(feature = "v2"))]
     mod v1 {
-        use log::debug;
         use payjoin::receive::{Headers, PayjoinProposal, UncheckedProposal};
         use payjoin::{PjUri, PjUriBuilder, UriExt};
 
@@ -413,7 +412,7 @@ mod integration {
                 None,
             )
             .await?;
-            println!("session: {:#?}", &session);
+            debug!("session: {:#?}", &session);
             let pj_uri_string = session.pj_uri_builder().build().to_string();
             // Poll receive request
             let (req, ctx) = session.extract_req()?;
@@ -606,7 +605,7 @@ mod integration {
             let timeout = Duration::from_secs(2);
             let db = docker.run(Redis::default());
             let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
-            println!("Database running on {}", db.get_host_port_ipv4(6379));
+            debug!("Database running on {}", db.get_host_port_ipv4(6379));
             payjoin_directory::listen_tcp_with_tls(port, db_host, timeout, local_cert_key).await
         }
 
@@ -638,7 +637,7 @@ mod integration {
                 custom_expire_after,
             );
             let (req, ctx) = initializer.extract_req()?;
-            println!("enroll req: {:#?}", &req);
+            debug!("enroll req: {:#?}", &req);
             let response =
                 http_agent(cert_der).unwrap().post(req.url).body(req.body).send().await?;
             assert!(response.status().is_success());
