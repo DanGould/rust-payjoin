@@ -17,7 +17,7 @@ use super::{
 };
 use crate::psbt::PsbtExt;
 use crate::receive::optional_parameters::Params;
-use crate::v2::{HpkePublicKey, HpkeSecretKey, OhttpEncapsulationError};
+use crate::v2::{HpkeKeyPair, HpkePublicKey, OhttpEncapsulationError};
 use crate::{OhttpKeys, PjUriBuilder, Request};
 
 pub(crate) mod error;
@@ -33,7 +33,7 @@ struct SessionContext {
     ohttp_keys: OhttpKeys,
     expiry: SystemTime,
     ohttp_relay: url::Url,
-    s: (HpkeSecretKey, HpkePublicKey),
+    s: HpkeKeyPair,
     e: Option<HpkePublicKey>,
 }
 
@@ -85,7 +85,7 @@ impl SessionInitializer {
                 ohttp_relay,
                 expiry: SystemTime::now()
                     + expire_after.unwrap_or(TWENTY_FOUR_HOURS_DEFAULT_EXPIRY),
-                s: crate::v2::gen_keypair(),
+                s: HpkeKeyPair::gen_keypair(),
                 e: None,
             },
         }
@@ -533,7 +533,7 @@ impl PayjoinProposal {
             Some(e) => {
                 let payjoin_bytes = self.inner.payjoin_psbt.serialize();
                 log::debug!("THERE IS AN e: {:?}", e);
-                crate::v2::encrypt_message_b_hpke(payjoin_bytes, self.context.s.clone(), e)
+                crate::v2::encrypt_message_b_hpke(payjoin_bytes, &self.context.s, e)
             }
             None => Ok(self.extract_v1_req().as_bytes().to_vec()),
         }?;
@@ -603,7 +603,7 @@ mod test {
                 ),
                 ohttp_relay: url::Url::parse("https://relay.com").unwrap(),
                 expiry: SystemTime::now() + Duration::from_secs(60),
-                s: crate::v2::gen_keypair(),
+                s: HpkeKeyPair::gen_keypair(),
                 e: None,
             },
         };
