@@ -397,13 +397,21 @@ impl OutputsUnknown {
 }
 
 /// A checked proposal that the receiver may substitute or add outputs to
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WantsOutputs {
     inner: super::WantsOutputs,
     context: SessionContext,
 }
 
 impl WantsOutputs {
+    pub fn original_psbt(&self) -> Psbt {
+        self.inner.original_psbt()
+    }
+
+    pub fn owned_vouts(&self) -> Vec<usize> {
+        self.inner.owned_vouts()
+    }
+
     pub fn is_output_substitution_disabled(&self) -> bool {
         self.inner.is_output_substitution_disabled()
     }

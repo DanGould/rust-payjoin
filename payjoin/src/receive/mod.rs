@@ -45,6 +45,7 @@ use error::{
     InternalRequestError, InternalSelectionError,
 };
 use optional_parameters::Params;
+use serde::{Serialize, Deserialize};
 
 use crate::input_type::InputType;
 use crate::psbt::PsbtExt;
@@ -348,7 +349,7 @@ impl OutputsUnknown {
 }
 
 /// A checked proposal that the receiver may substitute or add outputs to
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WantsOutputs {
     original_psbt: Psbt,
     payjoin_psbt: Psbt,
@@ -358,6 +359,14 @@ pub struct WantsOutputs {
 }
 
 impl WantsOutputs {
+    pub fn original_psbt(&self) -> Psbt {
+        self.original_psbt.clone()
+    }
+
+    pub fn owned_vouts(&self) -> Vec<usize> {
+        self.owned_vouts.clone()
+    }
+
     pub fn is_output_substitution_disabled(&self) -> bool {
         self.params.disable_output_substitution
     }
@@ -661,7 +670,7 @@ impl WantsInputs {
 
 /// A checked proposal that the receiver may sign and finalize to make a proposal PSBT that the
 /// sender will accept.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisionalProposal {
     original_psbt: Psbt,
     payjoin_psbt: Psbt,

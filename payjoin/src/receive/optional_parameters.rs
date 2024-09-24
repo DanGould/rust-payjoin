@@ -9,7 +9,7 @@ pub(crate) const SUPPORTED_VERSIONS: [usize; 2] = [1, 2];
 #[cfg(not(feature = "v2"))]
 pub(crate) const SUPPORTED_VERSIONS: [usize; 1] = [1];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Params {
     // version
     pub v: usize,
