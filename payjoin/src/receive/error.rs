@@ -31,6 +31,20 @@ impl From<RequestError> for Error {
     fn from(e: RequestError) -> Self { Error::BadRequest(e) }
 }
 
+impl From<InternalRequestError> for Error {
+    fn from(e: InternalRequestError) -> Self { Error::BadRequest(e.into()) }
+}
+
+#[cfg(feature = "v2")]
+impl From<crate::v2::HpkeError> for Error {
+    fn from(e: crate::v2::HpkeError) -> Self { Error::Server(Box::new(e)) }
+}
+
+#[cfg(feature = "v2")]
+impl From<crate::v2::OhttpEncapsulationError> for Error {
+    fn from(e: crate::v2::OhttpEncapsulationError) -> Self { Error::Server(Box::new(e)) }
+}
+
 /// Error that may occur when the request from sender is malformed.
 ///
 /// This is currently opaque type because we aren't sure which variants will stay.
@@ -65,6 +79,19 @@ pub(crate) enum InternalRequestError {
     /// Original PSBT input has been seen before. Only automatic receivers, aka "interactive" in the spec
     /// look out for these to prevent probing attacks.
     InputSeen(bitcoin::OutPoint),
+    /// Serde deserialization failed
+    #[cfg(feature = "v2")]
+    ParsePsbt(bitcoin::psbt::PsbtParseError),
+    #[cfg(feature = "v2")]
+    Utf8(std::string::FromUtf8Error),
+    /// Original PSBT fee rate is below minimum fee rate set by the receiver.
+    ///
+    /// First argument is the calculated fee rate of the original PSBT.
+    ///
+    /// Second argument is the minimum fee rate optionaly set by the receiver.
+    PsbtBelowFeeRate(bitcoin::FeeRate, bitcoin::FeeRate),
+    /// Effective receiver feerate exceeds maximum allowed feerate
+    FeeTooHigh(bitcoin::FeeRate, bitcoin::FeeRate),
 }
 
 impl From<InternalRequestError> for RequestError {
@@ -96,11 +123,18 @@ impl fmt::Display for RequestError {
                 &format!("Content length too large: {}.", length),
             ),
             InternalRequestError::SenderParams(e) => match e {
-                super::optional_parameters::Error::UnknownVersion => write_error(
-                    f,
-                    "version-unsupported",
-                    "This version of payjoin is not supported.",
-                ),
+                super::optional_parameters::Error::UnknownVersion => {
+                    write!(
+                        f,
+                        r#"{{
+                            "errorCode": "version-unsupported",
+                            "supported": "{}",
+                            "message": "This version of payjoin is not supported."
+                        }}"#,
+                        serde_json::to_string(&super::optional_parameters::SUPPORTED_VERSIONS)
+                            .map_err(|_| fmt::Error)?
+                    )
+                }
                 _ => write_error(f, "sender-params-error", e),
             },
             InternalRequestError::InconsistentPsbt(e) =>
@@ -125,6 +159,94 @@ impl fmt::Display for RequestError {
                 write_error(f, "original-psbt-rejected", &format!("Input Type Error: {}.", e)),
             InternalRequestError::InputSeen(_) =>
                 write_error(f, "original-psbt-rejected", "The receiver rejected the original PSBT."),
+            #[cfg(feature = "v2")]
+            InternalRequestError::ParsePsbt(e) => write_error(f, "Error parsing PSBT:", e),
+            #[cfg(feature = "v2")]
+            InternalRequestError::Utf8(e) => write_error(f, "Error parsing PSBT:", e),
+            InternalRequestError::PsbtBelowFeeRate(
+                original_psbt_fee_rate,
+                receiver_min_fee_rate,
+            ) => write_error(
+                f,
+                "original-psbt-rejected",
+                &format!(
+                    "Original PSBT fee rate too low: {} < {}.",
+                    original_psbt_fee_rate, receiver_min_fee_rate
+                ),
+            ),
+            InternalRequestError::FeeTooHigh(proposed_feerate, max_feerate) => write_error(
+                f,
+                "original-psbt-rejected",
+                &format!(
+                    "Effective receiver feerate exceeds maximum allowed feerate: {} > {}",
+                    proposed_feerate, max_feerate
+                ),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            InternalRequestError::Psbt(e) => Some(e),
+            InternalRequestError::Base64(e) => Some(e),
+            InternalRequestError::Io(e) => Some(e),
+            InternalRequestError::InvalidContentLength(e) => Some(e),
+            InternalRequestError::SenderParams(e) => Some(e),
+            InternalRequestError::InconsistentPsbt(e) => Some(e),
+            InternalRequestError::PrevTxOut(e) => Some(e),
+            #[cfg(feature = "v2")]
+            InternalRequestError::ParsePsbt(e) => Some(e),
+            #[cfg(feature = "v2")]
+            InternalRequestError::Utf8(e) => Some(e),
+            InternalRequestError::PsbtBelowFeeRate(_, _) => None,
+            _ => None,
+        }
+    }
+}
+
+/// Error that may occur when output substitution fails.
+///
+/// This is currently opaque type because we aren't sure which variants will stay.
+/// You can only display it.
+#[derive(Debug)]
+pub struct OutputSubstitutionError(InternalOutputSubstitutionError);
+
+#[derive(Debug)]
+pub(crate) enum InternalOutputSubstitutionError {
+    /// Output substitution is disabled
+    OutputSubstitutionDisabled(&'static str),
+    /// Current output substitution implementation doesn't support reducing the number of outputs
+    NotEnoughOutputs,
+    /// The provided drain script could not be identified in the provided replacement outputs
+    InvalidDrainScript,
+}
+
+impl fmt::Display for OutputSubstitutionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.0 {
+            InternalOutputSubstitutionError::OutputSubstitutionDisabled(reason) => write!(f, "{}", &format!("Output substitution is disabled: {}", reason)),
+            InternalOutputSubstitutionError::NotEnoughOutputs => write!(
+                f,
+                "Current output substitution implementation doesn't support reducing the number of outputs"
+            ),
+            InternalOutputSubstitutionError::InvalidDrainScript =>
+                write!(f, "The provided drain script could not be identified in the provided replacement outputs"),
+        }
+    }
+}
+
+impl From<InternalOutputSubstitutionError> for OutputSubstitutionError {
+    fn from(value: InternalOutputSubstitutionError) -> Self { OutputSubstitutionError(value) }
+}
+
+impl std::error::Error for OutputSubstitutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0 {
+            InternalOutputSubstitutionError::OutputSubstitutionDisabled(_) => None,
+            InternalOutputSubstitutionError::NotEnoughOutputs => None,
+            InternalOutputSubstitutionError::InvalidDrainScript => None,
         }
     }
 }
@@ -146,6 +268,46 @@ pub(crate) enum InternalSelectionError {
     NotFound,
 }
 
+impl fmt::Display for SelectionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.0 {
+            InternalSelectionError::Empty => write!(f, "No candidates available for selection"),
+            InternalSelectionError::TooManyOutputs => write!(
+                f,
+                "Current privacy selection implementation only supports 2-output transactions"
+            ),
+            InternalSelectionError::NotFound =>
+                write!(f, "No selection candidates improve privacy"),
+        }
+    }
+}
+
 impl From<InternalSelectionError> for SelectionError {
     fn from(value: InternalSelectionError) -> Self { SelectionError(value) }
+}
+
+/// Error that may occur when input contribution fails.
+///
+/// This is currently opaque type because we aren't sure which variants will stay.
+/// You can only display it.
+#[derive(Debug)]
+pub struct InputContributionError(InternalInputContributionError);
+
+#[derive(Debug)]
+pub(crate) enum InternalInputContributionError {
+    /// Total input value is not enough to cover additional output value
+    ValueTooLow,
+}
+
+impl fmt::Display for InputContributionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self.0 {
+            InternalInputContributionError::ValueTooLow =>
+                write!(f, "Total input value is not enough to cover additional output value"),
+        }
+    }
+}
+
+impl From<InternalInputContributionError> for InputContributionError {
+    fn from(value: InternalInputContributionError) -> Self { InputContributionError(value) }
 }

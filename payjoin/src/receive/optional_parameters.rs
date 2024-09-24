@@ -4,10 +4,15 @@ use std::fmt;
 use bitcoin::FeeRate;
 use log::warn;
 
-#[derive(Debug)]
+#[cfg(feature = "v2")]
+pub(crate) const SUPPORTED_VERSIONS: [usize; 2] = [1, 2];
+#[cfg(not(feature = "v2"))]
+pub(crate) const SUPPORTED_VERSIONS: [usize; 1] = [1];
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Params {
     // version
-    // v: usize,
+    pub v: usize,
     // disableoutputsubstitution
     pub disable_output_substitution: bool,
     // maxadditionalfeecontribution, additionalfeeoutputindex
@@ -19,6 +24,7 @@ pub(crate) struct Params {
 impl Default for Params {
     fn default() -> Self {
         Params {
+            v: 1,
             disable_output_substitution: false,
             additional_fee_contribution: None,
             min_feerate: FeeRate::ZERO,
@@ -39,11 +45,12 @@ impl Params {
         let mut additional_fee_output_index = None;
         let mut max_additional_fee_contribution = None;
 
-        for (k, v) in pairs {
-            match (k.borrow(), v.borrow()) {
-                ("v", v) =>
-                    if v != "1" {
-                        return Err(Error::UnknownVersion);
+        for (key, v) in pairs {
+            match (key.borrow(), v.borrow()) {
+                ("v", version) =>
+                    params.v = match version.parse::<usize>() {
+                        Ok(version) if SUPPORTED_VERSIONS.contains(&version) => version,
+                        _ => return Err(Error::UnknownVersion),
                     },
                 ("additionalfeeoutputindex", index) =>
                     additional_fee_output_index = match index.parse::<usize>() {
@@ -69,10 +76,14 @@ impl Params {
                             }
                         },
                 ("minfeerate", feerate) =>
-                    params.min_feerate = match feerate.parse::<u64>() {
-                        Ok(rate) => FeeRate::from_sat_per_vb(rate)
-                            .ok_or_else(|| Error::FeeRate(rate.to_string()))?,
-                        Err(e) => return Err(Error::FeeRate(e.to_string())),
+                    params.min_feerate = match feerate.parse::<f32>() {
+                        Ok(fee_rate_sat_per_vb) => {
+                            // TODO Parse with serde when rust-bitcoin supports it
+                            let fee_rate_sat_per_kwu = fee_rate_sat_per_vb * 250.0_f32;
+                            // since it's a minnimum, we want to round up
+                            FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu.ceil() as u64)
+                        }
+                        Err(_) => return Err(Error::FeeRate),
                     },
                 ("disableoutputsubstitution", v) =>
                     params.disable_output_substitution = v == "true",
@@ -97,14 +108,14 @@ impl Params {
 #[derive(Debug)]
 pub(crate) enum Error {
     UnknownVersion,
-    FeeRate(String),
+    FeeRate,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::UnknownVersion => write!(f, "unknown version"),
-            Error::FeeRate(_) => write!(f, "could not parse feerate"),
+            Error::FeeRate => write!(f, "could not parse feerate"),
         }
     }
 }

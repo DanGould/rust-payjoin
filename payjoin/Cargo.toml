@@ -1,31 +1,56 @@
 [package]
 name = "payjoin"
-version = "0.9.0"
-authors = ["Dan Gould <dan@chaincase.app>"]
+version = "0.20.0"
+authors = ["Dan Gould <d@ngould.dev>"]
 description = "Payjoin Library for the BIP78 Pay to Endpoint protocol."
 repository = "https://github.com/payjoin/rust-payjoin"
 readme = "../README.md"
 keywords = ["bip78", "payjoin", "bitcoin"]
 categories = ["api-bindings", "cryptography::cryptocurrencies", "network-programming"]
 license = "MITNFA"
-edition = "2018"
+resolver = "2"
+edition = "2021"
+rust-version = "1.63"
+exclude = ["tests"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
 send = []
-receive = ["rand"]
+receive = ["bitcoin/rand"]
+base64 = ["bitcoin/base64"]
+v2 = ["bitcoin/rand", "bitcoin/serde", "hpke", "dep:http", "bhttp", "ohttp", "serde", "url/serde"]
+io = ["reqwest/rustls-tls"]
+danger-local-https = ["io", "reqwest/rustls-tls", "rustls"]
 
 [dependencies]
-bitcoin = { version = "0.30.0", features = ["base64"] }
-bip21 = "0.3.1"
+bitcoin = { version = "0.32.2", features = ["base64"] }
+bip21 = "0.5.0"
+hpke = { package = "bitcoin-hpke", version = "0.13.0", optional = true }
 log = { version = "0.4.14"}
-rand = { version = "0.8.4", optional = true }
+http = { version = "1", optional = true }
+bhttp = { version = "=0.5.1", optional = true }
+ohttp = { package = "bitcoin-ohttp", version = "0.6.0", optional = true }
+serde = { version = "1.0.186", default-features = false, optional = true }
+reqwest = { version = "0.12", default-features = false, optional = true }
+rustls = { version = "0.22.4", optional = true }
 url = "2.2.2"
+serde_json = "1.0.108"
 
 [dev-dependencies]
-env_logger = "0.9.0"
-bitcoind = { version = "0.31.1", features = ["0_21_2"] }
+bitcoind = { version = "0.36.0", features = ["0_21_2"] }
+http = "1"
+payjoin-directory = { path = "../payjoin-directory", features = ["danger-local-https"] }
+ohttp-relay = "0.0.8"
+once_cell = "1"
+rcgen = { version = "0.11" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustls = "0.22.2"
+testcontainers = "0.15.0"
+testcontainers-modules = { version = "0.1.3", features = ["redis"] }
+tokio = { version = "1.12.0", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 
 [package.metadata.docs.rs]
-features = ["send", "receive"]
+features = ["send", "receive", "base64", "v2", "io"]

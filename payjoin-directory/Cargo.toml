@@ -1,0 +1,34 @@
+[package]
+name = "payjoin-directory"
+version = "0.0.1"
+authors = ["Dan Gould <d@ngould.dev>"]
+description = "A directory server for Payjoin V2 coordination"
+repository = "https://github.com/payjoin/rust-payjoin"
+readme = "README.md"
+keywords = ["bip78", "bip77", "payjoin", "bitcoin", "relay"]
+categories = ["cryptography::cryptocurrencies", "network-programming"]
+license = "MITNFA"
+edition = "2021"
+resolver = "2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+danger-local-https = ["hyper-rustls", "rustls", "tokio-rustls"]
+
+[dependencies]
+anyhow = "1.0.71"
+bitcoin = { version = "0.32.2", features = ["base64"] }
+bhttp = { version = "=0.5.1", features = ["http"] }
+futures = "0.3.17"
+http-body-util = "0.1.2"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-rustls = { version = "0.26", optional = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+ohttp = { package = "bitcoin-ohttp", version = "0.6.0"}
+redis = { version = "0.23.3", features = ["aio", "tokio-comp"] }
+rustls = { version = "0.22.4", optional = true }
+tokio = { version = "1.12.0", features = ["full"] }
+tokio-rustls = { version = "0.25", features = ["ring"], default-features = false, optional = true }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }

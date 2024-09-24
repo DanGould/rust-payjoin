@@ -4,12 +4,15 @@ on: [push, pull_request]
 
 jobs:
 
-  test-lib:
+  test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, nightly]
+        rust:
+          - 1.63.0 # MSRV
+          - stable
+          - nightly
 
     steps:
       - uses: actions/checkout@v2
@@ -18,46 +21,18 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
           override: true
-      - name: test
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --verbose --all-features --lib --manifest-path payjoin/Cargo.toml
+      - name: Run tests
+        run: RUST_LOG=debug bash contrib/test.sh
 
-  build-payjoin-cli:
+  rustfmt:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [stable, nightly]
-
     steps:
       - uses: actions/checkout@v2
       - uses: Swatinem/rust-cache@v1.2.0
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - run: cd payjoin-cli
-      - name: build payjoin example
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: --manifest-path payjoin-cli/Cargo.toml
-
-  fmt:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        rust: [nightly]
-
-    steps:
-      - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v1.2.0
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: nightly
           override: true
       - run: rustup component add rustfmt --toolchain nightly-x86_64-unknown-linux-gnu
-      - run: cargo fmt --all -- --check
+      - name: fmt check
+        run: cargo fmt --all -- --check

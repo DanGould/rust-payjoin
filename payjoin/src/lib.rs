@@ -27,12 +27,28 @@ pub use crate::receive::Error;
 #[cfg(feature = "send")]
 pub mod send;
 
+#[cfg(feature = "v2")]
+pub(crate) mod v2;
+#[cfg(feature = "v2")]
+pub use v2::OhttpKeys;
+
+#[cfg(feature = "io")]
+pub mod io;
+
 #[cfg(any(feature = "send", feature = "receive"))]
 pub(crate) mod input_type;
 #[cfg(any(feature = "send", feature = "receive"))]
 pub(crate) mod psbt;
+#[cfg(any(feature = "send", all(feature = "receive", feature = "v2")))]
+mod request;
+#[cfg(any(feature = "send", all(feature = "receive", feature = "v2")))]
+pub use request::*;
+
 mod uri;
 #[cfg(any(feature = "send", feature = "receive"))]
 pub(crate) mod weight;
 
-pub use uri::{PjParseError, PjUri, PjUriExt, Uri, UriExt};
+#[cfg(feature = "base64")]
+pub use bitcoin::base64;
+pub use uri::{PjParseError, PjUri, PjUriBuilder, Uri, UriExt};
+pub use url::{ParseError, Url};

@@ -1,4 +1,3 @@
-use std::convert::{TryFrom, TryInto};
 use std::fmt;
 
 use bitcoin::blockdata::script::{Instruction, Instructions, Script};
@@ -20,6 +19,62 @@ pub(crate) enum InputType {
     P2Sh,
     SegWitV0 { ty: SegWitV0Type, nested: bool },
     Taproot,
+}
+
+#[cfg(feature = "v2")]
+impl serde::Serialize for InputType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use InputType::*;
+
+        match self {
+            P2Pk => serializer.serialize_str("P2PK"),
+            P2Pkh => serializer.serialize_str("P2PKH"),
+            P2Sh => serializer.serialize_str("P2SH"),
+            SegWitV0 { ty, nested } =>
+                serializer.serialize_str(&format!("SegWitV0: type={}, nested={}", ty, nested)),
+            Taproot => serializer.serialize_str("Taproot"),
+        }
+    }
+}
+
+#[cfg(feature = "v2")]
+impl<'de> serde::Deserialize<'de> for InputType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use InputType::*;
+
+        let s = String::deserialize(deserializer)?;
+        if let Some(rest) = s.strip_prefix("SegWitV0: ") {
+            let parts: Vec<&str> = rest.split(", ").collect();
+            if parts.len() != 2 {
+                return Err(serde::de::Error::custom("invalid format for SegWitV0"));
+            }
+            log::debug!("parts: {:?}", parts);
+            let ty = match parts[0].strip_prefix("type=") {
+                Some("pubkey") => SegWitV0Type::Pubkey,
+                Some("script") => SegWitV0Type::Script,
+                _ => return Err(serde::de::Error::custom("invalid SegWitV0 type")),
+            };
+
+            let nested = match parts[1].strip_prefix("nested=") {
+                Some("true") => true,
+                Some("false") => false,
+                _ => return Err(serde::de::Error::custom("invalid SegWitV0 nested value")),
+            };
+
+            Ok(SegWitV0 { ty, nested })
+        } else {
+            match s.as_str() {
+                "P2PK" => Ok(P2Pk),
+                "P2PKH" => Ok(P2Pkh),
+                "P2SH" => Ok(P2Sh),
+                "Taproot" => Ok(Taproot),
+                _ => Err(serde::de::Error::custom("invalid type")),
+            }
+        }
+    }
 }
 
 impl InputType {
@@ -158,9 +213,11 @@ impl std::error::Error for InputTypeError {}
 mod tests {
     use bitcoin::psbt::Input as PsbtInput;
     use bitcoin::script::PushBytesBuf;
-    use bitcoin::{PublicKey, ScriptBuf};
+    use bitcoin::{Amount, PublicKey, ScriptBuf};
 
     use super::*;
+
+    static FORTY_TWO: Amount = Amount::from_sat(42);
 
     fn wrap_p2sh_script(script: &Script) -> ScriptBuf {
         let bytes: PushBytesBuf = script
@@ -172,13 +229,13 @@ mod tests {
 
     #[test]
     fn test_p2pk() {
-        let input_type = InputType::from_spent_input(&TxOut { script_pubkey: ScriptBuf::new_p2pk(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap()), value: 42, }, &Default::default()).unwrap();
+        let input_type = InputType::from_spent_input(&TxOut { script_pubkey: ScriptBuf::new_p2pk(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap()), value: FORTY_TWO, }, &Default::default()).unwrap();
         assert_eq!(input_type, InputType::P2Pk);
     }
 
     #[test]
     fn test_p2pkh() {
-        let input_type = InputType::from_spent_input(&TxOut { script_pubkey: ScriptBuf::new_p2pkh(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap().pubkey_hash()), value: 42, }, &Default::default()).unwrap();
+        let input_type = InputType::from_spent_input(&TxOut { script_pubkey: ScriptBuf::new_p2pkh(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap().pubkey_hash()), value: FORTY_TWO, }, &Default::default()).unwrap();
         assert_eq!(input_type, InputType::P2Pkh);
     }
 
@@ -186,7 +243,7 @@ mod tests {
     fn test_p2sh() {
         let script = ScriptBuf::new_op_return(&[42]);
         let input_type = InputType::from_spent_input(
-            &TxOut { script_pubkey: ScriptBuf::new_p2sh(&script.script_hash()), value: 42 },
+            &TxOut { script_pubkey: ScriptBuf::new_p2sh(&script.script_hash()), value: FORTY_TWO },
             &PsbtInput { final_script_sig: Some(script), ..Default::default() },
         )
         .unwrap();
@@ -195,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_p2wpkh() {
-        let input_type = InputType::from_spent_input(&TxOut { script_pubkey: ScriptBuf::new_v0_p2wpkh(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap().wpubkey_hash().expect("WTF, the key is uncompressed")), value: 42, }, &Default::default()).unwrap();
+        let input_type = InputType::from_spent_input(&TxOut { script_pubkey: ScriptBuf::new_p2wpkh(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap().wpubkey_hash().expect("WTF, the key is uncompressed")), value: FORTY_TWO, }, &Default::default()).unwrap();
         assert_eq!(input_type, InputType::SegWitV0 { ty: SegWitV0Type::Pubkey, nested: false });
     }
 
@@ -203,7 +260,10 @@ mod tests {
     fn test_p2wsh() {
         let script = ScriptBuf::new_op_return(&[42]);
         let input_type = InputType::from_spent_input(
-            &TxOut { script_pubkey: ScriptBuf::new_v0_p2wsh(&script.wscript_hash()), value: 42 },
+            &TxOut {
+                script_pubkey: ScriptBuf::new_p2wsh(&script.wscript_hash()),
+                value: FORTY_TWO,
+            },
             &PsbtInput { final_script_sig: Some(script), ..Default::default() },
         )
         .unwrap();
@@ -212,12 +272,12 @@ mod tests {
 
     #[test]
     fn test_p2sh_p2wpkh() {
-        let segwit_script = ScriptBuf::new_v0_p2wpkh(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap().wpubkey_hash().expect("WTF, the key is uncompressed"));
+        let segwit_script = ScriptBuf::new_p2wpkh(&PublicKey::from_slice(b"\x02\x50\x86\x3A\xD6\x4A\x87\xAE\x8A\x2F\xE8\x3C\x1A\xF1\xA8\x40\x3C\xB5\x3F\x53\xE4\x86\xD8\x51\x1D\xAD\x8A\x04\x88\x7E\x5B\x23\x52").unwrap().wpubkey_hash().expect("WTF, the key is uncompressed"));
         let segwit_script_hash = segwit_script.script_hash();
         let script_sig = wrap_p2sh_script(&segwit_script);
 
         let input_type = InputType::from_spent_input(
-            &TxOut { script_pubkey: ScriptBuf::new_p2sh(&segwit_script_hash), value: 42 },
+            &TxOut { script_pubkey: ScriptBuf::new_p2sh(&segwit_script_hash), value: FORTY_TWO },
             &PsbtInput { final_script_sig: Some(script_sig), ..Default::default() },
         )
         .unwrap();
@@ -227,12 +287,12 @@ mod tests {
     #[test]
     fn test_p2sh_p2wsh() {
         let script = ScriptBuf::new_op_return(&[42]);
-        let segwit_script = ScriptBuf::new_v0_p2wsh(&script.wscript_hash());
+        let segwit_script = ScriptBuf::new_p2wsh(&script.wscript_hash());
         let segwit_script_hash = segwit_script.script_hash();
         let script_sig = wrap_p2sh_script(&segwit_script);
 
         let input_type = InputType::from_spent_input(
-            &TxOut { script_pubkey: ScriptBuf::new_p2sh(&segwit_script_hash), value: 42 },
+            &TxOut { script_pubkey: ScriptBuf::new_p2sh(&segwit_script_hash), value: FORTY_TWO },
             &PsbtInput { final_script_sig: Some(script_sig), ..Default::default() },
         )
         .unwrap();
