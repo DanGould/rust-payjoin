@@ -89,9 +89,7 @@ mod integration {
 
         use bitcoin::Address;
         use http::StatusCode;
-        use payjoin::receive::v2::{
-            ActiveSession, PayjoinProposal, SessionInitializer, UncheckedProposal,
-        };
+        use payjoin::receive::v2::{PayjoinProposal, Receiver, UncheckedProposal};
         use payjoin::{OhttpKeys, PjUri, UriExt};
         use reqwest::{Client, ClientBuilder, Error, Response};
         use testcontainers_modules::redis::Redis;
@@ -113,7 +111,7 @@ mod integration {
             let directory = Url::parse(&format!("https://localhost:{}", port)).unwrap();
             tokio::select!(
                 _ = init_directory(port, (cert.clone(), key)) => assert!(false, "Directory server is long running"),
-                res = enroll_with_bad_keys(directory, bad_ohttp_keys, cert) => {
+                res = try_request_with_bad_keys(directory, bad_ohttp_keys, cert) => {
                     assert_eq!(
                         res.unwrap().headers().get("content-type").unwrap(),
                         "application/problem+json"
@@ -121,7 +119,7 @@ mod integration {
                 }
             );
 
-            async fn enroll_with_bad_keys(
+            async fn try_request_with_bad_keys(
                 directory: Url,
                 bad_ohttp_keys: OhttpKeys,
                 cert_der: Vec<u8>,
@@ -132,13 +130,8 @@ mod integration {
                 let mock_address = Address::from_str("tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4")
                     .unwrap()
                     .assume_checked();
-                let mut bad_initializer = SessionInitializer::new(
-                    mock_address,
-                    directory,
-                    bad_ohttp_keys,
-                    mock_ohttp_relay,
-                    None,
-                );
+                let mut bad_initializer =
+                    Receiver::new(mock_address, directory, bad_ohttp_keys, mock_ohttp_relay, None);
                 let (req, _ctx) = bad_initializer.extract_req().expect("Failed to extract request");
                 agent.post(req.url).body(req.body).send().await
             }
@@ -181,7 +174,6 @@ mod integration {
                     address.clone(),
                     directory.clone(),
                     ohttp_keys.clone(),
-                    cert_der,
                     Some(Duration::from_secs(0)),
                 )
                 .await?;
@@ -251,7 +243,6 @@ mod integration {
                     address.clone(),
                     directory.clone(),
                     ohttp_keys.clone(),
-                    cert_der.clone(),
                     None,
                 )
                 .await?;
@@ -417,14 +408,8 @@ mod integration {
                         .await?;
                 let address = receiver.get_new_address(None, None)?.assume_checked();
 
-                let mut session = initialize_session(
-                    address,
-                    directory,
-                    ohttp_keys.clone(),
-                    cert_der.clone(),
-                    None,
-                )
-                .await?;
+                let mut session =
+                    initialize_session(address, directory, ohttp_keys.clone(), None).await?;
 
                 let pj_uri_string = session.pj_uri_builder().build().to_string();
 
@@ -535,14 +520,7 @@ mod integration {
             let db = docker.run(Redis::default());
             let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
             println!("Database running on {}", db.get_host_port_ipv4(6379));
-            payjoin_directory::listen_tcp_with_tls(
-                format!("http://localhost:{}", port),
-                port,
-                db_host,
-                timeout,
-                local_cert_key,
-            )
-            .await
+            payjoin_directory::listen_tcp_with_tls(port, db_host, timeout, local_cert_key).await
         }
 
         // generates or gets a DER encoded localhost cert and key.
@@ -561,23 +539,17 @@ mod integration {
             address: Address,
             directory: Url,
             ohttp_keys: OhttpKeys,
-            cert_der: Vec<u8>,
             custom_expire_after: Option<Duration>,
-        ) -> Result<ActiveSession, BoxError> {
+        ) -> Result<Receiver, BoxError> {
             let mock_ohttp_relay = directory.clone(); // pass through to directory
-            let mut initializer = SessionInitializer::new(
+            let initializer = Receiver::new(
                 address,
                 directory.clone(),
                 ohttp_keys,
                 mock_ohttp_relay.clone(),
                 custom_expire_after,
             );
-            let (req, ctx) = initializer.extract_req()?;
-            println!("enroll req: {:#?}", &req);
-            let response =
-                http_agent(cert_der).unwrap().post(req.url).body(req.body).send().await?;
-            assert!(response.status().is_success());
-            Ok(initializer.process_res(response.bytes().await?.to_vec().as_slice(), ctx)?)
+            Ok(initializer)
         }
 
         fn handle_directory_proposal(
