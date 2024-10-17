@@ -374,6 +374,7 @@ pub enum Context {
     V2(V2PostContext),
 }
 
+#[derive(Clone)]
 pub struct V1Context {
     psbt_context: PsbtContext,
 }
