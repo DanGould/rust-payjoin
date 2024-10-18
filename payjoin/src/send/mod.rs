@@ -320,7 +320,6 @@ impl Sender {
         let hpke_ctx = HpkeContext::new(rs);
         let body = encrypt_message_a(
             body,
-            &hpke_ctx.encapsulation_pair.clone(),
             &hpke_ctx.reply_pair.public_key().clone(),
             &hpke_ctx.receiver.clone(),
         )
@@ -439,7 +438,6 @@ impl V2GetContext {
         url.set_path(&subdir);
         let body = encrypt_message_a(
             Vec::new(),
-            &self.hpke_ctx.encapsulation_pair.clone(),
             &self.hpke_ctx.reply_pair.public_key().clone(),
             &self.hpke_ctx.receiver.clone(),
         )
