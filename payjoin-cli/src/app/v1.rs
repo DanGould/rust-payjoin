@@ -379,7 +379,8 @@ fn try_contributing_inputs(
         .list_unspent(None, None, None, None, None)
         .context("Failed to list unspent from bitcoind")?
         .into_iter()
-        .map(input_pair_from_list_unspent);
+        .map(input_pair_from_list_unspent)
+        .collect::<Result<Vec<_>>>()?;
     let selected_input = payjoin
         .try_preserving_privacy(candidate_inputs)
         .map_err(|e| anyhow!("Failed to make privacy preserving selection: {}", e))?;

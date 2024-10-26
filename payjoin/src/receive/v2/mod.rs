@@ -11,8 +11,8 @@ use url::Url;
 
 use super::v2::error::{InternalSessionError, SessionError};
 use super::{
-    Error, InputContributionError, InternalRequestError, OutputSubstitutionError, RequestError,
-    SelectionError,
+    Error, InputContributionError, InputPair, InternalRequestError, OutputSubstitutionError,
+    RequestError, SelectionError,
 };
 use crate::hpke::{decrypt_message_a, encrypt_message_b, HpkeKeyPair, HpkePublicKey};
 use crate::ohttp::{ohttp_decapsulate, ohttp_encapsulate, OhttpEncapsulationError, OhttpKeys};
@@ -387,16 +387,16 @@ impl WantsInputs {
     /// https://eprint.iacr.org/2022/589.pdf
     pub fn try_preserving_privacy(
         &self,
-        candidate_inputs: impl IntoIterator<Item = (PsbtInput, TxIn)>,
-    ) -> Result<(PsbtInput, TxIn), SelectionError> {
+        candidate_inputs: impl IntoIterator<Item = InputPair>,
+    ) -> Result<InputPair, SelectionError> {
         self.inner.try_preserving_privacy(candidate_inputs)
     }
 
     /// Add the provided list of inputs to the transaction.
     /// Any excess input amount is added to the change_vout output indicated previously.
-    pub fn contribute_inputs(
+    pub fn contribute_inputs<'a>(
         self,
-        inputs: impl IntoIterator<Item = (PsbtInput, TxIn)>,
+        inputs: impl IntoIterator<Item = InputPair>,
     ) -> Result<WantsInputs, InputContributionError> {
         let inner = self.inner.contribute_inputs(inputs)?;
         Ok(WantsInputs { inner, context: self.context })

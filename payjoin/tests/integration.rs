@@ -12,6 +12,7 @@ mod integration {
     use bitcoind::bitcoincore_rpc::{self, RpcApi};
     use log::{log_enabled, Level};
     use once_cell::sync::{Lazy, OnceCell};
+    use payjoin::receive::{InputPair, PsbtInputError};
     use payjoin::send::SenderBuilder;
     use payjoin::{PjUri, PjUriBuilder, Request, Uri};
     use tracing_subscriber::{EnvFilter, FmtSubscriber};
@@ -560,7 +561,10 @@ mod integration {
                 // POST payjoin
                 let proposal =
                     session.process_res(response.bytes().await?.to_vec().as_slice(), ctx)?.unwrap();
-                let inputs = receiver_utxos.into_iter().map(input_pair_from_list_unspent).collect();
+                let inputs = receiver_utxos
+                    .into_iter()
+                    .map(|utxo| input_pair_from_list_unspent(&utxo))
+                    .collect::<Result<Vec<_>, BoxError>>()?;
                 let mut payjoin_proposal =
                     handle_directory_proposal(&receiver, proposal, Some(inputs));
                 assert!(!payjoin_proposal.is_output_substitution_disabled());
@@ -831,7 +835,7 @@ mod integration {
         fn handle_directory_proposal(
             receiver: &bitcoincore_rpc::Client,
             proposal: UncheckedProposal,
-            custom_inputs: Option<Vec<(PsbtInput, TxIn)>>,
+            custom_inputs: Option<Vec<InputPair>>,
         ) -> PayjoinProposal {
             // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
             let _to_broadcast_in_failure_case = proposal.extract_tx_to_schedule_broadcast();
@@ -878,7 +882,9 @@ mod integration {
                         .list_unspent(None, None, None, None, None)
                         .unwrap()
                         .into_iter()
-                        .map(input_pair_from_list_unspent);
+                        .map(|utxo| input_pair_from_list_unspent(&utxo))
+                        .collect::<Result<Vec<_>, BoxError>>()
+                        .unwrap();
                     let selected_input = payjoin
                         .try_preserving_privacy(candidate_inputs)
                         .map_err(|e| {
@@ -1037,7 +1043,10 @@ mod integration {
                     .script_pubkey(),
             }];
             let drain_script = outputs[0].script_pubkey.clone();
-            let inputs = receiver_utxos.into_iter().map(input_pair_from_list_unspent).collect();
+            let inputs = receiver_utxos
+                .iter()
+                .map(input_pair_from_list_unspent)
+                .collect::<Result<Vec<_>, BoxError>>()?;
             let response = handle_v1_pj_request(
                 req,
                 headers,
@@ -1240,7 +1249,7 @@ mod integration {
         receiver: &bitcoincore_rpc::Client,
         custom_outputs: Option<Vec<TxOut>>,
         drain_script: Option<&bitcoin::Script>,
-        custom_inputs: Option<Vec<(PsbtInput, TxIn)>>,
+        custom_inputs: Option<Vec<InputPair>>,
     ) -> Result<String, BoxError> {
         // Receiver receive payjoin proposal, IRL it will be an HTTP request (over ssl or onion)
         let proposal = payjoin::receive::UncheckedProposal::from_request(
@@ -1261,7 +1270,7 @@ mod integration {
         receiver: &bitcoincore_rpc::Client,
         custom_outputs: Option<Vec<TxOut>>,
         drain_script: Option<&bitcoin::Script>,
-        custom_inputs: Option<Vec<(PsbtInput, TxIn)>>,
+        custom_inputs: Option<Vec<InputPair>>,
     ) -> Result<payjoin::receive::PayjoinProposal, BoxError> {
         // in a payment processor where the sender could go offline, this is where you schedule to broadcast the original_tx
         let _to_broadcast_in_failure_case = proposal.extract_tx_to_schedule_broadcast();
@@ -1306,7 +1315,10 @@ mod integration {
                 let candidate_inputs = receiver
                     .list_unspent(None, None, None, None, None)?
                     .into_iter()
-                    .map(input_pair_from_list_unspent);
+                    .map(|utxo: bitcoincore_rpc::json::ListUnspentResultEntry| {
+                        input_pair_from_list_unspent(&utxo)
+                    })
+                    .collect::<Result<Vec<_>, BoxError>>()?;
                 let selected_input = payjoin
                     .try_preserving_privacy(candidate_inputs)
                     .map_err(|e| format!("Failed to make privacy preserving selection: {:?}", e))?;
@@ -1375,8 +1387,8 @@ mod integration {
     }
 
     fn input_pair_from_list_unspent(
-        utxo: bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::ListUnspentResultEntry,
-    ) -> (PsbtInput, TxIn) {
+        utxo: &bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::ListUnspentResultEntry,
+    ) -> Result<InputPair, BoxError> {
         let psbtin = PsbtInput {
             // NOTE: non_witness_utxo is not necessary because bitcoin-cli always supplies
             // witness_utxo, even for non-witness inputs
@@ -1392,7 +1404,8 @@ mod integration {
             previous_output: OutPoint { txid: utxo.txid, vout: utxo.vout },
             ..Default::default()
         };
-        (psbtin, txin)
+        InputPair::new(txin.clone(), psbtin.clone())
+            .map_err(|e| format!("Failed to create input pair: {:?}", e).into())
     }
 
     struct HeaderMock(HashMap<String, String>);
