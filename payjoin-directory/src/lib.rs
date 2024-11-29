@@ -40,11 +40,10 @@ pub async fn listen_tcp_with_tls_on_free_port(
     timeout: Duration,
     cert_key: (Vec<u8>, Vec<u8>),
 ) -> Result<(u16, tokio::task::JoinHandle<Result<(), BoxError>>), BoxError> {
-    let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
+    let listener = tokio::net::TcpListener::bind("[::]:0").await?;
     let port = listener.local_addr()?.port();
-    println!("Directory server binding to port {}", port);
+    println!("Directory server binding to port {}", listener.local_addr()?);
 
-    let listener = tokio::net::TcpListener::from_std(listener)?;
     println!("tokio listener created");
     let handle = listen_tcp_with_tls_on_listener(listener, db_host, timeout, cert_key).await?;
     println!("Directory server started");
