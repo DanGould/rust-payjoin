@@ -53,7 +53,7 @@ pub async fn listen_tcp_with_tls_on_free_port(
 // Helper function to avoid code duplication
 async fn listen_tcp_with_tls_on_listener(
     listener: tokio::net::TcpListener,
-    db_host: String, 
+    db_host: String,
     timeout: Duration,
     tls_config: (Vec<u8>, Vec<u8>),
 ) -> Result<tokio::task::JoinHandle<Result<(), BoxError>>, BoxError> {
@@ -131,7 +131,7 @@ pub async fn listen_tcp(
 pub async fn listen_tcp_with_tls(
     port: u16,
     db_host: String,
-    timeout: Duration, 
+    timeout: Duration,
     cert_key: (Vec<u8>, Vec<u8>),
 ) -> Result<tokio::task::JoinHandle<Result<(), BoxError>>, BoxError> {
     let addr = format!("0.0.0.0:{}", port);

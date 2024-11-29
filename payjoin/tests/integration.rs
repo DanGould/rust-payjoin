@@ -212,7 +212,7 @@ mod integration {
                     eprintln!("Directory server error: {:?}", e);
                 }
             });
-            
+
             tokio::select!(
                 _ = directory_task => panic!("Directory server is long running"),
                 res = try_request_with_bad_keys(directory, bad_ohttp_keys, cert) => {
