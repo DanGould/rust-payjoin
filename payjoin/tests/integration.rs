@@ -183,6 +183,7 @@ mod integration {
         use payjoin::receive::v2::{PayjoinProposal, Receiver, UncheckedProposal};
         use payjoin::{HpkeKeyPair, OhttpKeys, PjUri, UriExt};
         use reqwest::{Client, ClientBuilder, Error, Response};
+        use testcontainers::Container;
         use testcontainers_modules::redis::Redis;
         use testcontainers_modules::testcontainers::clients::Cli;
 
@@ -200,7 +201,12 @@ mod integration {
 
             let (cert, key) = local_cert_key();
             dbg!("G");
-            let (port, directory_future) = init_directory((cert.clone(), key))
+
+            let docker: Cli = Cli::default();
+            let db = docker.run(Redis);
+            let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
+
+            let (port, directory_future) = init_directory(db_host, (cert.clone(), key))
                 .await
                 .expect("Failed to init directory");
             println!("Directory server started on port IN TEST FN {}", port);
@@ -250,7 +256,12 @@ mod integration {
             let ohttp_relay_port = find_free_port();
             let ohttp_relay =
                 Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let (directory_port, directory_handle) = init_directory((cert.clone(), key))
+
+            let docker: Cli = Cli::default();
+            let db = docker.run(Redis);
+            let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
+
+            let (directory_port, directory_handle) = init_directory(db_host, (cert.clone(), key))
                 .await
                 .expect("Failed to init directory");
             let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
@@ -321,7 +332,12 @@ mod integration {
             let ohttp_relay_port = find_free_port();
             let ohttp_relay =
                 Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let (directory_port, directory_future) = init_directory((cert.clone(), key))
+
+            let docker: Cli = Cli::default();
+            let db = docker.run(Redis);
+            let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
+
+            let (directory_port, directory_future) = init_directory(db_host, (cert.clone(), key))
                 .await
                 .expect("Failed to init directory");
             let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
@@ -455,7 +471,12 @@ mod integration {
             let ohttp_relay_port = find_free_port();
             let ohttp_relay =
                 Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let (directory_port, directory_future) = init_directory((cert.clone(), key))
+
+            let docker: Cli = Cli::default();
+            let db = docker.run(Redis);
+            let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
+
+            let (directory_port, directory_future) = init_directory(db_host, (cert.clone(), key))
                 .await
                 .expect("Failed to init directory");
             let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
@@ -675,7 +696,11 @@ mod integration {
             let ohttp_relay_port = find_free_port();
             let ohttp_relay =
                 Url::parse(&format!("http://localhost:{}", ohttp_relay_port)).unwrap();
-            let (directory_port, directory_future) = init_directory((cert.clone(), key))
+
+            let docker: Cli = Cli::default();
+            let db = docker.run(Redis);
+            let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
+            let (directory_port, directory_future) = init_directory(db_host, (cert.clone(), key))
                 .await
                 .expect("Failed to init directory");
             let directory = Url::parse(&format!("https://localhost:{}", directory_port)).unwrap();
@@ -803,15 +828,15 @@ mod integration {
             }
         }
 
-        async fn init_directory(
+        async fn init_directory<'a>(
+            db_host: String,
             local_cert_key: (Vec<u8>, Vec<u8>),
-        ) -> Result<(u16, tokio::task::JoinHandle<Result<(), BoxSendSyncError>>), BoxSendSyncError> {
-            let docker: Cli = Cli::default();
+        ) -> Result<(u16, tokio::task::JoinHandle<Result<(), BoxSendSyncError>>), BoxSendSyncError>
+        {
+            println!("Database running on {}", db_host);
             let timeout = Duration::from_secs(2);
-            let db = docker.run(Redis);
-            let db_host = format!("127.0.0.1:{}", db.get_host_port_ipv4(6379));
-            println!("Database running on {}", db.get_host_port_ipv4(6379));
-            payjoin_directory::listen_tcp_with_tls_on_free_port(db_host, timeout, local_cert_key).await
+            payjoin_directory::listen_tcp_with_tls_on_free_port(db_host, timeout, local_cert_key)
+                .await
         }
 
         // generates or gets a DER encoded localhost cert and key.
