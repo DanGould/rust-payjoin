@@ -22,12 +22,14 @@
 //! wallet and http client.
 
 use bitcoin::hashes::{sha256, Hash};
-pub use error::CreateRequestError;
-use error::InternalCreateRequestError;
+use bitcoin::{FeeRate, Psbt};
+pub use error::{CreateRequestError, ResponseError};
+pub(crate) use error::{InternalCreateRequestError, InternalValidationError};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::error::BuildSenderError;
+//use super::{serialize_url, PsbtContext, V1Context};
 use super::*;
 use crate::hpke::{decrypt_message_b, encrypt_message_a, HpkeSecretKey};
 use crate::ohttp::{ohttp_decapsulate, ohttp_encapsulate};
@@ -126,7 +128,7 @@ pub struct Sender {
 
 impl Sender {
     /// Extract serialized V1 Request and Context from a Payjoin Proposal
-    pub fn extract_v1(&self) -> Result<(Request, V1Context), url::ParseError> {
+    pub fn extract_v1(&self) -> Result<(Request, v1::V1Context), url::ParseError> {
         self.v1.extract_v1()
     }
 
@@ -138,9 +140,10 @@ impl Sender {
         &self,
         ohttp_relay: Url,
     ) -> Result<(Request, V2PostContext), CreateRequestError> {
+        use v1::PsbtContext;
+
         use crate::hpke::encrypt_message_a;
         use crate::ohttp::ohttp_encapsulate;
-        use crate::send::PsbtContext;
         use crate::uri::UrlExt;
         if let Ok(expiry) = self.v1.endpoint.exp() {
             if std::time::SystemTime::now() > expiry {
@@ -217,7 +220,7 @@ fn serialize_v2_body(
 pub struct V2PostContext {
     /// The payjoin directory subdirectory to send the request to.
     endpoint: Url,
-    psbt_ctx: PsbtContext,
+    psbt_ctx: v1::PsbtContext,
     hpke_ctx: HpkeContext,
     ohttp_ctx: ohttp::ClientResponse,
 }
@@ -248,7 +251,7 @@ impl V2PostContext {
 pub struct V2GetContext {
     /// The payjoin directory subdirectory to send the request to.
     endpoint: Url,
-    psbt_ctx: PsbtContext,
+    psbt_ctx: v1::PsbtContext,
     hpke_ctx: HpkeContext,
 }
 
@@ -302,7 +305,7 @@ impl V2GetContext {
         )
         .map_err(InternalValidationError::Hpke)?;
 
-        let proposal = Psbt::deserialize(&psbt).map_err(InternalValidationError::Psbt)?;
+        let proposal = Psbt::deserialize(&psbt).map_err(v1::InternalValidationError::Psbt)?;
         let processed_proposal = self.psbt_ctx.clone().process_proposal(proposal)?;
         Ok(Some(processed_proposal))
     }
@@ -334,7 +337,7 @@ mod test {
                 disable_output_substitution: false,
                 fee_contribution: None,
                 min_fee_rate: FeeRate::ZERO,
-                payee: ScriptBuf::from(vec![0x00]),
+                payee: bitcoin::ScriptBuf::from(vec![0x00]),
             },
             reply_key: HpkeKeyPair::gen_keypair().0,
         };
