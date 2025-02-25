@@ -1,13 +1,15 @@
 //! Receive BIP 77 Payjoin v2
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::psbt::Psbt;
 use bitcoin::{Address, FeeRate, OutPoint, Script, TxOut};
+use error::CreateRecieverInternalError;
 pub(crate) use error::InternalSessionError;
 pub use error::SessionError;
-use serde::de::Deserializer;
+use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -19,9 +21,10 @@ use super::{
 use crate::hpke::{decrypt_message_a, encrypt_message_b, HpkeKeyPair, HpkePublicKey};
 use crate::ohttp::{ohttp_decapsulate, ohttp_encapsulate, OhttpEncapsulationError, OhttpKeys};
 use crate::output_substitution::OutputSubstitution;
+use crate::persist::Persister;
 use crate::receive::{parse_payload, InputPair};
 use crate::uri::ShortId;
-use crate::{IntoUrl, IntoUrlError, Request};
+use crate::{IntoUrl, Request};
 
 pub(crate) mod error;
 
@@ -54,6 +57,8 @@ impl SessionContext {
             .join(&format!("/{}", directory_base))
             .map_err(|e| InternalSessionError::ParseUrl(e.into()))
     }
+
+    fn id(&self) -> ShortId { id(&self.s) }
 }
 
 fn deserialize_address_assume_checked<'de, D>(deserializer: D) -> Result<Address, D::Error>
@@ -71,12 +76,12 @@ fn subdir_path_from_pubkey(pubkey: &HpkePublicKey) -> ShortId {
 
 /// A payjoin V2 receiver, allowing for polled requests to the
 /// payjoin directory and response processing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Receiver {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewReceiver {
     context: SessionContext,
 }
 
-impl Receiver {
+impl NewReceiver {
     /// Creates a new `Receiver` with the provided parameters.
     ///
     /// # Parameters
@@ -95,11 +100,11 @@ impl Receiver {
         directory: impl IntoUrl,
         ohttp_keys: OhttpKeys,
         expire_after: Option<Duration>,
-    ) -> Result<Self, IntoUrlError> {
-        Ok(Self {
+    ) -> Result<Self, Error> {
+        let receiver = Self {
             context: SessionContext {
                 address,
-                directory: directory.into_url()?,
+                directory: directory.into_url().map_err(CreateRecieverInternalError::InvalidUrl)?,
                 subdirectory: None,
                 ohttp_keys,
                 expiry: SystemTime::now()
@@ -107,9 +112,41 @@ impl Receiver {
                 s: HpkeKeyPair::gen_keypair(),
                 e: None,
             },
-        })
+        };
+        Ok(receiver)
     }
 
+    pub fn persist<P: Persister>(&self, persister: &mut P) -> Result<PersistenceToken, Error>
+    where
+        P::Key: From<ShortId>,
+    {
+        persister
+            .save(self.context.id().into(), self.clone())
+            .map_err(|e| CreateRecieverInternalError::PersisterError(Box::new(e)))?;
+        Ok(PersistenceToken(self.context.id()))
+    }
+}
+
+pub struct PersistenceToken(ShortId);
+
+impl PersistenceToken {
+    pub fn load<P: Persister>(&self, persister: P) -> Result<Receiver, Error>
+    where
+        P::Key: From<ShortId>,
+    {
+        let receiver = persister
+            .load(self.0.into())
+            .map_err(|e| CreateRecieverInternalError::PersisterError(Box::new(e)))?;
+        Ok(receiver)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Receiver {
+    context: SessionContext,
+}
+
+impl Receiver {
     /// Extract an OHTTP Encapsulated HTTP GET request for the Original PSBT
     pub fn extract_req(
         &mut self,
@@ -588,6 +625,57 @@ fn subdir(directory: &Url, id: &ShortId) -> Url {
 /// The per-session identifier
 fn id(s: &HpkeKeyPair) -> ShortId {
     sha256::Hash::hash(&s.public_key().to_compressed_bytes()).into()
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopPersister(HashMap<[u8; 8], Vec<u8>>);
+
+#[derive(Debug)]
+pub struct NoopPersisterError(InternalNoopPersisterError);
+
+#[derive(Debug)]
+enum InternalNoopPersisterError {
+    Serialize(serde_json::Error),
+    Deserialize(serde_json::Error),
+    MissingKey(ShortId),
+}
+
+impl std::fmt::Display for InternalNoopPersisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(e) => write!(f, "Failed to serialize: {}", e),
+            Self::Deserialize(e) => write!(f, "Failed to deserialize: {}", e),
+            Self::MissingKey(key) => write!(f, "Missing key: {}", key),
+        }
+    }
+}
+
+impl From<InternalNoopPersisterError> for NoopPersisterError {
+    fn from(error: InternalNoopPersisterError) -> Self { NoopPersisterError(error) }
+}
+
+impl std::error::Error for NoopPersisterError {}
+
+impl std::fmt::Display for NoopPersisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NoopPersisterError: {}", self.0)
+    }
+}
+
+impl Persister for NoopPersister {
+    type Key = ShortId;
+    type Error = NoopPersisterError;
+    fn save<T: Serialize>(&mut self, key: Self::Key, value: T) -> Result<(), Self::Error> {
+        let bytes = serde_json::to_vec(&value).map_err(InternalNoopPersisterError::Serialize)?;
+        self.0.insert(key.0, bytes);
+        Ok(())
+    }
+    fn load<T: DeserializeOwned>(&self, key: Self::Key) -> Result<T, Self::Error> {
+        let bytes = self.0.get(&key.0).ok_or(InternalNoopPersisterError::MissingKey(key))?;
+        let value =
+            serde_json::from_slice(bytes).map_err(InternalNoopPersisterError::Deserialize)?;
+        Ok(value)
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,43 @@ use super::Error::V2;
 use crate::hpke::HpkeError;
 use crate::ohttp::OhttpEncapsulationError;
 use crate::receive::error::Error;
+use crate::IntoUrlError;
+
+#[derive(Debug)]
+pub struct CreateRecieverError(CreateRecieverInternalError);
+
+impl std::error::Error for CreateRecieverError {}
+
+impl std::fmt::Display for CreateRecieverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use CreateRecieverInternalError::*;
+
+        match &self.0 {
+            InvalidUrl(e) => write!(f, "Invalid URL: {}", e),
+            PersisterError(e) => write!(f, "Persister error: {}", e),
+        }
+    }
+}
+
+impl From<CreateRecieverError> for Error {
+    fn from(e: CreateRecieverError) -> Self {
+        Error::V2(SessionError(InternalSessionError::Creation(e)))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CreateRecieverInternalError {
+    InvalidUrl(IntoUrlError),
+    PersisterError(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<CreateRecieverInternalError> for CreateRecieverError {
+    fn from(value: CreateRecieverInternalError) -> Self { CreateRecieverError(value) }
+}
+
+impl From<CreateRecieverInternalError> for Error {
+    fn from(value: CreateRecieverInternalError) -> Self { CreateRecieverError(value).into() }
+}
 
 /// Error that may occur during a v2 session typestate change
 ///
@@ -35,6 +72,8 @@ pub(crate) enum InternalSessionError {
     UnexpectedResponseSize(usize),
     /// Unexpected status code
     UnexpectedStatusCode(http::StatusCode),
+    /// Creation error
+    Creation(CreateRecieverError),
 }
 
 impl From<crate::into_url::Error> for SessionError {
@@ -71,6 +110,7 @@ impl fmt::Display for SessionError {
                 crate::directory::ENCAPSULATED_MESSAGE_BYTES
             ),
             UnexpectedStatusCode(status) => write!(f, "Unexpected status code: {}", status),
+            Creation(e) => write!(f, "Failed to create the receiver: {}", e),
         }
     }
 }
@@ -86,6 +126,7 @@ impl error::Error for SessionError {
             Hpke(e) => Some(e),
             UnexpectedResponseSize(_) => None,
             UnexpectedStatusCode(_) => None,
+            Creation(e) => Some(e),
         }
     }
 }
