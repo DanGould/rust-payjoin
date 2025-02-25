@@ -171,7 +171,8 @@ mod integration {
 
         use bitcoin::Address;
         use http::StatusCode;
-        use payjoin::receive::v2::{PayjoinProposal, Receiver, UncheckedProposal};
+        use payjoin::persist::NoopPersister;
+        use payjoin::receive::v2::{NewReceiver, PayjoinProposal, Receiver, UncheckedProposal};
         use payjoin::send::v2::SenderBuilder;
         use payjoin::{OhttpKeys, PjUri, UriExt};
         use payjoin_test_utils::{BoxSendSyncError, TestServices};
@@ -205,8 +206,10 @@ mod integration {
                 let ohttp_relay = services.ohttp_relay_url();
                 let mock_address = Address::from_str("tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4")?
                     .assume_checked();
-                let mut bad_initializer =
-                    Receiver::new(mock_address, directory, bad_ohttp_keys, None)?;
+                let mut persister = NoopPersister;
+                let new_receiver = NewReceiver::new(mock_address, directory, bad_ohttp_keys, None)?;
+                let storage_token = new_receiver.persist(&mut persister)?;
+                let mut bad_initializer = Receiver::load(storage_token.as_str(), &persister)?;
                 let (req, _ctx) = bad_initializer.extract_req(&ohttp_relay)?;
                 agent
                     .post(req.url)
@@ -242,12 +245,17 @@ mod integration {
                 // Inside the Receiver:
                 let address = receiver.get_new_address(None, None)?.assume_checked();
                 // test session with expiry in the past
-                let mut expired_receiver = Receiver::new(
+                let mut persister = NoopPersister;
+                let new_receiver = NewReceiver::new(
                     address.clone(),
                     directory.clone(),
                     ohttp_keys.clone(),
                     Some(Duration::from_secs(0)),
                 )?;
+                let storage_token =
+                    new_receiver.persist(&mut persister).map_err(|e| e.to_string())?;
+                let mut expired_receiver = Receiver::load(storage_token.as_str(), &persister)
+                    .map_err(|e| e.to_string())?;
                 match expired_receiver.extract_req(&ohttp_relay) {
                     // Internal error types are private, so check against a string
                     Err(err) => assert!(err.to_string().contains("expired")),
@@ -294,8 +302,13 @@ mod integration {
                 let address = receiver.get_new_address(None, None)?.assume_checked();
 
                 // test session with expiry in the future
-                let mut session =
-                    Receiver::new(address.clone(), directory.clone(), ohttp_keys.clone(), None)?;
+                let mut persister = NoopPersister;
+                let new_receiver =
+                    NewReceiver::new(address.clone(), directory.clone(), ohttp_keys.clone(), None)?;
+                let storage_token =
+                    new_receiver.persist(&mut persister).map_err(|e| e.to_string())?;
+                let mut session = Receiver::load(storage_token.as_str(), &persister)
+                    .map_err(|e| e.to_string())?;
                 println!("session: {:#?}", &session);
                 // Poll receive request
                 let ohttp_relay = services.ohttp_relay_url();
@@ -465,9 +478,13 @@ mod integration {
                 let directory = services.directory_url();
                 let ohttp_keys = services.fetch_ohttp_keys().await?;
                 let address = receiver.get_new_address(None, None)?.assume_checked();
-
-                let mut session =
-                    Receiver::new(address, directory.clone(), ohttp_keys.clone(), None)?;
+                let mut persister = NoopPersister;
+                let new_receiver =
+                    NewReceiver::new(address, directory.clone(), ohttp_keys.clone(), None)?;
+                let storage_token =
+                    new_receiver.persist(&mut persister).map_err(|e| e.to_string())?;
+                let mut session = Receiver::load(storage_token.as_str(), &persister)
+                    .map_err(|e| e.to_string())?;
 
                 // **********************
                 // Inside the V1 Sender:
@@ -690,7 +707,8 @@ mod integration {
     #[cfg(feature = "_multiparty")]
     mod multiparty {
         use bitcoin::ScriptBuf;
-        use payjoin::receive::v2::Receiver;
+        use payjoin::persist::NoopPersister;
+        use payjoin::receive::v2::{NewReceiver, Receiver};
         use payjoin::send::multiparty::{
             GetContext as MultiPartyGetContext, SenderBuilder as MultiPartySenderBuilder,
         };
@@ -738,12 +756,17 @@ mod integration {
                 // Senders will generate a sweep psbt and send PSBT to receiver subdir
                 for sender in senders.iter() {
                     let address = receiver.get_new_address(None, None)?.assume_checked();
-                    let receiver_session = Receiver::new(
+                    let mut persister = NoopPersister;
+                    let new_receiver = NewReceiver::new(
                         address.clone(),
                         directory.clone(),
                         ohttp_keys.clone(),
                         None,
                     )?;
+                    let storage_token =
+                        new_receiver.persist(&mut persister).map_err(|e| e.to_string())?;
+                    let receiver_session =
+                        Receiver::load(&storage_token, &persister).map_err(|e| e.to_string())?;
                     let pj_uri = receiver_session.pj_uri();
                     let psbt = build_sweep_psbt(sender, &pj_uri)?;
                     let sender_ctx = MultiPartySenderBuilder::new(psbt.clone(), pj_uri.clone())
