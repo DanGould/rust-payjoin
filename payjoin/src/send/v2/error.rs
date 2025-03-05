@@ -120,3 +120,22 @@ impl From<InternalEncapsulationError> for super::ResponseError {
         )
     }
 }
+
+#[derive(Debug)]
+pub struct ErrorBox(pub(crate) Box<dyn std::error::Error + Send + Sync>);
+
+impl ErrorBox {
+    pub fn new(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self(Box::new(error))
+    }
+}
+
+impl PartialEq for ErrorBox {
+    fn eq(&self, other: &Self) -> bool { self.0.to_string() == other.0.to_string() }
+}
+
+impl fmt::Display for ErrorBox {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.0) }
+}
+
+impl std::error::Error for ErrorBox {}

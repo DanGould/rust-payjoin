@@ -13,6 +13,30 @@ use url::Url;
 use super::*;
 
 #[derive(Clone)]
+pub(crate) struct SenderPersister(pub Arc<Database>);
+impl Persister for SenderPersister {
+    type Key = Url;
+    type Error = crate::db::error::Error;
+    fn save<T: Serialize>(
+        &mut self,
+        key: Self::Key,
+        value: T,
+    ) -> std::result::Result<(), Self::Error> {
+        let send_tree = self.0 .0.open_tree("send_sessions")?;
+        let value = serde_json::to_string(&value).map_err(Error::Serialize)?;
+        send_tree.insert(key.to_string(), IVec::from(value.as_str()))?;
+        send_tree.flush()?;
+        Ok(())
+    }
+    fn load<T: DeserializeOwned>(&self, key: Self::Key) -> std::result::Result<T, Self::Error> {
+        let send_tree = self.0 .0.open_tree("send_sessions")?;
+        let value = send_tree.get(key.to_string())?.ok_or(Error::NotFound(key.to_string()))?;
+        let value = serde_json::from_slice(&value).map_err(Error::Deserialize)?;
+        Ok(value)
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct RecieverPersister(pub Arc<Database>);
 impl Persister for RecieverPersister {
     type Key = ShortId;
@@ -52,14 +76,6 @@ impl Database {
         let recv_tree: Tree = self.0.open_tree("recv_sessions")?;
         recv_tree.clear()?;
         recv_tree.flush()?;
-        Ok(())
-    }
-
-    pub(crate) fn insert_send_session(&self, session: &mut Sender, pj_url: &Url) -> Result<()> {
-        let send_tree: Tree = self.0.open_tree("send_sessions")?;
-        let value = serde_json::to_string(session).map_err(Error::Serialize)?;
-        send_tree.insert(pj_url.to_string(), IVec::from(value.as_str()))?;
-        send_tree.flush()?;
         Ok(())
     }
 

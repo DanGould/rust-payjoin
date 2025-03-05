@@ -21,10 +21,13 @@
 //! [`bitmask-core`](https://github.com/diba-io/bitmask-core) BDK integration. Bring your own
 //! wallet and http client.
 
+use std::collections::HashMap;
+
 use bitcoin::hashes::{sha256, Hash};
-pub use error::{CreateRequestError, EncapsulationError};
+pub use error::{CreateRequestError, EncapsulationError, ErrorBox};
 use error::{InternalCreateRequestError, InternalEncapsulationError};
 use ohttp::ClientResponse;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -32,11 +35,43 @@ use super::error::BuildSenderError;
 use super::*;
 use crate::hpke::{decrypt_message_b, encrypt_message_a, HpkeSecretKey};
 use crate::ohttp::{ohttp_decapsulate, ohttp_encapsulate};
+use crate::persist::Persister;
 use crate::send::v1;
 use crate::uri::{ShortId, UrlExt};
 use crate::{HpkeKeyPair, HpkePublicKey, IntoUrl, OhttpKeys, PjUri, Request};
 
 mod error;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewSender {
+    v1: v1::Sender,
+    reply_key: HpkeSecretKey,
+}
+
+impl NewSender {
+    pub fn new(v1: v1::Sender, reply_key: HpkeSecretKey) -> Self { Self { v1, reply_key } }
+
+    pub fn persist<P: Persister>(&self, persister: &mut P) -> Result<PersistenceToken, ErrorBox>
+    where
+        P::Key: From<Url>,
+    {
+        let url = self.v1.endpoint.clone();
+        persister.save(url.clone().into(), self.clone()).map_err(ErrorBox::new)?;
+        Ok(PersistenceToken(url))
+    }
+}
+
+pub struct PersistenceToken(Url);
+
+impl PersistenceToken {
+    pub fn load<P: Persister>(&self, persister: P) -> Result<Sender, ErrorBox>
+    where
+        P::Key: From<Url>,
+    {
+        let sender = persister.load(self.0.clone().into()).map_err(ErrorBox::new)?;
+        Ok(sender)
+    }
+}
 
 #[derive(Clone)]
 pub struct SenderBuilder<'a>(pub(crate) v1::SenderBuilder<'a>);
@@ -64,11 +99,12 @@ impl<'a> SenderBuilder<'a> {
     // The minfeerate parameter is set if the contribution is available in change.
     //
     // This method fails if no recommendation can be made or if the PSBT is malformed.
-    pub fn build_recommended(self, min_fee_rate: FeeRate) -> Result<Sender, BuildSenderError> {
-        Ok(Sender {
+    pub fn build_recommended(self, min_fee_rate: FeeRate) -> Result<NewSender, BuildSenderError> {
+        let sender = NewSender {
             v1: self.0.build_recommended(min_fee_rate)?,
             reply_key: HpkeKeyPair::gen_keypair().0,
-        })
+        };
+        Ok(sender)
     }
 
     /// Offer the receiver contribution to pay for his input.
@@ -90,8 +126,8 @@ impl<'a> SenderBuilder<'a> {
         change_index: Option<usize>,
         min_fee_rate: FeeRate,
         clamp_fee_contribution: bool,
-    ) -> Result<Sender, BuildSenderError> {
-        Ok(Sender {
+    ) -> Result<NewSender, BuildSenderError> {
+        let sender = NewSender {
             v1: self.0.build_with_additional_fee(
                 max_fee_contribution,
                 change_index,
@@ -99,7 +135,8 @@ impl<'a> SenderBuilder<'a> {
                 clamp_fee_contribution,
             )?,
             reply_key: HpkeKeyPair::gen_keypair().0,
-        })
+        };
+        Ok(sender)
     }
 
     /// Perform Payjoin without incentivizing the payee to cooperate.
@@ -109,11 +146,63 @@ impl<'a> SenderBuilder<'a> {
     pub fn build_non_incentivizing(
         self,
         min_fee_rate: FeeRate,
-    ) -> Result<Sender, BuildSenderError> {
-        Ok(Sender {
+    ) -> Result<NewSender, BuildSenderError> {
+        let sender = NewSender {
             v1: self.0.build_non_incentivizing(min_fee_rate)?,
             reply_key: HpkeKeyPair::gen_keypair().0,
-        })
+        };
+        Ok(sender)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopPersister(HashMap<Url, Vec<u8>>);
+
+#[derive(Debug)]
+pub struct NoopPersisterError(InternalNoopPersisterError);
+
+impl std::fmt::Display for NoopPersisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Sender NoopPersisterError: {}", self.0)
+    }
+}
+
+impl std::error::Error for NoopPersisterError {}
+
+#[derive(Debug)]
+enum InternalNoopPersisterError {
+    Serialize(serde_json::Error),
+    Deserialize(serde_json::Error),
+    MissingKey(Url),
+}
+
+impl std::fmt::Display for InternalNoopPersisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Serialize(e) => write!(f, "Failed to serialize: {}", e),
+            Self::Deserialize(e) => write!(f, "Failed to deserialize: {}", e),
+            Self::MissingKey(key) => write!(f, "Missing key: {}", key),
+        }
+    }
+}
+
+impl From<InternalNoopPersisterError> for NoopPersisterError {
+    fn from(error: InternalNoopPersisterError) -> Self { NoopPersisterError(error) }
+}
+
+impl Persister for NoopPersister {
+    type Key = Url;
+    type Error = NoopPersisterError;
+    fn save<T: Serialize>(&mut self, key: Self::Key, value: T) -> Result<(), Self::Error> {
+        let bytes = serde_json::to_vec(&value).map_err(InternalNoopPersisterError::Serialize)?;
+        self.0.insert(key, bytes);
+        Ok(())
+    }
+    fn load<T: DeserializeOwned>(&self, key: Self::Key) -> Result<T, Self::Error> {
+        let bytes = self.0.get(&key).ok_or(InternalNoopPersisterError::MissingKey(key))?;
+        let value =
+            serde_json::from_slice(bytes).map_err(InternalNoopPersisterError::Deserialize)?;
+        Ok(value)
     }
 }
 
