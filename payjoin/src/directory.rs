@@ -19,13 +19,18 @@ pub const ENCAPSULATED_MESSAGE_BYTES: usize = 8192;
 ///
 /// Note: This implementation assumes ephemeral public keys with sufficient entropy. The short length
 /// is an intentional tradeoff that provides adequate practical uniqueness while reducing DoS surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShortId(pub [u8; 8]);
 
 impl ShortId {
     pub fn as_bytes(&self) -> &[u8] { &self.0 }
     pub fn as_slice(&self) -> &[u8] { &self.0 }
 }
+
+impl From<ShortId> for () {
+    fn from(_: ShortId) -> Self { () }
+}
+
 
 impl std::fmt::Display for ShortId {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

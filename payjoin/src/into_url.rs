@@ -84,6 +84,11 @@ impl IntoUrlSealed for String {
     fn as_str(&self) -> &str { self.as_ref() }
 }
 
+impl From<Url> for () {
+    fn from(_: Url) -> Self { () }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

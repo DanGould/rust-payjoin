@@ -58,7 +58,7 @@ impl AppTrait for App {
                     .build_recommended(fee_rate)
                     .with_context(|| "Failed to build payjoin request")?;
                 let storage_token = new_sender.persist(&mut persister)?;
-                storage_token.load(persister)?
+                Sender::load(&storage_token, &persister)?
             }
         };
         self.spawn_payjoin_sender(req_ctx).await
@@ -75,7 +75,7 @@ impl AppTrait for App {
             None,
         )?;
         let storage_token = new_receiver.persist(&mut persister)?;
-        let session = storage_token.load(persister)?;
+        let session = Receiver::load(&storage_token, &persister)?;
         self.spawn_payjoin_receiver(session, Some(amount)).await
     }
 

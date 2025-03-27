@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bitcoincore_rpc::jsonrpc::serde_json;
-use payjoin::directory::ShortId;
+use payjoin::{directory::ShortId, persist::Token};
 use payjoin::persist::Persister;
 use payjoin::receive::v2::Receiver;
 use payjoin::send::v2::Sender;
@@ -12,27 +12,39 @@ use url::Url;
 
 use super::*;
 
+impl Token<SenderPersister> for Url {
+    fn load<T: DeserializeOwned>(&self, persister: &SenderPersister) -> std::result::Result<T, Error> {
+        let send_tree = persister.0.0.open_tree("send_sessions")?;
+        let value = send_tree.get(self.to_string())?.ok_or(Error::NotFound(self.to_string()))?;
+        serde_json::from_slice(&value).map_err(Error::Deserialize)
+    }
+}
+
+impl Token<RecieverPersister> for ShortId {
+    fn load<T: DeserializeOwned>(&self, persister: &RecieverPersister) -> std::result::Result<T, Error> {
+        let recv_tree = persister.0.0.open_tree("recv_sessions")?;
+        let value = recv_tree.get(self.as_slice())?.ok_or(Error::NotFound(self.to_string()))?;
+        serde_json::from_slice(&value).map_err(Error::Deserialize)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SenderPersister(pub Arc<Database>);
 impl Persister for SenderPersister {
     type Key = Url;
+    type Token = Url;
     type Error = crate::db::error::Error;
-    fn save<T: Serialize>(
-        &mut self,
-        key: Self::Key,
-        value: T,
-    ) -> std::result::Result<(), Self::Error> {
-        let send_tree = self.0 .0.open_tree("send_sessions")?;
+    
+    fn save<T: Serialize>(&mut self, key: Self::Key, value: T) -> std::result::Result<Self::Token, Self::Error> {
+        let send_tree = self.0.0.open_tree("send_sessions")?;
         let value = serde_json::to_string(&value).map_err(Error::Serialize)?;
         send_tree.insert(key.to_string(), IVec::from(value.as_str()))?;
         send_tree.flush()?;
-        Ok(())
+        Ok(key)
     }
-    fn load<T: DeserializeOwned>(&self, key: Self::Key) -> std::result::Result<T, Self::Error> {
-        let send_tree = self.0 .0.open_tree("send_sessions")?;
-        let value = send_tree.get(key.to_string())?.ok_or(Error::NotFound(key.to_string()))?;
-        let value = serde_json::from_slice(&value).map_err(Error::Deserialize)?;
-        Ok(value)
+
+    fn load<T: DeserializeOwned>(&self, token: &Self::Token) -> std::result::Result<T, Self::Error> {
+        token.load(self)
     }
 }
 
@@ -40,23 +52,19 @@ impl Persister for SenderPersister {
 pub(crate) struct RecieverPersister(pub Arc<Database>);
 impl Persister for RecieverPersister {
     type Key = ShortId;
+    type Token = ShortId;
     type Error = crate::db::error::Error;
-    fn save<T: Serialize>(
-        &mut self,
-        key: Self::Key,
-        value: T,
-    ) -> std::result::Result<(), Self::Error> {
-        let recv_tree = self.0 .0.open_tree("recv_sessions")?;
+    
+    fn save<T: Serialize>(&mut self, key: Self::Key, value: T) -> std::result::Result<Self::Token, Self::Error> {
+        let recv_tree = self.0.0.open_tree("recv_sessions")?;
         let value = serde_json::to_string(&value).map_err(Error::Serialize)?;
         recv_tree.insert(key.as_slice(), IVec::from(value.as_str()))?;
         recv_tree.flush()?;
-        Ok(())
+        Ok(key)
     }
-    fn load<T: DeserializeOwned>(&self, key: Self::Key) -> std::result::Result<T, Self::Error> {
-        let recv_tree = self.0 .0.open_tree("recv_sessions")?;
-        let value = recv_tree.get(key.as_slice())?.ok_or(Error::NotFound(key.to_string()))?;
-        let value = serde_json::from_slice(&value).map_err(Error::Deserialize)?;
-        Ok(value)
+
+    fn load<T: DeserializeOwned>(&self, token: &Self::Token) -> std::result::Result<T, Self::Error> {
+        token.load(self)
     }
 }
 
