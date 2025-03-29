@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use bitcoincore_rpc::jsonrpc::serde_json;
-use payjoin::persist::{PersistableValue, Persister};
-use payjoin::receive::v2::Receiver;
-use payjoin::send::v2::Sender;
+use payjoin::persist::{Persister, Value};
+use payjoin::receive::v2::{Receiver, ReceiverToken};
+use payjoin::send::v2::{Sender, SenderId};
 use sled::Tree;
 use url::Url;
 
@@ -12,19 +12,20 @@ use super::*;
 #[derive(Clone)]
 pub(crate) struct SenderPersister(pub Arc<Database>);
 impl Persister<Sender> for SenderPersister {
+    type Token = SenderId;
     type Error = crate::db::error::Error;
-    fn save(&mut self, value: Sender) -> std::result::Result<String, Self::Error> {
+    fn save(&mut self, value: Sender) -> std::result::Result<SenderId, Self::Error> {
         let send_tree = self.0 .0.open_tree("send_sessions")?;
-        let token = value.key();
+        let key = value.key();
         let value = serde_json::to_vec(&value).map_err(Error::Serialize)?;
-        send_tree.insert(token.clone(), value.as_slice())?;
+        send_tree.insert(key.clone(), value.as_slice())?;
         send_tree.flush()?;
-        Ok(token)
+        Ok(key)
     }
 
-    fn load(&self, token: &str) -> std::result::Result<Sender, Self::Error> {
+    fn load(&self, key: SenderId) -> std::result::Result<Sender, Self::Error> {
         let send_tree = self.0 .0.open_tree("send_sessions")?;
-        let value = send_tree.get(token)?.ok_or(Error::NotFound(token.to_string()))?;
+        let value = send_tree.get(key.as_ref())?.ok_or(Error::NotFound(key.as_ref().to_vec()))?;
         serde_json::from_slice(&value).map_err(Error::Deserialize)
     }
 }
@@ -32,8 +33,9 @@ impl Persister<Sender> for SenderPersister {
 #[derive(Clone)]
 pub(crate) struct ReceiverPersister(pub Arc<Database>);
 impl Persister<Receiver> for ReceiverPersister {
+    type Token = ReceiverToken;
     type Error = crate::db::error::Error;
-    fn save(&mut self, value: Receiver) -> std::result::Result<String, Self::Error> {
+    fn save(&mut self, value: Receiver) -> std::result::Result<ReceiverToken, Self::Error> {
         let recv_tree = self.0 .0.open_tree("recv_sessions")?;
         let key = value.key();
         let value = serde_json::to_vec(&value).map_err(Error::Serialize)?;
@@ -41,9 +43,9 @@ impl Persister<Receiver> for ReceiverPersister {
         recv_tree.flush()?;
         Ok(key)
     }
-    fn load(&self, token: &str) -> std::result::Result<Receiver, Self::Error> {
+    fn load(&self, key: ReceiverToken) -> std::result::Result<Receiver, Self::Error> {
         let recv_tree = self.0 .0.open_tree("recv_sessions")?;
-        let value = recv_tree.get(token)?.ok_or(Error::NotFound(token.to_string()))?;
+        let value = recv_tree.get(key.as_ref())?.ok_or(Error::NotFound(key.as_ref().to_vec()))?;
         serde_json::from_slice(&value).map_err(Error::Deserialize)
     }
 }

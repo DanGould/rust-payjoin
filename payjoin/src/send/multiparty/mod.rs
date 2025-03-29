@@ -11,7 +11,7 @@ use super::{serialize_url, AdditionalFeeContribution, BuildSenderError, Internal
 use crate::hpke::decrypt_message_b;
 use crate::ohttp::ohttp_decapsulate;
 use crate::output_substitution::OutputSubstitution;
-use crate::persist::Persister;
+use crate::persist::{self, Persister};
 use crate::send::v2::{ImplementationError, V2PostContext};
 use crate::uri::UrlExt;
 use crate::{PjUri, Request};
@@ -19,7 +19,7 @@ use crate::{PjUri, Request};
 mod error;
 
 #[derive(Clone)]
-pub struct SenderBuilder<'a>(pub crate::send::v2::SenderBuilder<'a>);
+pub struct SenderBuilder<'a>(v2::SenderBuilder<'a>);
 
 impl<'a> SenderBuilder<'a> {
     pub fn new(psbt: Psbt, uri: PjUri<'a>) -> Self {
@@ -35,24 +35,43 @@ impl<'a> SenderBuilder<'a> {
 pub struct NewSender(v2::NewSender);
 
 impl NewSender {
-    pub fn persist<P: Persister<v2::Sender>>(
+    pub fn persist<P: Persister<Sender>>(
         &self,
         persister: &mut P,
-    ) -> Result<String, ImplementationError> {
-        self.0.persist(persister)
+    ) -> Result<P::Token, ImplementationError> {
+        let sender =
+            Sender(v2::Sender { v1: self.0.v1.clone(), reply_key: self.0.reply_key.clone() });
+        persister.save(sender).map_err(ImplementationError::from)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SenderId(Url);
+
+impl From<Sender> for SenderId {
+    fn from(sender: Sender) -> Self { SenderId(sender.0.endpoint().clone()) }
+}
+
+impl AsRef<[u8]> for SenderId {
+    fn as_ref(&self) -> &[u8] { self.0.as_str().as_bytes() }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sender(v2::Sender);
 
+impl persist::Value for Sender {
+    type Key = SenderId;
+
+    fn key(&self) -> Self::Key { SenderId(self.0.endpoint().clone()) }
+}
+
 impl Sender {
-    pub fn load<P: Persister<v2::Sender>>(
-        token: &str,
+    pub fn load<P: Persister<Sender>>(
+        token: P::Token,
         persister: &P,
     ) -> Result<Self, ImplementationError> {
         let sender = persister.load(token).map_err(ImplementationError::from)?;
-        Ok(Sender(sender))
+        Ok(sender)
     }
     pub fn extract_v2(
         &self,

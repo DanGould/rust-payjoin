@@ -32,7 +32,7 @@ use super::error::BuildSenderError;
 use super::*;
 use crate::hpke::{decrypt_message_b, encrypt_message_a, HpkeSecretKey};
 use crate::ohttp::{ohttp_decapsulate, ohttp_encapsulate};
-use crate::persist::{PersistableValue, Persister};
+use crate::persist::{Persister, Value};
 use crate::send::v1;
 use crate::uri::{ShortId, UrlExt};
 use crate::{HpkeKeyPair, HpkePublicKey, IntoUrl, OhttpKeys, PjUri, Request};
@@ -41,17 +41,15 @@ mod error;
 
 #[derive(Debug)]
 pub struct NewSender {
-    v1: v1::Sender,
-    reply_key: HpkeSecretKey,
+    pub(crate) v1: v1::Sender,
+    pub(crate) reply_key: HpkeSecretKey,
 }
 
 impl NewSender {
-    pub fn new(v1: v1::Sender, reply_key: HpkeSecretKey) -> Self { Self { v1, reply_key } }
-
     pub fn persist<P: Persister<Sender>>(
         &self,
         persister: &mut P,
-    ) -> Result<String, ImplementationError> {
+    ) -> Result<P::Token, ImplementationError> {
         let sender = Sender { v1: self.v1.clone(), reply_key: self.reply_key.clone() };
         Ok(persister.save(sender)?)
     }
@@ -147,13 +145,27 @@ pub struct Sender {
     pub(crate) reply_key: HpkeSecretKey,
 }
 
-impl PersistableValue for Sender {
-    fn key(&self) -> String { self.endpoint().as_str().to_string() }
+/// Opaque key type for the sender
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenderId(Url);
+
+impl From<Sender> for SenderId {
+    fn from(sender: Sender) -> Self { SenderId(sender.endpoint().clone()) }
+}
+
+impl AsRef<[u8]> for SenderId {
+    fn as_ref(&self) -> &[u8] { self.0.as_str().as_bytes() }
+}
+
+impl Value for Sender {
+    type Key = SenderId;
+
+    fn key(&self) -> Self::Key { SenderId(self.endpoint().clone()) }
 }
 
 impl Sender {
     pub fn load<P: Persister<Sender>>(
-        token: &str,
+        token: P::Token,
         persister: &P,
     ) -> Result<Self, ImplementationError> {
         persister.load(token).map_err(ImplementationError::from)

@@ -14,7 +14,7 @@ pub(crate) enum Error {
     #[cfg(feature = "v2")]
     Deserialize(serde_json::Error),
     #[cfg(feature = "v2")]
-    NotFound(String),
+    NotFound(Vec<u8>),
 }
 
 impl fmt::Display for Error {
@@ -26,7 +26,7 @@ impl fmt::Display for Error {
             #[cfg(feature = "v2")]
             Error::Deserialize(e) => write!(f, "Deserialization failed: {}", e),
             #[cfg(feature = "v2")]
-            Error::NotFound(key) => write!(f, "Key not found: {}", key),
+            Error::NotFound(e) => write!(f, "Key not found: {:?}", e),
         }
     }
 }

@@ -1,29 +1,59 @@
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+/// Types that can generate their own keys for persistent storage
+pub trait Value: serde::Serialize + serde::de::DeserializeOwned + Sized + Clone {
+    type Key: AsRef<[u8]> + Clone;
 
-pub trait PersistableValue: Serialize + DeserializeOwned + Sized + Clone {
     /// Unique identifier for this persisted value
-    fn key(&self) -> String;
+    fn key(&self) -> Self::Key;
 }
+
 /// Implemented types that should be persisted by the application.
-pub trait Persister<V: PersistableValue> {
+pub trait Persister<V: Value> {
+    type Token: From<V>;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn save(&mut self, value: V) -> Result<String, Self::Error>;
-    fn load(&self, key: &str) -> Result<V, Self::Error>;
+    fn save(&mut self, value: V) -> Result<Self::Token, Self::Error>;
+    fn load(&self, token: Self::Token) -> Result<V, Self::Error>;
 }
 
-/// Noop implementation
+/// A key type that stores the value itself for no-op persistence
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NoopToken<V: Value>(V);
+
+impl<V: Value> AsRef<[u8]> for NoopToken<V> {
+    fn as_ref(&self) -> &[u8] {
+        // Since this is a no-op implementation, we can return an empty slice
+        // as we never actually need to use the bytes
+        &[]
+    }
+}
+
+impl<'de, V: Value> serde::Deserialize<'de> for NoopToken<V> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(NoopToken(V::deserialize(deserializer)?))
+    }
+}
+
+impl<V: Value> Value for NoopToken<V> {
+    type Key = V::Key;
+
+    fn key(&self) -> Self::Key { self.0.key() }
+}
+
+/// A persister that does nothing but store values in memory
 #[derive(Debug, Clone)]
 pub struct NoopPersister;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NoopToken<T>(T);
+impl<V: Value> From<V> for NoopToken<V> {
+    fn from(value: V) -> Self { NoopToken(value) }
+}
+impl<V: Value> Persister<V> for NoopPersister {
+    type Token = NoopToken<V>;
+    type Error = std::convert::Infallible;
 
-impl<V: PersistableValue> Persister<V> for NoopPersister {
-    type Error = serde_json::Error;
+    fn save(&mut self, value: V) -> Result<Self::Token, Self::Error> { Ok(NoopToken(value)) }
 
-    fn save(&mut self, value: V) -> Result<String, Self::Error> { serde_json::to_string(&value) }
-
-    fn load(&self, key: &str) -> Result<V, Self::Error> { serde_json::from_str(key) }
+    fn load(&self, token: Self::Token) -> Result<V, Self::Error> { Ok(token.0) }
 }

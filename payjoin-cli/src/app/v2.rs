@@ -60,7 +60,7 @@ impl AppTrait for App {
                 let storage_token = new_sender
                     .persist(&mut persister)
                     .map_err(|e| anyhow!("Failed to persist sender: {}", e))?;
-                Sender::load(&storage_token, &persister)
+                Sender::load(storage_token, &persister)
                     .map_err(|e| anyhow!("Failed to load sender: {}", e))?
             }
         };
@@ -80,7 +80,7 @@ impl AppTrait for App {
         let storage_token = new_receiver
             .persist(&mut persister)
             .map_err(|e| anyhow!("Failed to persist receiver: {}", e))?;
-        let session = Receiver::load(storage_token.as_str(), &persister)
+        let session = Receiver::load(storage_token, &persister)
             .map_err(|e| anyhow!("Failed to load receiver: {}", e))?;
         self.spawn_payjoin_receiver(session, Some(amount)).await
     }

@@ -19,7 +19,7 @@ use super::{
 use crate::hpke::{decrypt_message_a, encrypt_message_b, HpkeKeyPair, HpkePublicKey};
 use crate::ohttp::{ohttp_decapsulate, ohttp_encapsulate, OhttpEncapsulationError, OhttpKeys};
 use crate::output_substitution::OutputSubstitution;
-use crate::persist::{PersistableValue, Persister};
+use crate::persist::{self, Persister};
 use crate::receive::{parse_payload, InputPair};
 use crate::uri::ShortId;
 use crate::{IntoUrl, IntoUrlError, Request};
@@ -117,7 +117,7 @@ impl NewReceiver {
     pub fn persist<P: Persister<Receiver>>(
         &self,
         persister: &mut P,
-    ) -> Result<String, ImplementationError> {
+    ) -> Result<P::Token, ImplementationError> {
         let receiver = Receiver { context: self.context.clone() };
         Ok(persister.save(receiver)?)
     }
@@ -128,13 +128,27 @@ pub struct Receiver {
     context: SessionContext,
 }
 
-impl PersistableValue for Receiver {
-    fn key(&self) -> String { self.context.id().to_string() }
+/// Opaque key type for the receiver
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverToken(ShortId);
+
+impl From<Receiver> for ReceiverToken {
+    fn from(receiver: Receiver) -> Self { ReceiverToken(receiver.context.id()) }
+}
+
+impl AsRef<[u8]> for ReceiverToken {
+    fn as_ref(&self) -> &[u8] { self.0.as_bytes() }
+}
+
+impl persist::Value for Receiver {
+    type Key = ReceiverToken;
+
+    fn key(&self) -> Self::Key { ReceiverToken(self.context.id()) }
 }
 
 impl Receiver {
     pub fn load<P: Persister<Receiver>>(
-        token: &str,
+        token: P::Token,
         persister: &P,
     ) -> Result<Self, ImplementationError> {
         persister.load(token).map_err(ImplementationError::from)
