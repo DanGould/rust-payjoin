@@ -481,16 +481,16 @@ async fn validate_relay(
 
         match ohttp_keys {
             Ok(_) => return Ok(selected_relay),
-            Err(error) => match error {
-                payjoin::io::Error::UnexpectedStatusCode(_) => {
-                    log::debug!("{error:?}");
-                    return Err(error.into());
-                }
-                _ => {
-                    log::debug!("Failed to connect to relay: {selected_relay}, {error:?}");
-                    relay_state.lock().unwrap().add_failed_relay(selected_relay);
-                }
-            },
+            Err(payjoin::io::Error::UnexpectedStatusCode(e)) => {
+                // TODO: remove this comment: rethrow error and it'll be printed
+                // by `?` at the top level, no? I think the debog log that was here
+                // would be printing the error twice.
+                return Err(payjoin::io::Error::UnexpectedStatusCode(e).into());
+            }
+            Err(e) => {
+                log::debug!("Failed to connect to relay: {selected_relay}, {e:?}");
+                relay_state.lock().unwrap().add_failed_relay(selected_relay);
+            }
         }
     }
 }
