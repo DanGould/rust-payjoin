@@ -397,7 +397,6 @@ async fn fetch_keys(
     relay_state: Arc<Mutex<RelayState>>,
 ) -> Result<Option<payjoin::OhttpKeys>> {
     use payjoin::bitcoin::secp256k1::rand::prelude::SliceRandom;
-    use payjoin::io::InternalError;
     let payjoin_directory = config.v2()?.pj_directory.clone();
     let relays = config.v2()?.ohttp_relays.clone();
 
@@ -426,7 +425,7 @@ async fn fetch_keys(
         match ohttp_keys {
             Ok(keys) => return Ok(Some(keys)),
             Err(error) => match error {
-                payjoin::io::Error(InternalError::UnexpectedStatusCode(_)) => {
+                payjoin::io::Error::UnexpectedStatusCode(_) => {
                     log::debug!("{error:?}");
                     return Err(error.into());
                 }
@@ -456,7 +455,6 @@ async fn validate_relay(
     relay_state: Arc<Mutex<RelayState>>,
 ) -> Result<payjoin::Url> {
     use payjoin::bitcoin::secp256k1::rand::prelude::SliceRandom;
-    use payjoin::io::InternalError;
     let payjoin_directory = config.v2()?.pj_directory.clone();
     let relays = config.v2()?.ohttp_relays.clone();
 
@@ -484,7 +482,7 @@ async fn validate_relay(
         match ohttp_keys {
             Ok(_) => return Ok(selected_relay),
             Err(error) => match error {
-                payjoin::io::Error(InternalError::UnexpectedStatusCode(_)) => {
+                payjoin::io::Error::UnexpectedStatusCode(_) => {
                     log::debug!("{error:?}");
                     return Err(error.into());
                 }

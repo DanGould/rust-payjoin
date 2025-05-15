@@ -54,35 +54,45 @@ pub async fn fetch_ohttp_keys_with_cert(
 
 async fn parse_ohttp_keys_response(res: reqwest::Response) -> Result<OhttpKeys, Error> {
     if !res.status().is_success() {
-        return Err(Error(InternalError::UnexpectedStatusCode(res.status())));
+        return Err(Error::UnexpectedStatusCode(res.status()));
     }
 
     let body = res.bytes().await?.to_vec();
-    OhttpKeys::decode(&body).map_err(|e| Error(InternalError::InvalidOhttpKeys(e.to_string())))
+    OhttpKeys::decode(&body)
+        .map_err(|e| Error::Internal(InternalError::InvalidOhttpKeys(e.to_string())))
 }
 
 #[derive(Debug)]
-pub struct Error(pub InternalError);
+#[non_exhaustive]
+#[allow(private_interfaces)]
+pub enum Error {
+    /// When the payjoin directory returns an unexpected status code
+    UnexpectedStatusCode(http::StatusCode),
+    /// Internal errors that should not be pattern matched by users
+    #[doc(hidden)]
+    Internal(InternalError),
+}
 
 #[derive(Debug)]
-pub enum InternalError {
+pub(crate) enum InternalError {
     ParseUrl(crate::into_url::Error),
     Reqwest(reqwest::Error),
     Io(std::io::Error),
     #[cfg(feature = "_danger-local-https")]
     Rustls(rustls::Error),
     InvalidOhttpKeys(String),
-    UnexpectedStatusCode(http::StatusCode),
 }
 
 impl From<url::ParseError> for Error {
-    fn from(value: url::ParseError) -> Self { Self(InternalError::ParseUrl(value.into())) }
+    fn from(value: url::ParseError) -> Self {
+        Self::Internal(InternalError::ParseUrl(value.into()))
+    }
 }
 
 macro_rules! impl_from_error {
     ($from:ty, $to:ident) => {
         impl From<$from> for Error {
-            fn from(value: $from) -> Self { Self(InternalError::$to(value)) }
+            fn from(value: $from) -> Self { Self::Internal(InternalError::$to(value)) }
         }
     };
 }
@@ -95,17 +105,25 @@ impl_from_error!(rustls::Error, Rustls);
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::UnexpectedStatusCode(code) => {
+                write!(f, "Unexpected status code from payjoin directory: {code}")
+            }
+            Self::Internal(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::fmt::Display for InternalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         use InternalError::*;
 
-        match &self.0 {
+        match &self {
             Reqwest(e) => e.fmt(f),
             ParseUrl(e) => e.fmt(f),
             Io(e) => e.fmt(f),
             InvalidOhttpKeys(e) => {
                 write!(f, "Invalid ohttp keys returned from payjoin directory: {e}")
-            }
-            UnexpectedStatusCode(code) => {
-                write!(f, "Unexpected status code from payjoin directory: {code}")
             }
             #[cfg(feature = "_danger-local-https")]
             Rustls(e) => e.fmt(f),
@@ -115,14 +133,22 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Internal(e) => e.source(),
+            Self::UnexpectedStatusCode(_) => None,
+        }
+    }
+}
+
+impl std::error::Error for InternalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         use InternalError::*;
 
-        match &self.0 {
+        match self {
             Reqwest(e) => Some(e),
             ParseUrl(e) => Some(e),
             Io(e) => Some(e),
             InvalidOhttpKeys(_) => None,
-            UnexpectedStatusCode(_) => None,
             #[cfg(feature = "_danger-local-https")]
             Rustls(e) => Some(e),
         }
@@ -130,7 +156,7 @@ impl std::error::Error for Error {
 }
 
 impl From<InternalError> for Error {
-    fn from(value: InternalError) -> Self { Self(value) }
+    fn from(value: InternalError) -> Self { Self::Internal(value) }
 }
 
 #[cfg(test)]
@@ -170,7 +196,7 @@ mod tests {
         for status in error_codes {
             let response = mock_response(status, vec![]);
             match parse_ohttp_keys_response(response).await {
-                Err(Error(InternalError::UnexpectedStatusCode(code))) => assert_eq!(code, status),
+                Err(Error::UnexpectedStatusCode(code)) => assert_eq!(code, status),
                 result => panic!(
                     "Expected UnexpectedStatusCode error for status code: {status}, got: {result:?}"
                 ),
@@ -188,7 +214,7 @@ mod tests {
         assert!(
             matches!(
                 parse_ohttp_keys_response(response).await,
-                Err(Error(InternalError::InvalidOhttpKeys(_)))
+                Err(Error::Internal(InternalError::InvalidOhttpKeys(_)))
             ),
             "expected InvalidOhttpKeys error"
         );
