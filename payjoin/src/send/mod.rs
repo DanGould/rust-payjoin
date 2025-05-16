@@ -145,6 +145,7 @@ impl PsbtContext {
             self.original_psbt.unsigned_tx.lock_time,
             LockTimesDontMatch
         );
+        ensure!(proposal.xpub.is_empty(), ContainsXpub);
         Ok(())
     }
 
@@ -153,6 +154,8 @@ impl PsbtContext {
 
         for proposed in proposal.input_pairs() {
             ensure!(proposed.psbtin.bip32_derivation.is_empty(), TxInContainsKeyPaths);
+            ensure!(proposed.psbtin.tap_internal_key.is_none(), TxInContainsKeyPaths);
+            ensure!(proposed.psbtin.tap_key_origins.is_empty(), TxInContainsKeyPaths);
             ensure!(proposed.psbtin.partial_sigs.is_empty(), ContainsPartialSigs);
             match original_inputs.peek() {
                 // our (sender)
@@ -233,6 +236,8 @@ impl PsbtContext {
             proposal.unsigned_tx.output.iter().zip(&proposal.outputs)
         {
             ensure!(proposed_psbtout.bip32_derivation.is_empty(), TxOutContainsKeyPaths);
+            ensure!(proposed_psbtout.tap_internal_key.is_none(), TxOutContainsKeyPaths);
+            ensure!(proposed_psbtout.tap_key_origins.is_empty(), TxOutContainsKeyPaths);
             match (original_outputs.peek(), self.fee_contribution) {
                 // fee output
                 (
