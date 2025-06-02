@@ -807,7 +807,22 @@ pub(crate) mod test {
         UncheckedProposal { psbt: PARSED_ORIGINAL_PSBT.clone(), params }
     }
 
-    fn wants_outputs_from_test_vector(proposal: UncheckedProposal) -> WantsOutputs {
+    pub(crate) fn maybe_inputs_owned_from_test_vector() -> MaybeInputsOwned {
+        let proposal = unchecked_proposal_from_test_vector();
+        proposal.check_broadcast_suitability(None, |_| Ok(true)).unwrap()
+    }
+
+    pub(crate) fn maybe_inputs_seen_from_test_vector() -> MaybeInputsSeen {
+        let maybe_inputs_owned = maybe_inputs_owned_from_test_vector();
+        maybe_inputs_owned.check_inputs_not_owned(|_| Ok(false)).unwrap()
+    }
+
+    pub(crate) fn outputs_unknown_from_test_vector() -> OutputsUnknown {
+        let maybe_inputs_seen = maybe_inputs_seen_from_test_vector();
+        maybe_inputs_seen.check_no_inputs_seen_before(|_| Ok(false)).unwrap()
+    }
+
+    pub(crate) fn wants_outputs_from_test_vector(proposal: UncheckedProposal) -> WantsOutputs {
         proposal
             .assume_interactive_receiver()
             .check_inputs_not_owned(|_| Ok(false))
@@ -825,8 +840,23 @@ pub(crate) mod test {
             .expect("Receiver output should be identified")
     }
 
-    fn provisional_proposal_from_test_vector(proposal: UncheckedProposal) -> ProvisionalProposal {
+    pub(crate) fn wants_inputs_from_test_vector() -> WantsInputs {
+        let proposal = unchecked_proposal_from_test_vector();
+        wants_outputs_from_test_vector(proposal).commit_outputs()
+    }
+
+    pub(crate) fn provisional_proposal_from_test_vector(
+        proposal: UncheckedProposal,
+    ) -> ProvisionalProposal {
         wants_outputs_from_test_vector(proposal).commit_outputs().commit_inputs()
+    }
+
+    pub(crate) fn payjoin_proposal_from_test_vector(
+        proposal: UncheckedProposal,
+    ) -> PayjoinProposal {
+        provisional_proposal_from_test_vector(proposal)
+            .finalize_proposal(|_| Ok(PARSED_ORIGINAL_PSBT.clone()), None, None)
+            .unwrap()
     }
 
     #[test]

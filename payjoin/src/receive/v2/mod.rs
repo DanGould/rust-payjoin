@@ -761,17 +761,6 @@ pub mod test {
     }
 
     #[test]
-    fn receiver_ser_de_roundtrip() -> Result<(), serde_json::Error> {
-        let session = Receiver { state: WithContext { context: SHARED_CONTEXT.clone() } };
-        let short_id = &session.context.id();
-        assert_eq!(session.key().as_ref(), short_id.as_bytes());
-        let serialized = serde_json::to_string(&session)?;
-        let deserialized: Receiver<WithContext> = serde_json::from_str(&serialized)?;
-        assert_eq!(session, deserialized);
-        Ok(())
-    }
-
-    #[test]
     fn test_v2_pj_uri() {
         let uri = Receiver { state: WithContext { context: SHARED_CONTEXT.clone() } }.pj_uri();
         assert_ne!(uri.extras.endpoint, EXAMPLE_URL.clone());
