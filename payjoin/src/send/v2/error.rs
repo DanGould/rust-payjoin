@@ -75,14 +75,10 @@ pub struct EncapsulationError(InternalEncapsulationError);
 
 #[derive(Debug)]
 pub(crate) enum InternalEncapsulationError {
-    /// The response size is not the expected size.
-    InvalidSize(usize),
-    /// The status code is not the expected status code.
-    UnexpectedStatusCode(http::StatusCode),
     /// The HPKE failed.
     Hpke(crate::hpke::HpkeError),
-    /// The encapsulation failed.
-    Ohttp(crate::ohttp::OhttpEncapsulationError),
+    /// The directory returned an unexpected response
+    DirectoryResponse(DirectoryResponseError),
 }
 
 impl fmt::Display for EncapsulationError {
@@ -90,10 +86,8 @@ impl fmt::Display for EncapsulationError {
         use InternalEncapsulationError::*;
 
         match &self.0 {
-            InvalidSize(size) => write!(f, "invalid size: {size}"),
-            UnexpectedStatusCode(status) => write!(f, "unexpected status code: {status}"),
-            Ohttp(error) => write!(f, "OHTTP encapsulation error: {error}"),
             Hpke(error) => write!(f, "HPKE error: {error}"),
+            DirectoryResponse(e) => write!(f, "Directory response error: {e}"),
         }
     }
 }
@@ -103,10 +97,8 @@ impl std::error::Error for EncapsulationError {
         use InternalEncapsulationError::*;
 
         match &self.0 {
-            InvalidSize(_) => None,
-            UnexpectedStatusCode(_) => None,
-            Ohttp(error) => Some(error),
             Hpke(error) => Some(error),
+            DirectoryResponse(e) => Some(e),
         }
     }
 }
@@ -117,28 +109,18 @@ impl From<InternalEncapsulationError> for EncapsulationError {
 
 impl From<InternalEncapsulationError> for super::ResponseError {
     fn from(value: InternalEncapsulationError) -> Self {
-        super::ResponseError::Validation(
-            super::InternalValidationError::V2Encapsulation(value.into()).into(),
-        )
+        super::InternalValidationError::V2Encapsulation(value.into()).into()
     }
 }
 
 impl From<DirectoryResponseError> for EncapsulationError {
     fn from(value: DirectoryResponseError) -> Self {
-        match value {
-            DirectoryResponseError::InvalidSize(e) => InternalEncapsulationError::InvalidSize(e),
-            DirectoryResponseError::OhttpDecapsulation(e) => InternalEncapsulationError::Ohttp(e),
-            DirectoryResponseError::UnexpectedStatusCode(e) =>
-                InternalEncapsulationError::UnexpectedStatusCode(e),
-        }
-        .into()
+        InternalEncapsulationError::DirectoryResponse(value).into()
     }
 }
 
 impl From<DirectoryResponseError> for ResponseError {
     fn from(value: DirectoryResponseError) -> Self {
-        ResponseError::Validation(
-            super::InternalValidationError::V2Encapsulation(value.into()).into(),
-        )
+        super::InternalValidationError::V2Encapsulation(value.into()).into()
     }
 }
