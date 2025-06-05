@@ -145,7 +145,8 @@ impl ReceiverTypeState {
                 ReceiverTypeState::ProvisionalProposal(state),
                 ReceiverSessionEvent::PayjoinProposal(payjoin_proposal),
             ) => Ok(state.apply_payjoin_proposal(payjoin_proposal)),
-            (_, ReceiverSessionEvent::SessionInvalid(_, _)) => Ok(ReceiverTypeState::TerminalState),
+            (_, ReceiverSessionEvent::SessionInvalid(_err_str, _json_reply)) =>
+                Ok(ReceiverTypeState::TerminalState),
             (current_state, event) => Err(InternalReceiverReplayError::InvalidStateAndEvent(
                 Box::new(current_state),
                 Box::new(event),
@@ -170,6 +171,39 @@ impl<State: ReceiverState> core::ops::Deref for Receiver<State> {
 
 impl<State: ReceiverState> core::ops::DerefMut for Receiver<State> {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.state }
+}
+
+/// Extract an OHTTP Encapsulated HTTP POST request to return
+/// a Receiver Error Response
+pub fn extract_err_req(
+    err: &JsonReply,
+    ohttp_relay: impl IntoUrl,
+    session_context: &SessionContext,
+) -> Result<(Request, ohttp::ClientResponse), SessionError> {
+    let subdir = subdir(&session_context.directory, &session_context.id());
+    let (body, ohttp_ctx) = ohttp_encapsulate(
+        &mut session_context.ohttp_keys.0.clone(),
+        "POST",
+        subdir.as_str(),
+        Some(err.to_json().to_string().as_bytes()),
+    )
+    .map_err(InternalSessionError::OhttpEncapsulation)?;
+    let req = Request::new_v2(&session_context.full_relay_url(ohttp_relay)?, &body);
+    Ok((req, ohttp_ctx))
+}
+
+/// Process an OHTTP Encapsulated HTTP POST Error response
+/// to ensure it has been posted properly
+pub fn process_err_res(body: &[u8], context: ohttp::ClientResponse) -> Result<(), SessionError> {
+    let response_array: &[u8; crate::directory::ENCAPSULATED_MESSAGE_BYTES] =
+        body.try_into().map_err(|_| InternalSessionError::UnexpectedResponseSize(body.len()))?;
+    let response = ohttp_decapsulate(context, response_array)
+        .map_err(InternalSessionError::OhttpEncapsulation)?;
+
+    match response.status() {
+        http::StatusCode::OK => Ok(()),
+        _ => Err(InternalSessionError::UnexpectedStatusCode(response.status()).into()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -478,44 +512,6 @@ impl Receiver<UncheckedProposal> {
             ReceiverSessionEvent::MaybeInputsOwned(inner.clone()),
             Receiver { state: MaybeInputsOwned { v1: inner, context: self.state.context } },
         )
-    }
-
-    /// Extract an OHTTP Encapsulated HTTP POST request to return
-    /// a Receiver Error Response
-    pub fn extract_err_req(
-        &mut self,
-        err: &JsonReply,
-        ohttp_relay: impl IntoUrl,
-    ) -> Result<(Request, ohttp::ClientResponse), SessionError> {
-        let subdir = subdir(&self.context.directory, &self.context.id());
-        let (body, ohttp_ctx) = ohttp_encapsulate(
-            &mut self.context.ohttp_keys,
-            "POST",
-            subdir.as_str(),
-            Some(err.to_json().to_string().as_bytes()),
-        )
-        .map_err(InternalSessionError::OhttpEncapsulation)?;
-        let req = Request::new_v2(&self.context.full_relay_url(ohttp_relay)?, &body);
-        Ok((req, ohttp_ctx))
-    }
-
-    /// Process an OHTTP Encapsulated HTTP POST Error response
-    /// to ensure it has been posted properly
-    pub fn process_err_res(
-        &mut self,
-        body: &[u8],
-        context: ohttp::ClientResponse,
-    ) -> Result<(), SessionError> {
-        let response_array: &[u8; crate::directory::ENCAPSULATED_MESSAGE_BYTES] =
-            body.try_into()
-                .map_err(|_| InternalSessionError::UnexpectedResponseSize(body.len()))?;
-        let response = ohttp_decapsulate(context, response_array)
-            .map_err(InternalSessionError::OhttpEncapsulation)?;
-
-        match response.status() {
-            http::StatusCode::OK => Ok(()),
-            _ => Err(InternalSessionError::UnexpectedStatusCode(response.status()).into()),
-        }
     }
 
     pub(crate) fn apply_maybe_inputs_owned(self, v1: v1::MaybeInputsOwned) -> ReceiverTypeState {
@@ -1035,7 +1031,7 @@ pub mod test {
     }
 
     #[test]
-    fn extract_err_req() -> Result<(), BoxError> {
+    fn test_extract_err_req() -> Result<(), BoxError> {
         let noop_persister = NoopSessionPersister::default();
         let receiver = Receiver {
             state: UncheckedProposal {
@@ -1061,11 +1057,11 @@ pub mod test {
         let actual_json = JsonReply::from(&res);
         assert_eq!(actual_json.to_json(), expected_json);
 
-        let (_req, _ctx) = receiver.clone().extract_err_req(&actual_json, &*EXAMPLE_URL)?;
+        let (_req, _ctx) = extract_err_req(&actual_json, &*EXAMPLE_URL, &SHARED_CONTEXT)?;
 
         let internal_error: ReplyableError = InternalPayloadError::MissingPayment.into();
         let (_req, _ctx) =
-            receiver.clone().extract_err_req(&(&internal_error).into(), &*EXAMPLE_URL)?;
+            extract_err_req(&(&internal_error).into(), &*EXAMPLE_URL, &SHARED_CONTEXT)?;
         Ok(())
     }
 

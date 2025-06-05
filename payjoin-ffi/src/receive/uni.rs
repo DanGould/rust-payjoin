@@ -102,40 +102,55 @@ pub struct TerminalError {
 impl TerminalError {
     pub fn error(&self) -> String { self.error.clone() }
 
-    pub fn reply(&self) -> Option<Arc<JsonReply>> { self.reply.clone().map(|reply| Arc::new(reply)) }
+    pub fn reply(&self) -> Option<Arc<JsonReply>> {
+        self.reply.clone().map(|reply| Arc::new(reply))
+    }
 }
 
 #[uniffi::export]
 impl SessionHistory {
     pub fn pj_uri(&self) -> Option<Arc<crate::PjUri>> {
-        self.0.pj_uri().map(|pj_uri| Arc::new(pj_uri.into()))
+        self.0 .0.pj_uri().map(|pj_uri| Arc::new(pj_uri.into()))
     }
 
     pub fn payment_amount(&self) -> Option<u64> {
-        self.0.payment_amount().map(|amount| amount.to_sat())
+        self.0 .0.payment_amount().map(|amount| amount.to_sat())
     }
 
     pub fn payment_address(&self) -> Option<Arc<crate::Address>> {
-        self.0.payment_address().map(|address| Arc::new(address.into()))
+        self.0 .0.payment_address().map(|address| Arc::new(address.into()))
     }
 
     pub fn original_psbt(&self) -> Option<Arc<crate::Psbt>> {
-        self.0.original_psbt().map(|psbt| Arc::new(psbt.into()))
+        self.0 .0.original_psbt().map(|psbt| Arc::new(psbt.into()))
     }
 
     pub fn proposed_payjoin_psbt(&self) -> Option<Arc<crate::Psbt>> {
-        self.0.proposed_payjoin_psbt().map(|psbt| Arc::new(psbt.into()))
+        self.0 .0.proposed_payjoin_psbt().map(|psbt| Arc::new(psbt.into()))
     }
 
     pub fn psbt_with_contributed_inputs(&self) -> Option<Arc<crate::Psbt>> {
-        self.0.psbt_with_contributed_inputs().map(|psbt| Arc::new(psbt.into()))
+        self.0 .0.psbt_with_contributed_inputs().map(|psbt| Arc::new(psbt.into()))
     }
 
     pub fn terminal_error(&self) -> Option<Arc<TerminalError>> {
-        self.0.terminal_error().map(|(error, reply)| Arc::new(TerminalError {
-            error,
-            reply: reply.map(|reply| reply.into()),
-        }))
+        self.0 .0.terminal_error().map(|(error, reply)| {
+            Arc::new(TerminalError { error, reply: reply.map(|reply| reply.into()) })
+        })
+    }
+
+    pub fn extract_err_req(
+        &self,
+        ohttp_relay: String,
+    ) -> Result<Option<RequestResponse>, SessionError> {
+        match self.0 .0.extract_err_req(ohttp_relay) {
+            Ok(Some((request, ctx))) => Ok(Some(RequestResponse {
+                request: request.into(),
+                client_response: Arc::new(ctx.into()),
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(SessionError::from(e)),
+        }
     }
 }
 
@@ -147,13 +162,9 @@ pub struct ReplayResult {
 
 #[uniffi::export]
 impl ReplayResult {
-    pub fn state(&self) -> ReceiverState {
-        self.state.clone()
-    }
+    pub fn state(&self) -> ReceiverState { self.state.clone() }
 
-    pub fn session_history(&self) -> SessionHistory {
-        self.session_history.clone()
-    }
+    pub fn session_history(&self) -> SessionHistory { self.session_history.clone() }
 }
 
 #[uniffi::export]
@@ -163,10 +174,7 @@ pub fn replay_receiver_event_log(
     let adapter = CallbackPersisterAdapter::new(persister);
     let (state, session_history) =
         super::replay_receiver_event_log(&adapter).map_err(ReceiverReplayError::from)?;
-    Ok(ReplayResult {
-        state: state.into(),
-        session_history: session_history.into(),
-    })
+    Ok(ReplayResult { state: state.into(), session_history: session_history.into() })
 }
 #[derive(uniffi::Object)]
 pub struct MaybeBadInitInputsTransition(super::InitInputsTransition);
@@ -382,28 +390,13 @@ impl UncheckedProposal {
     pub fn assume_interactive_receiver(&self) -> AssumeInteractiveTransition {
         AssumeInteractiveTransition(self.0.assume_interactive_receiver())
     }
+}
 
-    /// Extract an OHTTP Encapsulated HTTP POST request to return
-    /// a Receiver Error Response
-    pub fn extract_err_req(
-        &self,
-        err: Arc<JsonReply>,
-        ohttp_relay: String,
-    ) -> Result<RequestResponse, SessionError> {
-        self.0
-            .extract_err_req(&err, ohttp_relay)
-            .map(|(req, ctx)| RequestResponse { request: req, client_response: Arc::new(ctx) })
-    }
-
-    /// Process an OHTTP Encapsulated HTTP POST Error response
-    /// to ensure it has been posted properly
-    pub fn process_err_res(
-        &self,
-        body: &[u8],
-        context: Arc<ClientResponse>,
-    ) -> Result<(), SessionError> {
-        self.0.clone().process_err_res(body, &context)
-    }
+/// Process an OHTTP Encapsulated HTTP POST Error response
+/// to ensure it has been posted properly
+#[uniffi::export]
+pub fn process_err_res(body: &[u8], context: Arc<ClientResponse>) -> Result<(), SessionError> {
+    super::process_err_res(body, &context)
 }
 
 /// Type state to validate that the Original PSBT has no receiver-owned inputs.
