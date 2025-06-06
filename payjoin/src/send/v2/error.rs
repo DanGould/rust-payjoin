@@ -1,6 +1,5 @@
 use core::fmt;
 
-use super::ResponseError;
 use crate::ohttp::DirectoryResponseError;
 use crate::uri::url_ext::ParseReceiverPubkeyParamError;
 
@@ -105,22 +104,4 @@ impl std::error::Error for EncapsulationError {
 
 impl From<InternalEncapsulationError> for EncapsulationError {
     fn from(value: InternalEncapsulationError) -> Self { EncapsulationError(value) }
-}
-
-impl From<InternalEncapsulationError> for super::ResponseError {
-    fn from(value: InternalEncapsulationError) -> Self {
-        super::InternalValidationError::V2Encapsulation(value.into()).into()
-    }
-}
-
-impl From<DirectoryResponseError> for EncapsulationError {
-    fn from(value: DirectoryResponseError) -> Self {
-        InternalEncapsulationError::DirectoryResponse(value).into()
-    }
-}
-
-impl From<DirectoryResponseError> for ResponseError {
-    fn from(value: DirectoryResponseError) -> Self {
-        super::InternalValidationError::V2Encapsulation(value.into()).into()
-    }
 }

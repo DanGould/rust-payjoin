@@ -325,7 +325,8 @@ impl Sender<V2PostContext> {
         self,
         response: &[u8],
     ) -> Result<Sender<V2GetContext>, EncapsulationError> {
-        process_post_res(response, self.state.ohttp_ctx)?;
+        process_post_res(response, self.state.ohttp_ctx)
+            .map_err(InternalEncapsulationError::DirectoryResponse)?;
         Ok(Sender {
             state: V2GetContext {
                 endpoint: self.state.endpoint,
@@ -394,7 +395,11 @@ impl Sender<V2GetContext> {
         response: &[u8],
         ohttp_ctx: ohttp::ClientResponse,
     ) -> Result<Option<Psbt>, ResponseError> {
-        let body = match process_get_res(response, ohttp_ctx)? {
+        let body = match process_get_res(response, ohttp_ctx).map_err(|e| {
+            InternalValidationError::V2Encapsulation(
+                InternalEncapsulationError::DirectoryResponse(e).into(),
+            )
+        })? {
             Some(body) => body,
             None => return Ok(None),
         };
@@ -403,7 +408,9 @@ impl Sender<V2GetContext> {
             self.hpke_ctx.receiver.clone(),
             self.hpke_ctx.reply_pair.secret_key().clone(),
         )
-        .map_err(InternalEncapsulationError::Hpke)?;
+        .map_err(|e| {
+            InternalValidationError::V2Encapsulation(InternalEncapsulationError::Hpke(e).into())
+        })?;
 
         let proposal = Psbt::deserialize(&psbt).map_err(InternalProposalError::Psbt)?;
         let processed_proposal = self.psbt_ctx.clone().process_proposal(proposal)?;
