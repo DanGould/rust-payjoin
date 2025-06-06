@@ -196,6 +196,8 @@ pub enum ReceiverSessionEvent {
 
 #[cfg(test)]
 mod tests {
+    use payjoin_test_utils::InMemoryTestPersister;
+
     use super::*;
     use crate::receive::v1::test::{
         maybe_inputs_owned_from_test_vector, maybe_inputs_seen_from_test_vector,
@@ -204,6 +206,9 @@ mod tests {
         wants_inputs_from_test_vector, wants_outputs_from_test_vector,
     };
     use crate::receive::v2::test::SHARED_CONTEXT;
+    use crate::receive::v2::{
+        PayjoinProposal, ProvisionalProposal, UncheckedProposal, WithContext,
+    };
 
     #[test]
     fn test_receiver_session_event_serialization() {
@@ -238,5 +243,230 @@ mod tests {
             let deserialized: ReceiverSessionEvent = serde_json::from_str(&serialized).unwrap();
             assert_eq!(event, deserialized);
         }
+    }
+
+    struct SessionHistoryExpectedOutcome {
+        payment_address: Option<bitcoin::Address<bitcoin::address::NetworkChecked>>,
+        payment_amount: Option<bitcoin::Amount>,
+        fallback_txid: Option<bitcoin::Txid>,
+        original_psbt: Option<bitcoin::Psbt>,
+        proposed_payjoin_psbt: Option<bitcoin::Psbt>,
+        psbt_with_contributed_inputs: Option<bitcoin::Psbt>,
+    }
+
+    struct SessionHistoryTest {
+        events: Vec<ReceiverSessionEvent>,
+        expected_session_history: SessionHistoryExpectedOutcome,
+        expected_receiver_state: ReceiverTypeState,
+    }
+
+    fn run_session_history_test(test: SessionHistoryTest) {
+        let persister = InMemoryTestPersister::<ReceiverSessionEvent>::default();
+        for event in test.events {
+            persister.save_event(&event).expect("In memory persister shouldn't fail");
+        }
+
+        let (receiver, session_history) =
+            replay_receiver_event_log(&persister).expect("In memory persister shouldn't fail");
+
+        assert_eq!(receiver, test.expected_receiver_state);
+        assert_eq!(
+            session_history.payment_address(),
+            test.expected_session_history.payment_address
+        );
+        assert_eq!(session_history.payment_amount(), test.expected_session_history.payment_amount);
+        assert_eq!(session_history.fallback_txid(), test.expected_session_history.fallback_txid);
+        assert_eq!(session_history.original_psbt(), test.expected_session_history.original_psbt);
+        assert_eq!(
+            session_history.proposed_payjoin_psbt(),
+            test.expected_session_history.proposed_payjoin_psbt
+        );
+        assert_eq!(
+            session_history.psbt_with_contributed_inputs(),
+            test.expected_session_history.psbt_with_contributed_inputs
+        );
+    }
+
+    #[test]
+    fn test_replaying_session_creation() {
+        let session_context = SHARED_CONTEXT.clone();
+        let test = SessionHistoryTest {
+            events: vec![ReceiverSessionEvent::Created(session_context.clone())],
+            expected_session_history: SessionHistoryExpectedOutcome {
+                payment_address: Some(session_context.address.clone()),
+                payment_amount: None,
+                fallback_txid: None,
+                original_psbt: None,
+                proposed_payjoin_psbt: None,
+                psbt_with_contributed_inputs: None,
+            },
+            expected_receiver_state: ReceiverTypeState::WithContext(Receiver {
+                state: WithContext { context: session_context },
+            }),
+        };
+        run_session_history_test(test);
+    }
+
+    #[test]
+    fn test_replaying_unchecked_proposal() {
+        let session_context = SHARED_CONTEXT.clone();
+
+        let test = SessionHistoryTest {
+            events: vec![
+                ReceiverSessionEvent::Created(session_context.clone()),
+                ReceiverSessionEvent::UncheckedProposal((
+                    unchecked_proposal_from_test_vector(),
+                    None,
+                )),
+            ],
+            expected_session_history: SessionHistoryExpectedOutcome {
+                payment_address: Some(session_context.address.clone()),
+                payment_amount: None,
+                fallback_txid: Some(
+                    unchecked_proposal_from_test_vector().psbt.unsigned_tx.compute_txid(),
+                ),
+                original_psbt: Some(unchecked_proposal_from_test_vector().psbt.clone()),
+                proposed_payjoin_psbt: None,
+                psbt_with_contributed_inputs: None,
+            },
+            expected_receiver_state: ReceiverTypeState::UncheckedProposal(Receiver {
+                state: UncheckedProposal {
+                    v1: unchecked_proposal_from_test_vector(),
+                    context: session_context,
+                },
+            }),
+        };
+        run_session_history_test(test);
+    }
+
+    #[test]
+    fn test_replaying_unchecked_proposal_with_reply_key() {
+        let session_context = SHARED_CONTEXT.clone();
+
+        let test = SessionHistoryTest {
+            events: vec![
+                ReceiverSessionEvent::Created(session_context.clone()),
+                ReceiverSessionEvent::UncheckedProposal((
+                    unchecked_proposal_from_test_vector(),
+                    session_context.e.clone(),
+                )),
+            ],
+            expected_session_history: SessionHistoryExpectedOutcome {
+                payment_address: Some(session_context.address.clone()),
+                payment_amount: None,
+                fallback_txid: Some(
+                    unchecked_proposal_from_test_vector().psbt.unsigned_tx.compute_txid(),
+                ),
+                original_psbt: Some(unchecked_proposal_from_test_vector().psbt.clone()),
+                proposed_payjoin_psbt: None,
+                psbt_with_contributed_inputs: None,
+            },
+            expected_receiver_state: ReceiverTypeState::UncheckedProposal(Receiver {
+                state: UncheckedProposal {
+                    v1: unchecked_proposal_from_test_vector(),
+                    context: session_context,
+                },
+            }),
+        };
+        run_session_history_test(test);
+    }
+
+    #[test]
+    fn test_contributed_inputs() {
+        let session_context = SHARED_CONTEXT.clone();
+
+        let test = SessionHistoryTest {
+            events: vec![
+                ReceiverSessionEvent::Created(session_context.clone()),
+                ReceiverSessionEvent::UncheckedProposal((
+                    unchecked_proposal_from_test_vector(),
+                    None,
+                )),
+                ReceiverSessionEvent::MaybeInputsOwned(maybe_inputs_owned_from_test_vector()),
+                ReceiverSessionEvent::MaybeInputsSeen(maybe_inputs_seen_from_test_vector()),
+                ReceiverSessionEvent::OutputsUnknown(outputs_unknown_from_test_vector()),
+                ReceiverSessionEvent::WantsOutputs(wants_outputs_from_test_vector(
+                    unchecked_proposal_from_test_vector(),
+                )),
+                ReceiverSessionEvent::WantsInputs(wants_inputs_from_test_vector()),
+                ReceiverSessionEvent::ProvisionalProposal(provisional_proposal_from_test_vector(
+                    unchecked_proposal_from_test_vector(),
+                )),
+            ],
+            expected_session_history: SessionHistoryExpectedOutcome {
+                payment_address: Some(session_context.address.clone()),
+                payment_amount: None,
+                fallback_txid: Some(
+                    unchecked_proposal_from_test_vector().psbt.unsigned_tx.compute_txid(),
+                ),
+                original_psbt: Some(unchecked_proposal_from_test_vector().psbt.clone()),
+                proposed_payjoin_psbt: None,
+                psbt_with_contributed_inputs: Some(
+                    provisional_proposal_from_test_vector(unchecked_proposal_from_test_vector())
+                        .psbt()
+                        .clone(),
+                ),
+            },
+            expected_receiver_state: ReceiverTypeState::ProvisionalProposal(Receiver {
+                state: ProvisionalProposal {
+                    v1: provisional_proposal_from_test_vector(unchecked_proposal_from_test_vector()),
+                    context: session_context,
+                },
+            }),
+        };
+        run_session_history_test(test);
+    }
+
+    #[test]
+    fn test_payjoin_proposal() {
+        let session_context = SHARED_CONTEXT.clone();
+
+        let test = SessionHistoryTest {
+            events: vec![
+                ReceiverSessionEvent::Created(session_context.clone()),
+                ReceiverSessionEvent::UncheckedProposal((
+                    unchecked_proposal_from_test_vector(),
+                    None,
+                )),
+                ReceiverSessionEvent::MaybeInputsOwned(maybe_inputs_owned_from_test_vector()),
+                ReceiverSessionEvent::MaybeInputsSeen(maybe_inputs_seen_from_test_vector()),
+                ReceiverSessionEvent::OutputsUnknown(outputs_unknown_from_test_vector()),
+                ReceiverSessionEvent::WantsOutputs(wants_outputs_from_test_vector(
+                    unchecked_proposal_from_test_vector(),
+                )),
+                ReceiverSessionEvent::WantsInputs(wants_inputs_from_test_vector()),
+                ReceiverSessionEvent::ProvisionalProposal(provisional_proposal_from_test_vector(
+                    unchecked_proposal_from_test_vector(),
+                )),
+                ReceiverSessionEvent::PayjoinProposal(payjoin_proposal_from_test_vector(
+                    unchecked_proposal_from_test_vector(),
+                )),
+            ],
+            expected_session_history: SessionHistoryExpectedOutcome {
+                payment_address: Some(session_context.address.clone()),
+                payment_amount: None,
+                fallback_txid: Some(
+                    unchecked_proposal_from_test_vector().psbt.unsigned_tx.compute_txid(),
+                ),
+                original_psbt: Some(unchecked_proposal_from_test_vector().psbt.clone()),
+                proposed_payjoin_psbt: Some(
+                    payjoin_proposal_from_test_vector(unchecked_proposal_from_test_vector())
+                        .psbt()
+                        .clone(),
+                ),
+                psbt_with_contributed_inputs: Some(
+                    provisional_proposal_from_test_vector(unchecked_proposal_from_test_vector())
+                        .psbt()
+                        .clone(),
+                ),
+            },
+            expected_receiver_state: ReceiverTypeState::PayjoinProposal(Receiver {
+                state: PayjoinProposal {
+                    v1: payjoin_proposal_from_test_vector(unchecked_proposal_from_test_vector()),
+                    context: session_context,
+                },
+            }),
+        };
+        run_session_history_test(test);
     }
 }
