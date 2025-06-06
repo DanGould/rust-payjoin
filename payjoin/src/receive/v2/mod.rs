@@ -677,10 +677,13 @@ pub mod test {
     use std::str::FromStr;
 
     use once_cell::sync::Lazy;
-    use payjoin_test_utils::{BoxError, EXAMPLE_URL, KEM, KEY_ID, SYMMETRIC};
+    use payjoin_test_utils::{
+        BoxError, InMemoryTestPersister, EXAMPLE_URL, KEM, KEY_ID, SYMMETRIC,
+    };
 
     use super::*;
-    use crate::persist::Value;
+    use crate::persist::SessionPersister;
+    use crate::receive::v2::persist::ReceiverSessionEvent;
 
     pub(crate) static SHARED_CONTEXT: Lazy<SessionContext> = Lazy::new(|| SessionContext {
         address: Address::from_str("tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4")
@@ -709,6 +712,33 @@ pub mod test {
         s: HpkeKeyPair::gen_keypair(),
         e: None,
     });
+
+    /// InMemory v2 receiver session persister
+    impl SessionPersister for InMemoryTestPersister<ReceiverSessionEvent> {
+        type InternalStorageError = std::convert::Infallible;
+        type SessionEvent = ReceiverSessionEvent;
+
+        fn save_event(&self, event: &Self::SessionEvent) -> Result<(), Self::InternalStorageError> {
+            let mut inner = self.inner.write().expect("Lock should not be poisoned");
+            inner.events.push(event.clone());
+            Ok(())
+        }
+
+        fn load(
+            &self,
+        ) -> Result<Box<dyn Iterator<Item = Self::SessionEvent>>, Self::InternalStorageError>
+        {
+            let inner = self.inner.read().expect("Lock should not be poisoned");
+            let events = inner.events.clone();
+            Ok(Box::new(events.into_iter()))
+        }
+
+        fn close(&self) -> Result<(), Self::InternalStorageError> {
+            let mut inner = self.inner.write().expect("Lock should not be poisoned");
+            inner.is_closed = true;
+            Ok(())
+        }
+    }
 
     #[test]
     fn extract_err_req() -> Result<(), BoxError> {
