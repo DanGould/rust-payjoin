@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{Receiver, ReceiverTypeState, SessionContext, UninitializedReceiver};
 use crate::output_substitution::OutputSubstitution;
-use crate::persist::SessionPersister;
 use crate::receive::v2::{extract_err_req, subdir, SessionError};
 use crate::receive::{v1, JsonReply};
 use crate::{HpkePublicKey, ImplementationError, IntoUrl, PjUri, Request};
@@ -48,9 +47,8 @@ pub fn replay_receiver_event_log<P>(
     persister: &P,
 ) -> Result<(ReceiverTypeState, SessionHistory), ReceiverReplayError>
 where
-    P: SessionPersister,
-    P::SessionEvent: From<ReceiverSessionEvent> + Clone,
-    ReceiverSessionEvent: From<P::SessionEvent>,
+    P: crate::persist::SessionPersister,
+    P::SessionEvent: Into<ReceiverSessionEvent> + Clone,
 {
     let logs = persister
         .load()
@@ -196,9 +194,8 @@ pub enum ReceiverSessionEvent {
 
 #[cfg(test)]
 mod tests {
-    use payjoin_test_utils::InMemoryTestPersister;
-
     use super::*;
+    use crate::persist::test_utils::InMemoryTestPersister;
     use crate::receive::v1::test::{
         maybe_inputs_owned_from_test_vector, maybe_inputs_seen_from_test_vector,
         outputs_unknown_from_test_vector, payjoin_proposal_from_test_vector,
@@ -261,6 +258,7 @@ mod tests {
     }
 
     fn run_session_history_test(test: SessionHistoryTest) {
+        use crate::persist::SessionPersister;
         let persister = InMemoryTestPersister::<ReceiverSessionEvent>::default();
         for event in test.events {
             persister.save_event(&event).expect("In memory persister shouldn't fail");

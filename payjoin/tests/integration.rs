@@ -171,13 +171,14 @@ mod integration {
 
         use bitcoin::Address;
         use http::StatusCode;
+        use payjoin::persist::test_utils::InMemoryTestPersister;
         use payjoin::persist::{NoopPersister, NoopSessionPersister};
         use payjoin::receive::v2::{
             replay_receiver_event_log, PayjoinProposal, Receiver, UncheckedProposal,
         };
         use payjoin::send::v2::{Sender, SenderBuilder};
         use payjoin::{OhttpKeys, PjUri, UriExt};
-        use payjoin_test_utils::{BoxSendSyncError, InMemoryTestPersister, TestServices};
+        use payjoin_test_utils::{BoxSendSyncError, TestServices};
         use reqwest::{Client, Response};
 
         use super::*;
@@ -301,7 +302,7 @@ mod integration {
                 services.wait_for_services_ready().await?;
                 let directory = services.directory_url();
                 let ohttp_keys = services.fetch_ohttp_keys().await?;
-                let in_memory_persister = InMemoryTestPersister::default();
+                let persister = InMemoryTestPersister::default();
                 // **********************
                 // Inside the Receiver:
                 let address = receiver.get_new_address(None, None)?.assume_checked();
@@ -312,7 +313,7 @@ mod integration {
                     ohttp_keys.clone(),
                     None,
                 )
-                .save(&in_memory_persister)?;
+                .save(&persister)?;
                 println!("session: {:#?}", &session);
                 // Poll receive request
                 let ohttp_relay = services.ohttp_relay_url();
@@ -326,7 +327,7 @@ mod integration {
                 assert!(response.status().is_success(), "error response: {}", response.status());
                 let response_body = session
                     .process_res(response.bytes().await?.to_vec().as_slice(), ctx)
-                    .save(&in_memory_persister)?;
+                    .save(&persister)?;
                 // No proposal yet since sender has not responded
                 assert!(response_body.is_none());
 
@@ -371,7 +372,7 @@ mod integration {
                 // POST payjoin
                 let outcome = session
                     .process_res(response.bytes().await?.to_vec().as_slice(), ctx)
-                    .save(&in_memory_persister)?;
+                    .save(&persister)?;
                 let proposal = outcome.success().expect("proposal should exist").clone();
 
                 // Generate replyable error
@@ -379,7 +380,7 @@ mod integration {
                     proposal
                         .clone()
                         .check_broadcast_suitability(None, |_| Ok(false))
-                        .save(&in_memory_persister)
+                        .save(&persister)
                 };
                 let server_error = check_broadcast_suitability()
                     .expect_err("should fail")
@@ -387,7 +388,7 @@ mod integration {
                     .expect("expected api error");
                 assert_eq!(server_error.to_string(), "Can't broadcast. PSBT rejected by mempool.");
 
-                let (_, session_history) = replay_receiver_event_log(&in_memory_persister)?;
+                let (_, session_history) = replay_receiver_event_log(&persister)?;
                 let (err_req, err_ctx) = session_history
                     .extract_err_req(ohttp_relay)?
                     .expect("error request should exist");

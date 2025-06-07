@@ -611,11 +611,79 @@ impl<E: 'static> SessionPersister for NoopSessionPersister<E> {
     fn close(&self) -> Result<(), Self::InternalStorageError> { Ok(()) }
 }
 
-#[cfg(test)]
-mod tests {
-    use payjoin_test_utils::{InMemoryTestError, InMemoryTestPersister};
+#[cfg(feature = "_test-utils")]
+pub mod test_utils {
     use serde::{Deserialize, Serialize};
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct InMemoryTestEvent(String);
+
+    use std::sync::{Arc, RwLock};
+
+    use crate::persist::SessionPersister;
+    #[derive(Clone)]
+    pub struct InMemoryTestPersister<ReceiverSessionEvent> {
+        pub inner: Arc<RwLock<InnerStorage<ReceiverSessionEvent>>>,
+    }
+
+    impl<ReceiverSessionEvent> Default for InMemoryTestPersister<ReceiverSessionEvent> {
+        fn default() -> Self { Self { inner: Arc::new(RwLock::new(InnerStorage::default())) } }
+    }
+
+    #[derive(Clone)]
+    pub struct InnerStorage<ReceiverSessionEvent> {
+        pub events: Vec<ReceiverSessionEvent>,
+        pub is_closed: bool,
+    }
+
+    impl<ReceiverSessionEvent> Default for InnerStorage<ReceiverSessionEvent> {
+        fn default() -> Self { Self { events: vec![], is_closed: false } }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    /// Dummy error type for testing
+    pub struct InMemoryTestError {}
+
+    impl std::error::Error for InMemoryTestError {}
+
+    impl std::fmt::Display for InMemoryTestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "InMemoryTestError")
+        }
+    }
+
+    impl SessionPersister for InMemoryTestPersister<crate::receive::v2::ReceiverSessionEvent> {
+        type InternalStorageError = std::convert::Infallible;
+        type SessionEvent = crate::receive::v2::ReceiverSessionEvent;
+
+        fn save_event(&self, event: &Self::SessionEvent) -> Result<(), Self::InternalStorageError> {
+            let mut inner = self.inner.write().expect("Lock should not be poisoned");
+            inner.events.push(event.clone());
+            Ok(())
+        }
+
+        fn load(
+            &self,
+        ) -> Result<Box<dyn Iterator<Item = Self::SessionEvent>>, Self::InternalStorageError>
+        {
+            let inner = self.inner.read().expect("Lock should not be poisoned");
+            let events = inner.events.clone();
+            Ok(Box::new(events.into_iter()))
+        }
+
+        fn close(&self) -> Result<(), Self::InternalStorageError> {
+            let mut inner = self.inner.write().expect("Lock should not be poisoned");
+            inner.is_closed = true;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use serde::{Deserialize, Serialize};
+
+    use super::test_utils::{InMemoryTestError, InMemoryTestPersister};
     use super::*;
 
     type InMemoryTestState = String;
