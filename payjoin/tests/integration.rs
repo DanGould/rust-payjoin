@@ -211,7 +211,7 @@ mod integration {
                     .assume_checked();
                 let noop_persister = NoopSessionPersister::default();
                 let mut bad_initializer =
-                    Receiver::create_session(mock_address, directory, bad_ohttp_keys, None)
+                    Receiver::create_session(mock_address, directory, bad_ohttp_keys, None)?
                         .save(&noop_persister)?;
                 let (req, _ctx) = bad_initializer.create_poll_request(&ohttp_relay)?;
                 agent
@@ -255,7 +255,7 @@ mod integration {
                     directory.clone(),
                     ohttp_keys.clone(),
                     Some(Duration::from_secs(0)),
-                )
+                )?
                 .save(&recv_noop_persister)?;
                 match expired_receiver.create_poll_request(&ohttp_relay) {
                     // Internal error types are private, so check against a string
@@ -268,7 +268,7 @@ mod integration {
                 let psbt = build_original_psbt(&sender, &expired_receiver.pj_uri())?;
                 // Test that an expired pj_url errors
                 let expired_req_ctx = SenderBuilder::new(psbt, expired_receiver.pj_uri())
-                    .build_non_incentivizing(FeeRate::BROADCAST_MIN)
+                    .build_non_incentivizing(FeeRate::BROADCAST_MIN)?
                     .save(&send_noop_persister)?;
 
                 match expired_req_ctx.create_v2_post_request(ohttp_relay) {
@@ -311,7 +311,7 @@ mod integration {
                     directory.clone(),
                     ohttp_keys.clone(),
                     None,
-                )
+                )?
                 .save(&persister)?;
                 println!("session: {:#?}", &session);
                 // Poll receive request
@@ -340,7 +340,7 @@ mod integration {
                     .map_err(|e| e.to_string())?;
                 let psbt = build_sweep_psbt(&sender, &pj_uri)?;
                 let req_ctx = SenderBuilder::new(psbt, pj_uri)
-                    .build_recommended(FeeRate::BROADCAST_MIN)
+                    .build_recommended(FeeRate::BROADCAST_MIN)?
                     .save(&sender_persister)?;
                 let (Request { url, body, content_type, .. }, _send_ctx) =
                     req_ctx.create_v2_post_request(ohttp_relay.to_owned())?;
@@ -437,7 +437,7 @@ mod integration {
                     directory.clone(),
                     ohttp_keys.clone(),
                     None,
-                )
+                )?
                 .save(&recv_persister)?;
                 println!("session: {:#?}", &session);
                 // Poll receive request
@@ -466,7 +466,7 @@ mod integration {
                     .map_err(|e| e.to_string())?;
                 let psbt = build_sweep_psbt(&sender, &pj_uri)?;
                 let req_ctx = SenderBuilder::new(psbt, pj_uri)
-                    .build_recommended(FeeRate::BROADCAST_MIN)
+                    .build_recommended(FeeRate::BROADCAST_MIN)?
                     .save(&send_persister)?;
                 let (Request { url, body, content_type, .. }, send_ctx) =
                     req_ctx.create_v2_post_request(ohttp_relay.to_owned())?;
@@ -571,7 +571,7 @@ mod integration {
             let psbt = build_original_psbt(&sender, &pj_uri)?;
             let send_persister = NoopSessionPersister::default();
             let req_ctx = SenderBuilder::new(psbt, pj_uri)
-                .build_recommended(FeeRate::BROADCAST_MIN)
+                .build_recommended(FeeRate::BROADCAST_MIN)?
                 .save(&send_persister)?;
             let (req, ctx) = req_ctx.create_v1_post_request();
             let headers = HeaderMock::new(&req.body, req.content_type);
@@ -623,7 +623,7 @@ mod integration {
                 let send_persister = NoopSessionPersister::default();
                 let address = receiver.get_new_address(None, None)?.assume_checked();
                 let mut session =
-                    Receiver::create_session(address, directory.clone(), ohttp_keys.clone(), None)
+                    Receiver::create_session(address, directory.clone(), ohttp_keys.clone(), None)?
                         .save(&recv_persister)?;
 
                 // **********************
@@ -636,7 +636,7 @@ mod integration {
                     .map_err(|e| e.to_string())?;
                 let psbt = build_original_psbt(&sender, &pj_uri)?;
                 let req_ctx = SenderBuilder::new(psbt, pj_uri)
-                    .build_with_additional_fee(Amount::from_sat(10000), None, FeeRate::ZERO, false)
+                    .build_with_additional_fee(Amount::from_sat(10000), None, FeeRate::ZERO, false)?
                     .save(&send_persister)?;
                 let (Request { url, body, content_type, .. }, send_ctx) =
                     req_ctx.create_v1_post_request();
@@ -915,7 +915,7 @@ mod integration {
                         directory.clone(),
                         ohttp_keys.clone(),
                         None,
-                    )
+                    )?
                     .save(&recv_persister)?;
                     let pj_uri = receiver_session.pj_uri();
                     let psbt = build_sweep_psbt(sender, &pj_uri)?;
