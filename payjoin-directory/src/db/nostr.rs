@@ -14,14 +14,14 @@ use super::Error;
 pub type BoxSendSyncError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Clone)]
-pub(crate) struct Db {
+pub struct Db {
     child: Arc<tokio::process::Child>,
     port: u16,
     temp_dir: Arc<tempfile::TempDir>,
 }
 
 impl Db {
-    pub(crate) async fn new() -> Result<Self, BoxSendSyncError> {
+    pub async fn new() -> Result<Self, BoxSendSyncError> {
         let (port, child, temp_dir) = init_nostr_relay().await?;
 
         Ok(Self { child: Arc::new(child), port, temp_dir: Arc::new(temp_dir) })
@@ -97,7 +97,7 @@ impl super::Db for Db {
 }
 
 #[derive(Debug)]
-pub(crate) enum NostrBackendError {}
+pub enum NostrBackendError {}
 
 impl crate::db::SendableError for NostrBackendError {}
 

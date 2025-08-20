@@ -17,16 +17,9 @@ async fn main() -> Result<(), BoxError> {
 
     let timeout_env = env::var("PJ_DIR_TIMEOUT_SECS")
         .map_or(DEFAULT_TIMEOUT_SECS, |s| s.parse().expect("Invalid timeout"));
-    let timeout = std::time::Duration::from_secs(timeout_env);
+    let _timeout = std::time::Duration::from_secs(timeout_env);
 
-    #[cfg(not(feature = "redis"))]
-    let db = payjoin_directory::MemDb::new(timeout);
-
-    #[cfg(feature = "redis")]
-    let db = {
-        let db_host = env::var("PJ_DB_HOST").unwrap_or_else(|_| DEFAULT_DB_HOST.to_string());
-        RedisDb::new(timeout, db_host).await?
-    };
+    let db = payjoin_directory::NostrDb::new().await?;
 
     let key_dir =
         std::env::var("PJ_OHTTP_KEY_DIR").map(std::path::PathBuf::from).unwrap_or_else(|_| {
