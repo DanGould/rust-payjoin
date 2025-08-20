@@ -5,6 +5,8 @@ use payjoin::directory::ShortId;
 
 pub(crate) mod mem;
 
+pub(crate) mod nostr;
+
 #[cfg(feature = "redis")]
 pub(crate) mod redis;
 
