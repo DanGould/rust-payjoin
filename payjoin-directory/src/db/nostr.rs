@@ -25,7 +25,7 @@ impl Db {
     pub async fn new() -> Result<Self, BoxSendSyncError> {
         let (port, child, temp_dir) = init_nostr_relay().await?;
 
-        Ok(Self { child: Arc::new(child), port, temp_dir: Arc::new(temp_dir), key: Keys::generate() })
+        Ok(Self { child: Arc::new(child), port: 8080, temp_dir: Arc::new(temp_dir), key: Keys::generate() })
     }
 
     pub(crate) fn nostr_relay_url(&self) -> String { format!("ws://127.0.0.1:{}", self.port) }
@@ -49,7 +49,6 @@ impl Db {
         let hex_data = hex::encode(data);;
         println!("AAAAAAAHHHHHHHHH!!!!!!!!");
         let tag = Tag::parse(vec!["h".to_string(), mailbox_id.to_string()]).unwrap();
-        println!("tag: {tag:?}");
         let event = EventBuilder::new(Kind::TextNote, hex_data)
             .tag(tag)
             .build(self.key.public_key())
@@ -71,8 +70,6 @@ impl Db {
         &self,
         mailbox_id: &payjoin::directory::ShortId,
     ) -> Result<Vec<u8>, Error<NostrBackendError>> {
-        let mailbox_id = hex::encode(mailbox_id.as_bytes());
-
         let client = Client::new(self.key.clone());
         client.add_relay(self.nostr_relay_url()).await.map_err(|_| NostrBackendError {})?;
 
@@ -80,7 +77,7 @@ impl Db {
         println!("mailbox_id tag value: {mailbox_id}");
 
         let filter =
-            Filter::new().kind(Kind::TextNote).custom_tag(SingleLetterTag::from_str("h").unwrap(), mailbox_id);
+            Filter::new().kind(Kind::TextNote).custom_tag(SingleLetterTag::from_str("h").unwrap(), mailbox_id.to_string());
         let events = client
             .fetch_events(filter, Duration::from_secs(10))
             .await
@@ -194,44 +191,7 @@ pub async fn init_nostr_relay(
         listener.local_addr().map_err(|e| format!("Failed to get local addr: {}", e))?.port();
     drop(listener); // Release the port for nostr-rs-relay to use
 
-    // Create minimal config file
-    let config_path = temp_dir.path().join("config.toml");
-    let config_content = format!(
-        r#"
-[info]
-relay_url = "ws://127.0.0.1:{}/"
-name = "Test Nostr Relay"
-description = "A test instance of nostr-rs-relay for payjoin testing"
 
-[database]
-data_directory = "{}"
-
-[network]
-address = "127.0.0.1"
-port = {}
-
-[limits]
-# Allow generous limits for testing
-max_ws_connections = 1000
-max_event_bytes = 1048576
-
-[authorization]
-# No authorization required for testing
-pubkey_whitelist = []
-
-[verified_users]
-# No verified users required for testing
-
-[log]
-# Simple logging for tests
-"#,
-        port,
-        data_dir.display(),
-        port
-    );
-
-    std::fs::write(&config_path, config_content)
-        .map_err(|e| format!("Failed to write config: {}", e))?;
 
     // Get the nostr relay binary
     let nostr_relay_exe = find_nostr_relay_binary()
@@ -239,8 +199,6 @@ pubkey_whitelist = []
 
     // Start the nostr relay process
     let child = Command::new(nostr_relay_exe)
-        .arg("--config")
-        .arg(&config_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -265,7 +223,7 @@ mod test {
         let (port, mut child, _temp_dir) = init_nostr_relay().await?;
 
         // Simple test: connect via WebSocket and send a basic REQ
-        let relay_url = format!("ws://127.0.0.1:{}", port);
+        let relay_url = format!("ws://127.0.0.1:{}", 8080);
 
         // Give the relay a moment to fully start
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -302,6 +260,124 @@ mod test {
         // Clean up
         child.kill().await?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_nostr_directory_write_read_text_note() -> Result<(), BoxSendSyncError> {
+        use tokio::io::AsyncBufReadExt;
+        
+       let (port, mut child, _temp_dir) = init_nostr_relay().await?;
+       let stdout = child.stdout.take().unwrap();
+       tokio::spawn(async move {
+           let mut reader = tokio::io::BufReader::new(stdout);
+           let mut line = String::new();
+           while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+               println!("line: {}", line);
+               line.clear();
+           }
+       });
+        // Simple test: connect via WebSocket and send a basic REQ
+        let relay_url = format!("ws://127.0.0.1:{}", 8080);
+
+
+        // Create a new client instance
+        let key = Keys::generate();
+        let client = Client::new(key.clone());
+
+        // Add the relay to the client
+        client.add_relay(relay_url.clone()).await.map_err(|_| NostrBackendError {})?;
+
+        // Connect to the relay
+        client.connect().await;
+
+        // Create a new event
+        let event_content = "Hello, Nostr!";
+        let event = EventBuilder::new(Kind::TextNote, event_content.to_string())
+            .build(key.public_key())
+            .sign(&key)
+            .await
+            .map_err(|_| NostrBackendError {})?;
+
+        // Send the event
+        client.send_event(&event).await.unwrap();
+
+        // Read the event back using a filter
+        let filter = Filter::new().kind(Kind::TextNote);
+        let events = client
+            .fetch_events(filter, Duration::from_secs(10))
+            .await
+            .map_err(|_| NostrBackendError {})?;
+
+        // Ensure the event was received
+        println!("events: {:?}", events);
+        assert!(!events.is_empty(), "No events received");
+        println!("Received events: {:?}", events);
+
+        // Disconnect from the relay
+        client.disconnect().await;
+        Ok(())
+    }
+
+
+    #[tokio::test]
+    async fn test_nostr_directory_write_read_giftwrap() -> Result<(), BoxSendSyncError> {
+        use tokio::io::AsyncBufReadExt;
+        
+       let (port, mut child, _temp_dir) = init_nostr_relay().await?;
+       let stdout = child.stdout.take().unwrap();
+       tokio::spawn(async move {
+           let mut reader = tokio::io::BufReader::new(stdout);
+           let mut line = String::new();
+           while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+               println!("line: {}", line);
+               line.clear();
+           }
+       });
+        // Simple test: connect via WebSocket and send a basic REQ
+        let relay_url = format!("ws://127.0.0.1:{}", 8080);
+
+
+        // Create a new client instance
+        let key = Keys::generate();
+        let client = Client::new(key.clone());
+
+        // Add the relay to the client
+        client.add_relay(relay_url.clone()).await.map_err(|_| NostrBackendError {})?;
+
+        // Connect to the relay
+        client.connect().await;
+
+        // Create a new event
+        let event_content = "Hello, Nostr!";
+        let h_tag = Tag::parse(vec!["h".to_string(), "GROUP".to_string()]).unwrap();
+        let event = EventBuilder::new(Kind::GiftWrap, event_content.to_string())
+            .tag(h_tag)
+            .build(key.public_key())
+            .sign(&key)
+            .await
+            .map_err(|_| NostrBackendError {})?;
+
+        // Send the event
+        client.send_event(&event).await.unwrap();
+
+        // Read the event back using a filter with the "h" tag
+        let h_letter = SingleLetterTag::from_char('h').unwrap();
+        let filter = Filter::new()
+            .kind(Kind::GiftWrap)
+            .custom_tag(h_letter, "GROUP".to_string());
+        let events = client
+            .fetch_events(filter, Duration::from_secs(10))
+            .await
+            .map_err(|_| NostrBackendError {})?;
+
+        // Ensure the event was received
+        println!("events: {:?}", events);
+        assert!(!events.is_empty(), "No events received");
+        println!("Received events: {:?}", events);
+
+        // Disconnect from the relay
+        client.disconnect().await;
         Ok(())
     }
 }
