@@ -5,8 +5,7 @@ use std::time::Duration;
 use nostr::event::{EventBuilder, Kind, Tag};
 use nostr::filter::{Filter, SingleLetterTag};
 use nostr::key::Keys;
-use nostr::message::ClientMessage;
-use nostr::util::{hex, JsonUtil};
+use nostr::util::hex;
 use nostr_sdk::Client;
 
 use super::Error;
@@ -29,10 +28,12 @@ impl Db {
 
     pub(crate) fn nostr_relay_url(&self) -> String { format!("ws://127.0.0.1:{}", self.port) }
 
+    fn get_tag_letter(&self) -> SingleLetterTag { SingleLetterTag::from_char('h').unwrap() }
+
     fn get_tag(&self, mailbox_id: &payjoin::directory::ShortId) -> Tag {
         let hex_mailbox_id = hex::encode(mailbox_id.as_bytes());
         Tag::custom(
-            nostr::event::TagKind::SingleLetter(SingleLetterTag::from_char('h').unwrap()),
+            nostr::event::TagKind::SingleLetter(self.get_tag_letter()),
             hex_mailbox_id.chars().map(|c| c.to_string()),
         )
     }
@@ -62,6 +63,28 @@ impl Db {
 
         Ok(())
     }
+
+    pub(crate) async fn read_v2_nostr_payload(
+        &self,
+        mailbox_id: &payjoin::directory::ShortId,
+    ) -> Result<Vec<u8>, NostrBackendError> {
+        let mailbox_id = hex::encode(mailbox_id.as_bytes());
+        let ephemeral_key = Keys::generate();
+        let client = Client::new(ephemeral_key);
+        client.add_relay(self.nostr_relay_url()).await.unwrap();
+
+        client.connect().await;
+
+        let filter =
+            Filter::new().kind(Kind::GiftWrap).custom_tag(self.get_tag_letter(), mailbox_id);
+        let events = client.fetch_events(filter, Duration::from_secs(10)).await.unwrap();
+        let event = events.first().expect("no events found");
+        let data = hex::decode(event.content.as_str()).unwrap();
+
+        client.disconnect().await;
+
+        Ok(data)
+    }
 }
 
 impl super::Db for Db {
@@ -80,7 +103,8 @@ impl super::Db for Db {
         &self,
         mailbox_id: &payjoin::directory::ShortId,
     ) -> Result<Vec<u8>, Error<Self::OperationalError>> {
-        unimplemented!()
+        let resp = self.read_v2_nostr_payload(mailbox_id).await?;
+        Ok(resp)
     }
 
     async fn post_v1_response(
