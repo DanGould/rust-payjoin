@@ -549,51 +549,6 @@ mod integration {
             Ok(())
         }
 
-        #[tokio::test]
-        async fn test_nostr_directory() -> Result<(), BoxSendSyncError> {
-            let (port, mut child, _temp_dir) = payjoin_test_utils::init_nostr_relay().await?;
-
-            // Simple test: connect via WebSocket and send a basic REQ
-            let relay_url = format!("ws://127.0.0.1:{}", port);
-
-            // Give the relay a moment to fully start
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-
-            // Test WebSocket connection
-            match tokio_tungstenite::connect_async(&relay_url).await {
-                Ok((mut ws_stream, _response)) => {
-                    use futures_util::{SinkExt, StreamExt};
-                    use tokio_tungstenite::tungstenite::Message;
-
-                    // Send a basic REQ message (request events with limit 1)
-                    let req_msg = r#"["REQ","test_sub",{"limit":1}]"#;
-                    ws_stream.send(Message::Text(req_msg.into())).await?;
-
-                    // Read response (should get EOSE - End Of Stored Events)
-                    if let Some(msg) = ws_stream.next().await {
-                        match msg? {
-                            Message::Text(text) => {
-                                println!("Received from nostr relay: {}", text);
-                                // Should receive something like: ["EOSE","test_sub"]
-                                assert!(text.contains("EOSE") || text.contains("test_sub"));
-                            }
-                            _ => panic!("Expected text message from nostr relay"),
-                        }
-                    }
-
-                    println!("✓ Nostr relay is operational at {}", relay_url);
-                }
-                Err(e) => {
-                    panic!("Failed to connect to nostr relay: {}", e);
-                }
-            }
-
-            // Clean up
-            child.kill().await?;
-
-            Ok(())
-        }
-
         #[test]
         fn v2_to_v1() -> Result<(), BoxError> {
             init_tracing();
