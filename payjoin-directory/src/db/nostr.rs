@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nostr::event::{EventBuilder, Kind, Tag};
-use nostr::filter::SingleLetterTag;
+use nostr::filter::{Filter, SingleLetterTag};
 use nostr::key::Keys;
 use nostr::message::ClientMessage;
 use nostr::util::{hex, JsonUtil};
@@ -29,21 +29,25 @@ impl Db {
 
     pub(crate) fn nostr_relay_url(&self) -> String { format!("ws://127.0.0.1:{}", self.port) }
 
+    fn get_tag(&self, mailbox_id: &payjoin::directory::ShortId) -> Tag {
+        let hex_mailbox_id = hex::encode(mailbox_id.as_bytes());
+        Tag::custom(
+            nostr::event::TagKind::SingleLetter(SingleLetterTag::from_char('h').unwrap()),
+            hex_mailbox_id.chars().map(|c| c.to_string()),
+        )
+    }
+
     pub(crate) async fn push_v2_nostr_payload(
         &self,
         mailbox_id: &payjoin::directory::ShortId,
         data: Vec<u8>,
     ) -> Result<(), NostrBackendError> {
         let hex_data = hex::encode(data);
-        let hex_mailbox_id = hex::encode(mailbox_id.as_bytes());
         let ephemeral_key = Keys::generate();
         let ephemeral_pubkey = ephemeral_key.public_key();
 
         let event = EventBuilder::new(Kind::GiftWrap, hex_data)
-            .tag(Tag::custom(
-                nostr::event::TagKind::SingleLetter(SingleLetterTag::from_char('h').unwrap()),
-                hex_mailbox_id.chars().map(|c| c.to_string()),
-            ))
+            .tag(self.get_tag(mailbox_id))
             .build(ephemeral_pubkey)
             .sign(&ephemeral_key)
             .await
