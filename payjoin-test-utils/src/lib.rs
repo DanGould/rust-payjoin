@@ -332,7 +332,7 @@ pub static PARSED_PAYJOIN_PROPOSAL_WITH_SENDER_INFO: Lazy<Psbt> = Lazy::new(|| {
     Psbt::from_str(PAYJOIN_PROPOSAL_WITH_SENDER_INFO).expect("known psbt should parse")
 });
 
-pub const MULTIPARTY_ORIGINAL_PSBT_ONE: &str = "cHNidP8BAMMCAAAAA9cTcqYjSnJdteUn3Re12vFuVb5xPypYheHze74WBW8EAAAAAAD+////6JHS6JgYdav7tr+Q5bWk95C2aA4AudqZnjeRF0hx33gBAAAAAP7///+d/1mRjJ6snVe9o0EfMM8bIExdlwfaig1j/JnUupqIWwAAAAAA/v///wJO4wtUAgAAABYAFGAEc6cWf7z5a97Xxulg+S7JZyg/kvEFKgEAAAAWABQexWFsGEdXxYNTJLJ1qBCO0nXELwAAAAAAAQCaAgAAAAKa/zFrWjicRDNVCehGj/2jdXGKuZLMzLNUo+uj7PBW8wAAAAAA/v///4HkRlmU9FA3sHckkCQMjGrabNpgAw37XaqUItNFjR5rAAAAAAD+////AgDyBSoBAAAAFgAUGPI/E9xCHmaL6DIsjkaD8LX2mpLg6QUqAQAAABYAFH6MyygysrAmk/nunEFuGGDLf244aAAAAAEBHwDyBSoBAAAAFgAUGPI/E9xCHmaL6DIsjkaD8LX2mpIBCGsCRzBEAiBLJUhV7tja6FdELXDcB6Q3Gd+BMBpkjdHpj3DLnbL6AAIgJmFl3kpWBzkO8yDDl73BMMalSlAOQvfY+hqFRos5DhQBIQLfeq7CCftNEUHcRLZniJOqcgKZEqPc1A40BnEiZHj3FQABAJoCAAAAAp3/WZGMnqydV72jQR8wzxsgTF2XB9qKDWP8mdS6mohbAQAAAAD+////1xNypiNKcl215SfdF7Xa8W5VvnE/KliF4fN7vhYFbwQBAAAAAP7///8CoNkFKgEAAAAWABQchAe9uxzqT1EjLx4jgx9u1Mn6QADyBSoBAAAAFgAUye8yXWX0MvouXYhAFb06xX5kADpoAAAAAQEfAPIFKgEAAAAWABTJ7zJdZfQy+i5diEAVvTrFfmQAOgEIawJHMEQCIF7ihY/YtUPUTOaEdJbg0/HiwKunK398BI67/LknPGqMAiBHBXmL6gTP8PxEGeWswk6T0tCI2Gvwq1zh+wd7h8QCWAEhApM0w2WFlw0eg64Zp3PeyRmxl/7WGHUED8Ul/aX1FiTBAAAAAA==";
+pub const MULTIPARTY_ORIGINAL_PSBT_ONE: &str = "cHNidP8BAMMCAAAAA9cTcqYjSnJdteUn3Re12vFuVb5xPypYheHze74WBW8EAAAAAAD+////6JHS6JgYdav7tr+Q5bWk95C2aA4AudqZnjeRF0hx33gBAAAAAP7///+d/1mRjJ6snVe9o0EfMM8bIExdlwfaig1j/JnUupqIWwAAAAAA/v///wJO4wtUAgAAABYAFGAEc6cWf7z5a97Xxulg+S7JZyg/kvEFKgEAAAAWABQexWFsGEdXxYNTJLJ1qBCO0nXELwAAAAAAAQCaAgAAAAKa/zFrWjicRDNVCehGj/2jdXGKuZLMzLNUo+uj7PBW8wAAAAAA/v///4HkRlmU9FA3sHckkCQMjGrabNpgAw37XaqUItNFjR5rAAAAAAD+////AgDyBSoBAAAAFgAUGPI/E9xCHmaL6DIsjkaD8LX2mpLg6QUqAQAAABYAFH6MyygysrAmk/nunEFuGGDLf244aAAAAAEBHwDyBSoBAAAAFgAUGPI/E9xCHmaL6DIsjkaD8LX2mpIBCGsCRzBEAiBLJUhV7tja6FdELXDcB6Q3Gd+BMBpkjdHpj3DLnbL6AAIgJmFl3kpWBzkO8yDDl73BMMalSlAOQvfY+hqFRos5DhQBIQLfeq7CCftNEUHcRLZniJOqcgKZEqPc1A40BnEiZHj3FQABAJoCAAAAAp3/WZGMnqydV72jQR8wzxsgTF2XB9qKDWP8mdS6mohbAQAAAAD+////1xNypiNKcl215SfdF7Xa8W5VvnE/KliF4fN7vhYFbwQBAAAAAP7///8CoNkFKgEAAAAWABQchAe9uxzqT1EjLx4jgx9u1Mn6QADyBSoBAAAAFgAUye8yXWX0MvouXYhAFb06xX5kADpoAAAAAQEfAPIFKgEAAAAWABTJ7zJdZfQy+i5diEAVvTrFfmQAOmgAAAABAR8A8gUqAQAAABYAFMnvMl1l9DL6Ll2IQBW9OsV+ZAA6AQhrAkcwRAIgXuKFj9i1Q9RM5oR0luDT8eLAq6crf3wEjrv8uSc8aowCIEcFeYvqBM/w/EQZ5azCTpPS0IjYa/CrXOH7B3uHxAJYASECkzTDZYWXDR6Drhmnc97JGbGX/tYYdQQPxSX9pfUWJMEAAQCaAgAAAAIKOB8lY4eoEupDnxviz0/nAuR2biNFKbdkvckiW5ioPAAAAAAA/v///w0g/mj67592vy29xhnZMGeVtEXN1jD4lU/SMZM8oStqAAAAAAD+////AgDyBSoBAAAAFgAUC3r4YzVSpsWp3knMxbgWIx2R36/g6QUqAQAAABYAFMGlw3hwcx1b+KQGWIfOUxzwrwWkaAAAAAEBHwDyBSoBAAAAFgAUC3r4YzVSpsWp3knMxbgWIx2R368BCGsCRzBEAiA//JH+jonzbzqnKI0Uti16iJcdsXI+6Zu0IAZKlOq6AwIgP0XawCCH73uXKilFqSXQQQrBvmi/Sx44D/A+/MQ/mJYBIQIekOyEpJKpFQd7eHuY6Vt4Qlf0+00Wp529I23hl/EpcQAAAA==";
 
 pub const MULTIPARTY_ORIGINAL_PSBT_TWO: &str = "cHNidP8BAMMCAAAAA9cTcqYjSnJdteUn3Re12vFuVb5xPypYheHze74WBW8EAAAAAAD+////6JHS6JgYdav7tr+Q5bWk95C2aA4AudqZnjeRF0hx33gBAAAAAP7///+d/1mRjJ6snVe9o0EfMM8bIExdlwfaig1j/JnUupqIWwAAAAAA/v///wJO4wtUAgAAABYAFGAEc6cWf7z5a97Xxulg+S7JZyg/kvEFKgEAAAAWABQexWFsGEdXxYNTJLJ1qBCO0nXELwAAAAAAAAEAmgIAAAACnf9ZkYyerJ1XvaNBHzDPGyBMXZcH2ooNY/yZ1LqaiFsBAAAAAP7////XE3KmI0pyXbXlJ90XtdrxblW+cT8qWIXh83u+FgVvBAEAAAAA/v///wKg2QUqAQAAABYAFByEB727HOpPUSMvHiODH27UyfpAAPIFKgEAAAAWABTJ7zJdZfQy+i5diEAVvTrFfmQAOmgAAAABAR8A8gUqAQAAABYAFMnvMl1l9DL6Ll2IQBW9OsV+ZAA6AQhrAkcwRAIgXuKFj9i1Q9RM5oR0luDT8eLAq6crf3wEjrv8uSc8aowCIEcFeYvqBM/w/EQZ5azCTpPS0IjYa/CrXOH7B3uHxAJYASECkzTDZYWXDR6Drhmnc97JGbGX/tYYdQQPxSX9pfUWJMEAAQCaAgAAAAIKOB8lY4eoEupDnxviz0/nAuR2biNFKbdkvckiW5ioPAAAAAAA/v///w0g/mj67592vy29xhnZMGeVtEXN1jD4lU/SMZM8oStqAAAAAAD+////AgDyBSoBAAAAFgAUC3r4YzVSpsWp3knMxbgWIx2R36/g6QUqAQAAABYAFMGlw3hwcx1b+KQGWIfOUxzwrwWkaAAAAAEBHwDyBSoBAAAAFgAUC3r4YzVSpsWp3knMxbgWIx2R368BCGsCRzBEAiA//JH+jonzbzqnKI0Uti16iJcdsXI+6Zu0IAZKlOq6AwIgP0XawCCH73uXKilFqSXQQQrBvmi/Sx44D/A+/MQ/mJYBIQIekOyEpJKpFQd7eHuY6Vt4Qlf0+00Wp529I23hl/EpcQAAAA==";
 
@@ -350,3 +350,102 @@ pub const DUMMY20: [u8; 20] = [
     0xb4, 0x72, 0xa2, 0x66, 0xd0, 0xbd, 0x89, 0xc1, 0x37, 0x06,
     0xa4, 0x13, 0x2c, 0xcf, 0xb1, 0x6f, 0x7c, 0x3b, 0x9f, 0xcb,
 ];
+
+/// Find the nostr-rs-relay binary
+fn find_nostr_relay_binary() -> Option<String> {
+    // First check environment variable (similar to BITCOIND_EXE pattern)
+    if let Ok(path) = std::env::var("NOSTR_RELAY_EXE") {
+        return Some(path);
+    }
+
+    // Check if nostr-rs-relay is in PATH (this will find cargo-installed binaries)
+    if let Ok(output) = std::process::Command::new("which").arg("nostr-rs-relay").output() {
+        if output.status.success() {
+            if let Ok(path) = String::from_utf8(output.stdout) {
+                return Some(path.trim().to_string());
+            }
+        }
+    }
+
+    // Fallback: just try "nostr-rs-relay" directly (will work if it's in PATH)
+    Some("nostr-rs-relay".to_string())
+}
+
+/// Initialize a nostr-rs-relay instance for testing
+/// Returns (port, child_process, temp_directory)
+pub async fn init_nostr_relay(
+) -> Result<(u16, tokio::process::Child, tempfile::TempDir), BoxSendSyncError> {
+    use std::process::Stdio;
+
+    use tempfile::TempDir;
+    use tokio::process::Command;
+
+    // Create a temporary directory for the relay data
+    let temp_dir = TempDir::new().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let data_dir = temp_dir.path().join("nostr_data");
+    std::fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create data dir: {}", e))?;
+
+    // Find a free port
+    let listener =
+        bind_free_port().await.map_err(|e| format!("Failed to bind free port: {}", e))?;
+    let port =
+        listener.local_addr().map_err(|e| format!("Failed to get local addr: {}", e))?.port();
+    drop(listener); // Release the port for nostr-rs-relay to use
+
+    // Create minimal config file
+    let config_path = temp_dir.path().join("config.toml");
+    let config_content = format!(
+        r#"
+[info]
+relay_url = "ws://127.0.0.1:{}/"
+name = "Test Nostr Relay"
+description = "A test instance of nostr-rs-relay for payjoin testing"
+
+[database]
+data_directory = "{}"
+
+[network]
+address = "127.0.0.1"
+port = {}
+
+[limits]
+# Allow generous limits for testing
+max_ws_connections = 1000
+max_event_bytes = 1048576
+
+[authorization]
+# No authorization required for testing
+pubkey_whitelist = []
+
+[verified_users]
+# No verified users required for testing
+
+[log]
+# Simple logging for tests
+"#,
+        port,
+        data_dir.display(),
+        port
+    );
+
+    std::fs::write(&config_path, config_content)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    // Get the nostr relay binary
+    let nostr_relay_exe = find_nostr_relay_binary()
+        .ok_or("nostr-rs-relay binary not found. Please install it with 'cargo install nostr-rs-relay' or set NOSTR_RELAY_EXE environment variable")?;
+
+    // Start the nostr relay process
+    let child = Command::new(nostr_relay_exe)
+        .arg("--config")
+        .arg(&config_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start nostr-rs-relay: {}", e))?;
+
+    // Give it a moment to start up
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    Ok((port, child, temp_dir))
+}
