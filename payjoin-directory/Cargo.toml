@@ -47,6 +47,7 @@ tokio-tungstenite = { version = "0.27.0" }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 nostr = "0.43.0"
+nostr-sdk = "0.43.0"
 
 [dev-dependencies]
 tempfile = "3.5.0"

@@ -7,6 +7,7 @@ use nostr::filter::SingleLetterTag;
 use nostr::key::Keys;
 use nostr::message::ClientMessage;
 use nostr::util::{hex, JsonUtil};
+use nostr_sdk::Client;
 
 use super::Error;
 
@@ -48,8 +49,12 @@ impl Db {
             .await
             .unwrap();
 
-        let json = ClientMessage::event(event).as_json();
-        println!("{}", json);
+        let client = Client::new(ephemeral_key);
+        client.add_relay(self.nostr_relay_url()).await.unwrap();
+
+        client.connect().await;
+        client.send_event(&event).await.unwrap();
+        client.disconnect().await;
 
         Ok(())
     }
