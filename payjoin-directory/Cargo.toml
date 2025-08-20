@@ -43,6 +43,7 @@ tokio-rustls = { version = "0.25", features = [
 ], default-features = false, optional = true }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+nostr = "0.43.0"
 
 [dev-dependencies]
 tempfile = "3.5.0"
