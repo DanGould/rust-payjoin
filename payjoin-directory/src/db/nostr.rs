@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,13 +18,14 @@ pub struct Db {
     child: Arc<tokio::process::Child>,
     port: u16,
     temp_dir: Arc<tempfile::TempDir>,
+    key: nostr::key::Keys,
 }
 
 impl Db {
     pub async fn new() -> Result<Self, BoxSendSyncError> {
         let (port, child, temp_dir) = init_nostr_relay().await?;
 
-        Ok(Self { child: Arc::new(child), port, temp_dir: Arc::new(temp_dir) })
+        Ok(Self { child: Arc::new(child), port, temp_dir: Arc::new(temp_dir), key: Keys::generate() })
     }
 
     pub(crate) fn nostr_relay_url(&self) -> String { format!("ws://127.0.0.1:{}", self.port) }
@@ -32,9 +34,10 @@ impl Db {
 
     fn get_tag(&self, mailbox_id: &payjoin::directory::ShortId) -> Tag {
         let hex_mailbox_id = hex::encode(mailbox_id.as_bytes());
+        println!("hex_mailbox_id: {hex_mailbox_id}");
         Tag::custom(
             nostr::event::TagKind::SingleLetter(self.get_tag_letter()),
-            hex_mailbox_id.chars().map(|c| c.to_string()),
+            vec![hex_mailbox_id],
         )
     }
 
@@ -43,19 +46,19 @@ impl Db {
         mailbox_id: &payjoin::directory::ShortId,
         data: Vec<u8>,
     ) -> Result<(), NostrBackendError> {
-        let hex_data = hex::encode(data);
-        let ephemeral_key = Keys::generate();
-        let ephemeral_pubkey = ephemeral_key.public_key();
-
-        let event = EventBuilder::new(Kind::GiftWrap, hex_data)
-            .tag(self.get_tag(mailbox_id))
-            .build(ephemeral_pubkey)
-            .sign(&ephemeral_key)
+        let hex_data = hex::encode(data);;
+        println!("AAAAAAAHHHHHHHHH!!!!!!!!");
+        let tag = Tag::parse(vec!["h".to_string(), mailbox_id.to_string()]).unwrap();
+        println!("tag: {tag:?}");
+        let event = EventBuilder::new(Kind::TextNote, hex_data)
+            .tag(tag)
+            .build(self.key.public_key())
+            .sign(&self.key.clone())
             .await
-            .unwrap();
+            .map_err(|_| NostrBackendError {})?;
 
-        let client = Client::new(ephemeral_key);
-        client.add_relay(self.nostr_relay_url()).await.unwrap();
+        let client = Client::new(self.key.clone());
+        client.add_relay(self.nostr_relay_url()).await.map_err(|_| NostrBackendError {})?;
 
         client.connect().await;
         client.send_event(&event).await.unwrap();
@@ -67,19 +70,32 @@ impl Db {
     pub(crate) async fn read_v2_nostr_payload(
         &self,
         mailbox_id: &payjoin::directory::ShortId,
-    ) -> Result<Vec<u8>, NostrBackendError> {
+    ) -> Result<Vec<u8>, Error<NostrBackendError>> {
         let mailbox_id = hex::encode(mailbox_id.as_bytes());
-        let ephemeral_key = Keys::generate();
-        let client = Client::new(ephemeral_key);
-        client.add_relay(self.nostr_relay_url()).await.unwrap();
+
+        let client = Client::new(self.key.clone());
+        client.add_relay(self.nostr_relay_url()).await.map_err(|_| NostrBackendError {})?;
 
         client.connect().await;
+        println!("mailbox_id tag value: {mailbox_id}");
 
         let filter =
-            Filter::new().kind(Kind::GiftWrap).custom_tag(self.get_tag_letter(), mailbox_id);
-        let events = client.fetch_events(filter, Duration::from_secs(10)).await.unwrap();
-        let event = events.first().expect("no events found");
-        let data = hex::decode(event.content.as_str()).unwrap();
+            Filter::new().kind(Kind::TextNote).custom_tag(SingleLetterTag::from_str("h").unwrap(), mailbox_id);
+        let events = client
+            .fetch_events(filter, Duration::from_secs(10))
+            .await
+            .map_err(|_| NostrBackendError {})?;
+        println!("EVENTS: {:?}", events);
+        let lol = match tokio::time::timeout(std::time::Duration::from_nanos(1), async {
+            tokio::time::sleep(Duration::from_secs(1)).await
+        })
+        .await {
+            Ok(_) => panic!(" Y U NO TIMEOUT"),
+            Err(e) => e,
+        };
+        let event = events.first().ok_or_else(|| Error::Timeout(lol))?;
+        println!("EVENT: {:?}", event);
+        let data = hex::decode(event.content.as_str()).map_err(|_| NostrBackendError {})?;
 
         client.disconnect().await;
 
@@ -112,6 +128,7 @@ impl super::Db for Db {
         _mailbox_id: &payjoin::directory::ShortId,
         _data: Vec<u8>,
     ) -> Result<(), Error<Self::OperationalError>> {
+        println!("POST_V1_RESPONSE");
         unimplemented!()
     }
 
@@ -120,12 +137,13 @@ impl super::Db for Db {
         _mailbox_id: &payjoin::directory::ShortId,
         _data: Vec<u8>,
     ) -> Result<Vec<u8>, Error<Self::OperationalError>> {
+        println!("POST_V1_REQUEST_AND_WAIT_FOR_RESPONSE");
         unimplemented!()
     }
 }
 
 #[derive(Debug)]
-pub enum NostrBackendError {}
+pub struct NostrBackendError {}
 
 impl crate::db::SendableError for NostrBackendError {}
 

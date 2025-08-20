@@ -157,7 +157,7 @@ pub async fn init_directory(
     };
 
     #[cfg(not(feature = "redis"))]
-    let db = payjoin_directory::MemDb::new(timeout);
+    let db = payjoin_directory::NostrDb::new().await?;
 
     let service = payjoin_directory::Service::new(db, ohttp_server.into());
 

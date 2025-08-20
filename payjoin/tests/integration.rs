@@ -496,7 +496,11 @@ mod integration {
                 // POST payjoin
                 let outcome = session
                     .process_response(response.bytes().await?.to_vec().as_slice(), ctx)
-                    .save(&recv_persister)?;
+                    .save(&recv_persister)
+                    .map_err(|e| {
+                        dbg!(&e);
+                        e
+                    })?;
                 let proposal = outcome.success().expect("proposal should exist").clone();
                 let mut payjoin_proposal = handle_directory_proposal(&receiver, proposal, None)?;
                 let (req, ctx) = payjoin_proposal.create_post_request(&ohttp_relay)?;
