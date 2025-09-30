@@ -47,7 +47,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 sled = "0.34.7"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-rustls = { version = "0.26.2", features = ["ring"], default-features = false, optional = true }
-url = { version = "2.5.4", features = ["serde"] }
+url = { version = "2.5.4", default-features = false, features = ["serde"] }
 dirs = "6.0.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
