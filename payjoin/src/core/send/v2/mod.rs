@@ -255,7 +255,7 @@ impl SendSession {
 }
 
 /// A payjoin V2 sender, allowing the construction of a payjoin V2 request
-/// and the resulting [`V2PostContext`].
+/// and the resulting [`ClientResponse`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WithReplyKey;
 
@@ -283,7 +283,7 @@ impl Sender<WithReplyKey> {
     pub fn create_v2_post_request(
         &self,
         ohttp_relay: impl IntoUrl,
-    ) -> Result<(Request, V2PostContext), CreateRequestError> {
+    ) -> Result<(Request, ClientResponse), CreateRequestError> {
         if self.session_context.pj_param.expiration().elapsed() {
             return Err(InternalCreateRequestError::Expired(
                 self.session_context.pj_param.expiration(),
@@ -309,7 +309,7 @@ impl Sender<WithReplyKey> {
             self.session_context.pj_param.receiver_pubkey().clone(),
             ohttp_keys,
         )?;
-        Ok((request, V2PostContext { ohttp_ctx }))
+        Ok((request, ohttp_ctx))
     }
 
     /// Processes the response for the initial POST message from the sender
@@ -325,9 +325,9 @@ impl Sender<WithReplyKey> {
     pub fn process_response(
         self,
         response: &[u8],
-        post_ctx: V2PostContext,
+        post_ctx: ClientResponse,
     ) -> MaybeFatalTransition<SessionEvent, Sender<PollingForProposal>, EncapsulationError> {
-        match process_post_res(response, post_ctx.ohttp_ctx) {
+        match process_post_res(response, post_ctx) {
             Ok(()) => {}
             Err(e) =>
                 if e.is_fatal() {
@@ -395,13 +395,6 @@ pub(crate) fn serialize_v2_body(
     let query_params = placeholder_url.query().unwrap_or_default();
     let base64 = psbt.to_string();
     Ok(format!("{base64}\n{query_params}").into_bytes())
-}
-
-/// Wrapper for ohttp context
-///
-/// This type is used to process a BIP77 POST response.
-pub struct V2PostContext {
-    pub(crate) ohttp_ctx: ohttp::ClientResponse,
 }
 
 /// Data required to validate the GET response.
