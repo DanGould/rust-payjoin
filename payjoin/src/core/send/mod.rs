@@ -650,13 +650,13 @@ fn determine_fee_contribution(
 }
 
 fn serialize_url(
-    endpoint: Url,
+    endpoint: &str,
     output_substitution: OutputSubstitution,
     fee_contribution: Option<AdditionalFeeContribution>,
     min_fee_rate: FeeRate,
     version: Version,
 ) -> Url {
-    let mut url = endpoint;
+    let mut url = url::Url::parse(endpoint).expect("Could not parse url");
     url.query_pairs_mut().append_pair("v", &version.to_string());
     if output_substitution == OutputSubstitution::Disabled {
         url.query_pairs_mut().append_pair("disableoutputsubstitution", "true");
@@ -1044,7 +1044,7 @@ mod test {
     #[test]
     fn test_disable_output_substitution_query_param() -> Result<(), BoxError> {
         let url = serialize_url(
-            Url::parse("http://localhost")?,
+            "http://localhost",
             OutputSubstitution::Disabled,
             None,
             FeeRate::ZERO,
@@ -1053,7 +1053,7 @@ mod test {
         assert_eq!(url, Url::parse("http://localhost?v=2&disableoutputsubstitution=true")?);
 
         let url = serialize_url(
-            Url::parse("http://localhost")?,
+            "http://localhost",
             OutputSubstitution::Enabled,
             None,
             FeeRate::ZERO,
@@ -1066,7 +1066,7 @@ mod test {
     #[test]
     fn test_min_feerate_query_param() -> Result<(), BoxError> {
         let url = serialize_url(
-            Url::parse("http://localhost")?,
+            "http://localhost",
             OutputSubstitution::Enabled,
             None,
             FeeRate::from_sat_per_vb(10).expect("Could not parse feerate"),
@@ -1079,7 +1079,7 @@ mod test {
     #[test]
     fn test_additional_fee_contribution_query_param() -> Result<(), BoxError> {
         let url = serialize_url(
-            Url::parse("http://localhost")?,
+            "http://localhost",
             OutputSubstitution::Enabled,
             Some(AdditionalFeeContribution { max_amount: Amount::from_sat(1000), vout: 0 }),
             FeeRate::ZERO,

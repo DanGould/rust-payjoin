@@ -26,7 +26,6 @@ use std::str::FromStr;
 use bitcoin::psbt::Psbt;
 use bitcoin::{Address, Amount, FeeRate};
 use error::BuildSenderError;
-use url::Url;
 
 use super::*;
 pub use crate::output_substitution::OutputSubstitution;
@@ -36,7 +35,7 @@ use crate::{PjUri, Request, MAX_CONTENT_LENGTH};
 /// A builder to construct the properties of a `Sender`.
 #[derive(Clone)]
 pub struct SenderBuilder {
-    pub(crate) endpoint: Url,
+    pub(crate) endpoint: String,
     pub(crate) output_substitution: OutputSubstitution,
     pub(crate) psbt_ctx_builder: PsbtContextBuilder,
 }
@@ -48,7 +47,7 @@ impl SenderBuilder {
     /// to create a [`Sender`]
     pub fn new(psbt: Psbt, uri: PjUri) -> Self {
         Self {
-            endpoint: uri.extras.pj_param.endpoint().clone(),
+            endpoint: uri.extras.pj_param.endpoint(),
             // Adopt the output substitution preference from the URI
             output_substitution: uri.extras.output_substitution,
             psbt_ctx_builder: PsbtContextBuilder::new(
@@ -70,7 +69,7 @@ impl SenderBuilder {
         amount: Option<Amount>,
     ) -> Self {
         Self {
-            endpoint: pj_param.endpoint().clone(),
+            endpoint: pj_param.endpoint().to_string(),
             // Default to enabled output substitution for v1 when not specified via URI
             output_substitution: OutputSubstitution::Enabled,
             psbt_ctx_builder: PsbtContextBuilder::new(psbt, address.script_pubkey(), amount),
@@ -157,7 +156,7 @@ impl SenderBuilder {
 #[cfg_attr(feature = "v2", derive(PartialEq, Eq, serde::Serialize, serde::Deserialize))]
 pub struct Sender {
     /// The endpoint in the Payjoin URI
-    pub(crate) endpoint: Url,
+    pub(crate) endpoint: String,
     /// The original PSBT.
     pub(crate) psbt_ctx: PsbtContext,
 }
@@ -166,7 +165,7 @@ impl Sender {
     /// Construct serialized V1 Request and Context from a Payjoin Proposal
     pub fn create_v1_post_request(&self) -> (Request, V1Context) {
         let url = serialize_url(
-            self.endpoint.clone(),
+            &self.endpoint,
             self.psbt_ctx.output_substitution,
             self.psbt_ctx.fee_contribution,
             self.psbt_ctx.min_fee_rate,
@@ -190,7 +189,7 @@ impl Sender {
     }
 
     /// The endpoint in the Payjoin URI
-    pub fn endpoint(&self) -> &Url { &self.endpoint }
+    pub fn endpoint(&self) -> String { self.endpoint.to_string() }
 }
 
 /// Data required to validate the response.
@@ -305,7 +304,7 @@ mod test {
         map.insert(unknown_key, value);
         psbt_ctx.original_psbt.unknown = map;
 
-        let sender = Sender { endpoint: Url::from_str(EXAMPLE_URL)?, psbt_ctx };
+        let sender = Sender { endpoint: EXAMPLE_URL.to_string(), psbt_ctx };
 
         let body = sender.create_v1_post_request().0.body;
         let res_str = std::str::from_utf8(&body)?;

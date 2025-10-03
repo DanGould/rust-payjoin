@@ -348,7 +348,7 @@ impl Sender<WithReplyKey> {
     }
 
     /// The endpoint in the Payjoin URI
-    pub fn endpoint(&self) -> Url { self.pj_param.endpoint().clone() }
+    pub fn endpoint(&self) -> String { self.pj_param.endpoint().to_string() }
 
     pub(crate) fn apply_polling_for_proposal(self) -> SendSession {
         SendSession::PollingForProposal(Sender {
@@ -395,7 +395,7 @@ pub(crate) fn serialize_v2_body(
     min_fee_rate: FeeRate,
 ) -> Result<Vec<u8>, CreateRequestError> {
     // Grug say localhost base be discarded anyway. no big brain needed.
-    let base_url = Url::parse("http://localhost").expect("invalid URL");
+    let base_url = "http://localhost";
 
     let placeholder_url =
         serialize_url(base_url, output_substitution, fee_contribution, min_fee_rate, Version::Two);
@@ -447,8 +447,8 @@ impl Sender<PollingForProposal> {
             &HpkeKeyPair::from_secret_key(&self.reply_key).public_key().to_compressed_bytes(),
         );
         let mailbox: ShortId = hash.into();
-        let url = self
-            .endpoint()
+        let url = Url::parse(&self.endpoint())
+            .expect("Could not parse url")
             .join(&mailbox.to_string())
             .map_err(|e| InternalCreateRequestError::Url(e.into()))?;
         let body = encrypt_message_a(
@@ -544,7 +544,7 @@ impl Sender<PollingForProposal> {
         )
     }
 
-    pub fn endpoint(&self) -> Url { self.pj_param.endpoint() }
+    pub fn endpoint(&self) -> String { self.pj_param.endpoint().to_string() }
 }
 
 #[cfg(test)]
