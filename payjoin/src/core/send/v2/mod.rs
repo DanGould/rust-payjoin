@@ -324,7 +324,7 @@ impl Sender<WithReplyKey> {
             self.session_context.psbt_ctx.fee_contribution,
             self.session_context.psbt_ctx.min_fee_rate,
         )?;
-        let (request, ohttp_ctx) = extract_request(&self.session_context, ohttp_relay, body)?;
+        let (request, ohttp_ctx) = extract_request(&self.session_context, ohttp_relay, &body)?;
         Ok((request, ohttp_ctx))
     }
 
@@ -373,10 +373,10 @@ impl Sender<WithReplyKey> {
 pub(crate) fn extract_request(
     session_context: &SessionContext,
     ohttp_relay: impl IntoUrl,
-    body: Vec<u8>,
+    body: &[u8],
 ) -> Result<(Request, ClientResponse), CreateRequestError> {
     let body = encrypt_message_a(
-        &body,
+        body,
         HpkeKeyPair::from_secret_key(&session_context.reply_key).public_key(),
         session_context.pj_param.receiver_pubkey(),
     )
