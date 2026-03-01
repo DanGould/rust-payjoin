@@ -473,7 +473,7 @@ impl Receiver<Initialized> {
         response: Vec<u8>,
     ) -> Result<(OriginalPayload, HpkePublicKey), ProtocolError> {
         let (payload_bytes, reply_key) =
-            decrypt_message_a(&response, self.session_context.receiver_key.secret_key().clone())
+            decrypt_message_a(&response, self.session_context.receiver_key.secret_key())
                 .map_err(|e| ProtocolError::V2(InternalSessionError::Hpke(e).into()))?;
         let payload = std::str::from_utf8(&payload_bytes)
             .map_err(|e| ProtocolError::OriginalPayload(InternalPayloadError::Utf8(e).into()))?;
@@ -1102,7 +1102,7 @@ impl Receiver<PayjoinProposal> {
             let payjoin_bytes = self.psbt().serialize();
             let sender_mailbox = short_id_from_pubkey(e);
             target_resource = mailbox_endpoint(&self.session_context.directory, &sender_mailbox);
-            body = encrypt_message_b(payjoin_bytes, &self.session_context.receiver_key, e)?;
+            body = encrypt_message_b(&payjoin_bytes, &self.session_context.receiver_key, e)?;
             method = "POST";
         } else {
             // Prepare v2 wrapped and backwards-compatible v1 payload
@@ -1187,7 +1187,7 @@ impl Receiver<HasReplyableError> {
         let body = {
             if let Some(reply_key) = &session_context.reply_key {
                 encrypt_message_b(
-                    self.error_reply.to_json().to_string().as_bytes().to_vec(),
+                    self.error_reply.to_json().to_string().as_bytes(),
                     &session_context.receiver_key,
                     reply_key,
                 )
