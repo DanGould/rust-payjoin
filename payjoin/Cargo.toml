@@ -1,21 +1,21 @@
 [package]
-name = "payjoin"
-version = "1.0.0-rc.2"
 authors = ["Dan Gould <d@ngould.dev>"]
-description = "Payjoin Library implementing BIP 78 and BIP 77 batching protocols."
-repository = "https://github.com/payjoin/rust-payjoin"
-readme = "../README.md"
-keywords = ["bip78", "payjoin", "bitcoin"]
 categories = [
   "api-bindings",
   "cryptography::cryptocurrencies",
   "network-programming",
 ]
-license = "MITNFA"
-resolver = "2"
+description = "Payjoin Library implementing BIP 78 and BIP 77 batching protocols."
 edition = "2021"
-rust-version = "1.85"
 exclude = ["tests"]
+keywords = ["bip78", "payjoin", "bitcoin"]
+license = "MITNFA"
+name = "payjoin"
+readme = "../README.md"
+repository = "https://github.com/payjoin/rust-payjoin"
+resolver = "2"
+rust-version = "1.85"
+version = "1.0.0-rc.2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -35,9 +35,9 @@ directory = []
 v1 = ["_core"]
 v2 = ["_core", "hpke", "bhttp", "ohttp", "directory"]
 #[doc = "Functions to fetch OHTTP keys via CONNECT proxy using reqwest. Enables `v2` since only `v2` uses OHTTP."]
-io = ["v2", "reqwest/rustls-tls"]
 _manual-tls = ["reqwest/rustls-tls", "rustls"]
 _test-utils = []
+io = ["v2", "reqwest/rustls-tls"]
 
 [dependencies]
 bhttp = { version = "0.6.1", optional = true }

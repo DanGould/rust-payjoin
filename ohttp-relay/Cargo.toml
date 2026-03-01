@@ -1,23 +1,23 @@
 [package]
-name = "ohttp-relay"
-version = "0.0.11"
 authors = ["Dan Gould <d@ngould.dev>"]
-description = "Relay Oblivious HTTP requests to protect IP metadata"
-repository = "https://github.com/payjoin/rust-payjoin/tree/master/ohttp-relay"
-readme = "README.md"
-keywords = ["ohttp", "privacy"]
 categories = ["web-programming", "network-programming"]
-license = "MITNFA"
+description = "Relay Oblivious HTTP requests to protect IP metadata"
 edition = "2021"
-rust-version = "1.85.0"
 exclude = ["tests"]
+keywords = ["ohttp", "privacy"]
+license = "MITNFA"
+name = "ohttp-relay"
+readme = "README.md"
+repository = "https://github.com/payjoin/rust-payjoin/tree/master/ohttp-relay"
+rust-version = "1.85.0"
+version = "0.0.11"
 
 [features]
-default = ["bootstrap"]
+_test-util = []
 bootstrap = ["connect-bootstrap", "ws-bootstrap"]
 connect-bootstrap = []
+default = ["bootstrap"]
 ws-bootstrap = ["futures", "rustls", "tokio-tungstenite"]
-_test-util = []
 
 [dependencies]
 byteorder = "1.5.0"

@@ -1,17 +1,17 @@
 [package]
-name = "payjoin-cli"
-version = "0.2.0"
 authors = ["Dan Gould <d@ngould.dev>"]
-description = "A command-line Payjoin client for Bitcoin Core"
-repository = "https://github.com/payjoin/rust-payjoin"
-readme = "README.md"
-keywords = ["bip78", "payjoin", "bitcoin"]
 categories = ["cryptography::cryptocurrencies", "network-programming"]
-license = "MITNFA"
+description = "A command-line Payjoin client for Bitcoin Core"
 edition = "2021"
-rust-version = "1.85"
-resolver = "2"
 exclude = ["tests"]
+keywords = ["bip78", "payjoin", "bitcoin"]
+license = "MITNFA"
+name = "payjoin-cli"
+readme = "README.md"
+repository = "https://github.com/payjoin/rust-payjoin"
+resolver = "2"
+rust-version = "1.85"
+version = "0.2.0"
 
 [[bin]]
 name = "payjoin-cli"
@@ -19,9 +19,9 @@ path = "src/main.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
+_manual-tls = ["reqwest/rustls-tls", "payjoin/_manual-tls", "tokio-rustls"]
 default = ["v2"]
 native-certs = ["reqwest/rustls-tls-native-roots"]
-_manual-tls = ["reqwest/rustls-tls", "payjoin/_manual-tls", "tokio-rustls"]
 v1 = ["payjoin/v1", "hyper", "hyper-util", "http-body-util"]
 v2 = ["payjoin/v2", "payjoin/io"]
 
