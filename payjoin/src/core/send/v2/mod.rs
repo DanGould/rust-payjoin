@@ -1,5 +1,12 @@
 //! Send BIP 77 Payjoin v2
 //!
+//! # Typestate ownership
+//!
+//! Builder and context types consume `self` on state transitions.
+//! [`Clone`] is derived so state can be persisted across the async session
+//! boundary — callers **must not** clone to circumvent a state transition.
+//! See `AGENTS.md` § *Typestate Conventions*.
+//!
 //! This module contains types and methods used to implement sending via [BIP77
 //! Payjoin](https://github.com/bitcoin/bips/blob/master/bip-0077.md).
 //!
@@ -324,7 +331,7 @@ impl Sender<WithReplyKey> {
             self.session_context.psbt_ctx.fee_contribution,
             self.session_context.psbt_ctx.min_fee_rate,
         )?;
-        let (request, ohttp_ctx) = extract_request(&self.session_context, ohttp_relay, body)?;
+        let (request, ohttp_ctx) = extract_request(&self.session_context, ohttp_relay, &body)?;
         Ok((request, ohttp_ctx))
     }
 
@@ -373,11 +380,11 @@ impl Sender<WithReplyKey> {
 pub(crate) fn extract_request(
     session_context: &SessionContext,
     ohttp_relay: impl IntoUrl,
-    body: Vec<u8>,
+    body: &[u8],
 ) -> Result<(Request, ClientResponse), CreateRequestError> {
     let body = encrypt_message_a(
         body,
-        &HpkeKeyPair::from_secret_key(&session_context.reply_key).public_key().clone(),
+        HpkeKeyPair::from_secret_key(&session_context.reply_key).public_key(),
         session_context.pj_param.receiver_pubkey(),
     )
     .map_err(InternalCreateRequestError::Hpke)?;
@@ -444,7 +451,7 @@ impl Sender<PollingForProposal> {
             .join(&mailbox.to_string())
             .map_err(|e| InternalCreateRequestError::Url(e.into()))?;
         let body = encrypt_message_a(
-            Vec::new(),
+            &[],
             HpkeKeyPair::from_secret_key(&self.session_context.reply_key).public_key(),
             self.session_context.pj_param.receiver_pubkey(),
         )
@@ -495,7 +502,7 @@ impl Sender<PollingForProposal> {
         let body = match decrypt_message_b(
             &body,
             self.session_context.pj_param.receiver_pubkey().clone(),
-            self.session_context.reply_key.clone(),
+            &self.session_context.reply_key,
         ) {
             Ok(body) => body,
             Err(e) =>

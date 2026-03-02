@@ -3,6 +3,13 @@
 //! This module contains types and methods used to implement sending via [BIP78
 //! Payjoin](https://github.com/bitcoin/bips/blob/master/bip-0078.mediawiki).
 //!
+//! # Typestate ownership
+//!
+//! Builder and context types consume `self` on state transitions.
+//! [`Clone`] is derived for serialization/persistence only — callers
+//! **must not** clone to circumvent a state transition.
+//! See `AGENTS.md` § *Typestate Conventions*.
+//!
 //! Usage is pretty simple:
 //!
 //! 1. Parse BIP21 as [`payjoin::Uri`](crate::Uri)
