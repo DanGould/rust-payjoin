@@ -2,6 +2,7 @@ use core::fmt;
 use std::error;
 use std::ops::Deref;
 
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::key::constants::{ELLSWIFT_ENCODING_SIZE, PUBLIC_KEY_SIZE};
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::ellswift::ElligatorSwift;
@@ -11,6 +12,8 @@ use hpke::kem::SecpK256HkdfSha256;
 use hpke::rand_core::OsRng;
 use hpke::{Deserializable, OpModeR, OpModeS, Serializable};
 use serde::{Deserialize, Serialize};
+
+use crate::directory::ShortId;
 
 pub const PADDED_MESSAGE_BYTES: usize = 7168;
 pub const PADDED_PLAINTEXT_A_LENGTH: usize =
@@ -133,6 +136,9 @@ impl HpkePublicKey {
             compressed_key.serialize_uncompressed().as_slice(),
         )?))
     }
+
+    /// Derive the [`ShortId`] mailbox identifier for this public key.
+    pub fn short_id(&self) -> ShortId { sha256::Hash::hash(&self.to_compressed_bytes()).into() }
 }
 
 impl Deref for HpkePublicKey {
