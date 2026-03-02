@@ -1,3 +1,8 @@
-corpus
-artifacts
-coverage
+# Fuzz test corpus data
+corpus/
+
+# Fuzz test crash artifacts
+artifacts/
+
+# Code coverage output
+coverage/
