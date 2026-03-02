@@ -36,6 +36,18 @@ reviews:
         take T, String, or Vec<u8> by value and let the caller decide
         whether to clone or move.
 
+        EXCEPTIONS — do NOT flag C-CALLER-CONTROL when:
+        - The clone/to_vec is required because the algorithm mutates,
+          pads, or extends the data (e.g. encryption, HPKE, padding).
+          Borrowing &[u8] is correct here; callers should not have to
+          pre-allocate a Vec just to pass owned data that will be
+          copied into an internal buffer anyway.
+        - The function is pub(crate) or private, not part of the
+          public API.
+        - The parameter is used in a context where borrowing is
+          idiomatic (e.g. &[u8] passed directly to a crypto primitive
+          that also takes &[u8]).
+
         Also check the Rust API guidelines checklist:
         - C-COMMON-TRAITS: pub types should impl Send, Sync, Debug,
           Display, Default, serde traits where appropriate
@@ -61,6 +73,13 @@ reviews:
         / .to_string() / .to_vec() on the parameter. The fix is to
         take T, String, or Vec<u8> by value and let the caller decide
         whether to clone or move.
+
+        EXCEPTIONS — do NOT flag C-CALLER-CONTROL when:
+        - The clone/to_vec is required because the algorithm mutates,
+          pads, or extends the data.
+        - The function is pub(crate) or private.
+        - The parameter is used in a context where borrowing is
+          idiomatic (e.g. &[u8] passed to a crypto primitive).
 
         Also check the Rust API guidelines checklist:
         - C-COMMON-TRAITS: pub types should impl Send, Sync, Debug,
