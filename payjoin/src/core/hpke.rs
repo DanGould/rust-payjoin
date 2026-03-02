@@ -170,6 +170,8 @@ impl<'de> serde::Deserialize<'de> for HpkePublicKey {
 }
 
 /// Message A is sent from the sender to the receiver containing an Original PSBT payload
+///
+/// Takes `&[u8]`: HPKE pads and mutates internally, copy is unavoidable.
 pub fn encrypt_message_a(
     body: &[u8],
     reply_pk: &HpkePublicKey,
@@ -222,6 +224,8 @@ pub fn decrypt_message_a(
 }
 
 /// Message B is sent from the receiver to the sender containing a Payjoin PSBT payload or an error
+///
+/// Takes `&[u8]`: HPKE pads and mutates internally, copy is unavoidable.
 pub fn encrypt_message_b(
     plaintext: &[u8],
     receiver_keypair: &HpkeKeyPair,
