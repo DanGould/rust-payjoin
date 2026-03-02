@@ -1,28 +1,28 @@
 [package]
-name = "payjoin-mailroom"
-version = "0.1.0"
-description = "Combined Payjoin Directory and OHTTP Relay"
-repository = "https://github.com/payjoin/rust-payjoin/tree/master/payjoin-mailroom"
-keywords = ["bip77", "bitcoin", "ohttp", "payjoin", "privacy"]
 categories = [
   "cryptography::cryptocurrencies",
   "network-programming",
   "web-programming",
 ]
-license = "MITNFA"
+description = "Combined Payjoin Directory and OHTTP Relay"
 edition = "2021"
+keywords = ["bip77", "bitcoin", "ohttp", "payjoin", "privacy"]
+license = "MITNFA"
+name = "payjoin-mailroom"
+repository = "https://github.com/payjoin/rust-payjoin/tree/master/payjoin-mailroom"
 rust-version = "1.85.0"
+version = "0.1.0"
 
 [features]
-default = []
 _manual-tls = ["dep:axum-server", "dep:rustls", "ohttp-relay/_test-util"]
+access-control = ["dep:flate2", "dep:ipnet", "dep:maxminddb", "dep:reqwest"]
 acme = [
   "dep:tokio-rustls-acme",
   "dep:axum-server",
   "dep:rustls",
   "dep:tokio-stream",
 ]
-access-control = ["dep:flate2", "dep:ipnet", "dep:maxminddb", "dep:reqwest"]
+default = []
 telemetry = ["dep:opentelemetry-otlp"]
 
 [dependencies]

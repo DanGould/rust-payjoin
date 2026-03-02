@@ -1,21 +1,21 @@
 [package]
+edition = "2021"
+exclude = ["tests"]
+license = "MIT OR Apache-2.0"
 name = "payjoin-ffi"
 version = "0.24.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-exclude = ["tests"]
 
 [features]
-default = []
+_manual-tls = ["payjoin/_manual-tls"]
+_test-utils = ["payjoin-test-utils", "tokio"]
 csharp = ["dep:uniffi-bindgen-cs"]
 dart = ["dep:uniffi-dart"]
-_test-utils = ["payjoin-test-utils", "tokio"]
-_manual-tls = ["payjoin/_manual-tls"]
+default = []
 wasm_js = ["getrandom/js"]
 
 [lib]
-name = "payjoin_ffi"
 crate-type = ["lib", "staticlib", "cdylib"]
+name = "payjoin_ffi"
 
 [[bin]]
 name = "uniffi-bindgen"

@@ -7,7 +7,18 @@ indent_size = 2
 
 [[rule]]
 include = ["**/Cargo.toml"]
-keys = ["dependencies", "*-dependencies", "workspace"]
+keys = [
+  "dependencies",
+  "dev-dependencies",
+  "build-dependencies",
+  "workspace.dependencies",
+]
 [rule.formatting]
 reorder_keys = true
 align_comments = true
+
+[[rule]]
+include = ["**/Cargo.toml"]
+keys = ["package", "features", "lib", "package.metadata", "package.metadata.*"]
+[rule.formatting]
+reorder_keys = true
