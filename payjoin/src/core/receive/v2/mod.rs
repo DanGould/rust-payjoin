@@ -6,7 +6,7 @@
 //! compile time. [`Clone`] is derived so state can be persisted across the
 //! async session boundary — callers **must not** clone to circumvent a
 //! state transition.
-//! See [`super::common`] and `AGENTS.md` § *Typestate Conventions*.
+//! See the `common` receive module and `AGENTS.md` § *Typestate Conventions*.
 //!
 //! This module contains the typestates and helper methods to perform a Payjoin v2 receive.
 //!

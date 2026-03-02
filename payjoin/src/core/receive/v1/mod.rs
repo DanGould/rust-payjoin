@@ -7,7 +7,7 @@
 //! Each check method consumes `self` to enforce the transition order at
 //! compile time. [`Clone`] is derived for serialization/persistence only —
 //! callers **must not** clone to circumvent a state transition.
-//! See [`super::common`] and `AGENTS.md` § *Typestate Conventions*.
+//! See the `common` receive module and `AGENTS.md` § *Typestate Conventions*.
 //!
 //! Usage is pretty simple:
 //!
