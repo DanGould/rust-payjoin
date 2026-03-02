@@ -31,10 +31,9 @@ jobs:
         uses: DeterminateSystems/determinate-nix-action@main
       - name: "Use nix cache"
         uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: "Add nginxWithStream to PATH"
+      - name: "Set NGINX_EXE for integration tests"
         run: |
-          # This is necessary for ohttp-relay integration tests
-          echo "$(nix build .#nginx-with-stream --print-out-paths --no-link)/bin" >> $GITHUB_PATH
+          echo "NGINX_EXE=$(nix build .#nginx-with-stream --print-out-paths --no-link)/bin/nginx" >> $GITHUB_ENV
       - name: "Use cache"
         uses: Swatinem/rust-cache@v2
       - name: Run tests
@@ -91,10 +90,9 @@ jobs:
         uses: DeterminateSystems/determinate-nix-action@main
       - name: "Use nix cache"
         uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: "Add nginxWithStream to PATH"
+      - name: "Set NGINX_EXE for integration tests"
         run: |
-          # This is necessary for ohttp-relay integration tests
-          echo "$(nix build .#nginx-with-stream --print-out-paths --no-link)/bin" >> $GITHUB_PATH
+          echo "NGINX_EXE=$(nix build .#nginx-with-stream --print-out-paths --no-link)/bin/nginx" >> $GITHUB_ENV
       - name: "Use cache"
         uses: Swatinem/rust-cache@v2
       - name: "Install cargo-llvm-cov"
