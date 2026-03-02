@@ -9,7 +9,7 @@ Add CodeRabbit config for AI-powered API lint review
 - [x] Understanding complete
 - [x] Implementation started
 - [x] Pre-commit checks passing
-- [ ] All changes committed
+- [x] All changes committed
 
 ## Subtasks
 
@@ -36,4 +36,6 @@ Add CodeRabbit config for AI-powered API lint review
 
 ## Commits
 
-(Update with each commit: hash, subject, what changed)
+- `7655f8e5` Add CodeRabbit config for AI-powered API review
+  - Created `.coderabbit.yaml` with chill profile, disabled noisy features,
+    and path_instructions for C-CALLER-CONTROL + Rust API guidelines
