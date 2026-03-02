@@ -30,6 +30,17 @@ pub(crate) enum InternalBuildSenderError {
     AddressType(crate::psbt::AddressTypeError),
 }
 
+impl BuildSenderError {
+    /// Returns the index of the invalid PSBT input, if this error was
+    /// caused by an invalid original input.
+    pub fn input_index(&self) -> Option<usize> {
+        match &self.0 {
+            InternalBuildSenderError::InvalidOriginalInput(e) => Some(e.index()),
+            _ => None,
+        }
+    }
+}
+
 impl From<InternalBuildSenderError> for BuildSenderError {
     fn from(value: InternalBuildSenderError) -> Self { BuildSenderError(value) }
 }
@@ -434,5 +445,23 @@ mod tests {
             ResponseError::from_json(invalid_json_error),
             ResponseError::Validation(_)
         ));
+    }
+
+    #[test]
+    fn build_sender_error_exposes_input_index() {
+        use crate::psbt::{InternalPsbtInputError, PrevTxOutError, PsbtInputsError};
+
+        let psbt_err = PsbtInputsError::new_test(
+            3,
+            InternalPsbtInputError::PrevTxOut(PrevTxOutError::MissingUtxoInformation),
+        );
+        let err = BuildSenderError::from(InternalBuildSenderError::InvalidOriginalInput(psbt_err));
+        assert_eq!(err.input_index(), Some(3));
+    }
+
+    #[test]
+    fn build_sender_error_no_index_for_other_variants() {
+        let err = BuildSenderError::from(InternalBuildSenderError::NoInputs);
+        assert_eq!(err.input_index(), None);
     }
 }
