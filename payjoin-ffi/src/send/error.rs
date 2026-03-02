@@ -61,7 +61,7 @@ pub struct CreateRequestError(#[from] send::v2::CreateRequestError);
 /// Error returned for v2-specific payload encapsulation errors.
 #[derive(Debug, thiserror::Error, uniffi::Object)]
 #[error(transparent)]
-pub struct EncapsulationError(#[from] send::v2::EncapsulationError);
+pub struct DecapsulationError(#[from] send::v2::DecapsulationError);
 
 /// Error that may occur when the response from receiver is malformed.
 #[derive(Debug, thiserror::Error, uniffi::Object)]
@@ -122,7 +122,7 @@ pub struct SenderReplayError(
 pub enum SenderPersistedError {
     /// rust-payjoin sender Encapsulation error
     #[error(transparent)]
-    EncapsulationError(Arc<EncapsulationError>),
+    DecapsulationError(Arc<DecapsulationError>),
     /// rust-payjoin sender response error
     #[error(transparent)]
     ResponseError(ResponseError),
@@ -141,12 +141,12 @@ impl From<ImplementationError> for SenderPersistedError {
     fn from(value: ImplementationError) -> Self { SenderPersistedError::Storage(Arc::new(value)) }
 }
 
-impl<S> From<payjoin::persist::PersistedError<send::v2::EncapsulationError, S>>
+impl<S> From<payjoin::persist::PersistedError<send::v2::DecapsulationError, S>>
     for SenderPersistedError
 where
     S: std::error::Error + Send + Sync + 'static,
 {
-    fn from(err: payjoin::persist::PersistedError<send::v2::EncapsulationError, S>) -> Self {
+    fn from(err: payjoin::persist::PersistedError<send::v2::DecapsulationError, S>) -> Self {
         if err.storage_error_ref().is_some() {
             if let Some(storage_err) = err.storage_error() {
                 return SenderPersistedError::from(ImplementationError::new(storage_err));
@@ -154,7 +154,7 @@ where
             return SenderPersistedError::Unexpected;
         }
         if let Some(api_err) = err.api_error() {
-            return SenderPersistedError::EncapsulationError(Arc::new(api_err.into()));
+            return SenderPersistedError::DecapsulationError(Arc::new(api_err.into()));
         }
         SenderPersistedError::Unexpected
     }
