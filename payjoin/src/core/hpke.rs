@@ -274,6 +274,7 @@ fn pad_plaintext(msg: &mut Vec<u8>, padded_length: usize) -> Result<&[u8], HpkeE
 pub enum HpkeError {
     InvalidPublicKey,
     Hpke(hpke::HpkeError),
+    Secp256k1(secp256k1::Error),
     InvalidKeyLength,
     PayloadTooLarge { actual: usize, max: usize },
     PayloadTooShort,
@@ -286,10 +287,8 @@ impl From<hpke::HpkeError> for HpkeError {
 impl From<secp256k1::Error> for HpkeError {
     fn from(value: secp256k1::Error) -> Self {
         match value {
-            // As of writing, this is the only relevant variant that could arise here.
-            // This may need to be updated if relevant variants are added to secp256k1
             secp256k1::Error::InvalidPublicKey => Self::InvalidPublicKey,
-            _ => panic!("Unsupported variant of secp256k1::Error"),
+            other => Self::Secp256k1(other),
         }
     }
 }
@@ -300,6 +299,7 @@ impl fmt::Display for HpkeError {
 
         match &self {
             Hpke(e) => e.fmt(f),
+            Secp256k1(e) => e.fmt(f),
             InvalidKeyLength => write!(f, "Invalid Length"),
             PayloadTooLarge { actual, max } => {
                 write!(
@@ -319,6 +319,7 @@ impl error::Error for HpkeError {
 
         match &self {
             Hpke(e) => Some(e),
+            Secp256k1(e) => Some(e),
             PayloadTooLarge { .. } => None,
             InvalidKeyLength | PayloadTooShort => None,
             InvalidPublicKey => None,
@@ -490,6 +491,18 @@ mod test {
                 max: PADDED_PLAINTEXT_B_LENGTH
             })
         );
+    }
+
+    #[test]
+    fn secp256k1_error_conversion_does_not_panic() {
+        let invalid_pk: HpkeError = secp256k1::Error::InvalidPublicKey.into();
+        assert_eq!(invalid_pk, HpkeError::InvalidPublicKey);
+
+        let invalid_sk: HpkeError = secp256k1::Error::InvalidSecretKey.into();
+        assert_eq!(invalid_sk, HpkeError::Secp256k1(secp256k1::Error::InvalidSecretKey));
+
+        let invalid_sig: HpkeError = secp256k1::Error::InvalidSignature.into();
+        assert_eq!(invalid_sig, HpkeError::Secp256k1(secp256k1::Error::InvalidSignature));
     }
 
     /// Test that the encrypted payloads are uniform.
