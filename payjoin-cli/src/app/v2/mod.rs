@@ -153,7 +153,6 @@ impl AppTrait for App {
 
     fn wallet(&self) -> BitcoindWallet { self.wallet.clone() }
 
-    #[allow(clippy::incompatible_msrv)]
     async fn send_payjoin(&self, bip21: &str, fee_rate: FeeRate) -> Result<()> {
         use payjoin::UriExt;
         let uri = Uri::try_from(bip21)
@@ -276,7 +275,6 @@ impl AppTrait for App {
         Ok(())
     }
 
-    #[allow(clippy::incompatible_msrv)]
     async fn resume_payjoins(&self) -> Result<()> {
         let recv_session_ids = self.db.get_recv_session_ids()?;
         let send_session_ids = self.db.get_send_session_ids()?;
@@ -607,7 +605,6 @@ impl App {
         res
     }
 
-    #[allow(clippy::incompatible_msrv)]
     async fn read_from_directory(
         &self,
         session: Receiver<Initialized>,
