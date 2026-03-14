@@ -1,0 +1,5 @@
+# User-specific configuration (may contain RPC credentials)
+config.toml
+
+# SQLite transaction history database
+*.sqlite
