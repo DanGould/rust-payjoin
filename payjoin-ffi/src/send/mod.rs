@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 pub use error::{
-    BuildSenderError, CreateRequestError, EncapsulationError, PsbtParseError, ResponseError,
+    BuildSenderError, CreateRequestError, DecapsulationError, PsbtParseError, ResponseError,
     SenderInputError,
 };
 
@@ -386,7 +386,7 @@ pub struct WithReplyKeyTransition(
                 payjoin::persist::MaybeFatalTransition<
                     payjoin::send::v2::SessionEvent,
                     payjoin::send::v2::Sender<payjoin::send::v2::PollingForProposal>,
-                    payjoin::send::v2::EncapsulationError,
+                    payjoin::send::v2::DecapsulationError,
                 >,
             >,
         >,
