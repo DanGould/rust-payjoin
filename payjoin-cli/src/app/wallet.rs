@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use bitcoind_async_client::corepc_types::model::ListUnspentItem;
+use bitcoind_async_client::error::ClientError;
 use bitcoind_async_client::traits::{Broadcaster, Reader, Signer, Wallet};
 use bitcoind_async_client::types::{CreateRawTransactionOutput, WalletCreateFundedPsbtOptions};
 use bitcoind_async_client::{Auth, Client as AsyncBitcoinRpc};
@@ -72,13 +73,15 @@ impl BitcoindWallet {
                     )
                     .await
             })
-        })?;
+        })
+        .map_err(|e| rpc_context(e, "Failed to create funded PSBT"))?;
 
         let processed = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 self.rpc.wallet_process_psbt(&result.psbt.to_string(), None, None, None).await
             })
-        })?
+        })
+        .map_err(|e| rpc_context(e, "Failed to process PSBT"))?
         .psbt;
 
         Ok(processed)
@@ -93,7 +96,8 @@ impl BitcoindWallet {
             tokio::runtime::Handle::current().block_on(async {
                 self.rpc.wallet_process_psbt(&psbt_str, Some(true), None, None).await
             })
-        })?;
+        })
+        .map_err(|e| rpc_context(e, "Failed to process PSBT"))?;
         Ok(processed.psbt)
     }
 
@@ -101,7 +105,8 @@ impl BitcoindWallet {
         let mempool_results = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(async { self.rpc.test_mempool_accept(tx).await })
-        })?;
+        })
+        .map_err(|e| rpc_context(e, "Failed to test mempool accept"))?;
 
         mempool_results
             .results
@@ -116,7 +121,7 @@ impl BitcoindWallet {
             tokio::runtime::Handle::current()
                 .block_on(async { self.rpc.send_raw_transaction(tx).await })
         })
-        .context("Failed to broadcast transaction")
+        .map_err(|e| rpc_context(e, "Failed to broadcast transaction"))
     }
 
     /// Check if a script belongs to this wallet
@@ -126,7 +131,7 @@ impl BitcoindWallet {
                 tokio::runtime::Handle::current()
                     .block_on(async { self.rpc.get_address_info(&address).await })
             })
-            .context("Failed to get address info")?;
+            .map_err(|e| rpc_context(e, "Failed to get address info"))?;
             Ok(info.is_mine)
         } else {
             Ok(false)
@@ -150,7 +155,8 @@ impl BitcoindWallet {
                         },
                 }
             })
-        })?;
+        })
+        .map_err(|e| rpc_context(e, "Failed to get transaction"))?;
         Ok(raw_tx)
     }
 
@@ -159,7 +165,7 @@ impl BitcoindWallet {
         let addr = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async { self.rpc.get_new_address().await })
         })
-        .context("Failed to get new address")?;
+        .map_err(|e| rpc_context(e, "Failed to get new address"))?;
         Ok(addr)
     }
 
@@ -169,7 +175,7 @@ impl BitcoindWallet {
             tokio::runtime::Handle::current()
                 .block_on(async { self.rpc.list_unspent(None, None, None, None, None).await })
         })
-        .context("Failed to list unspent")?;
+        .map_err(|e| rpc_context(e, "Failed to list unspent"))?;
         Ok(unspent.0.into_iter().map(input_pair_from_corepc).collect())
     }
 
@@ -184,8 +190,24 @@ impl BitcoindWallet {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async { self.rpc.network().await })
         })
-        .map_err(|_| anyhow!("Failed to get blockchain info"))
+        .map_err(|e| rpc_context(e, "Failed to get blockchain info"))
     }
+}
+
+/// Wrap an RPC client error with a user-friendly context message.
+///
+/// `bitcoind-async-client` discards JSON-RPC error details from HTTP 500
+/// response bodies (see issue #1258), so we add hints about common causes.
+fn rpc_context(err: ClientError, operation: &str) -> anyhow::Error {
+    let hint = match &err {
+        ClientError::Status(500, _) =>
+            ". bitcoind returned HTTP 500; check that the wallet is \
+             loaded and bitcoind is fully synced (see debug.log for \
+             the full RPC error)",
+        ClientError::Connection(_) => ". Is bitcoind running?",
+        _ => "",
+    };
+    anyhow::Error::new(err).context(format!("{operation}{hint}"))
 }
 
 pub fn input_pair_from_corepc(utxo: ListUnspentItem) -> InputPair {
