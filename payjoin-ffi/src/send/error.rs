@@ -8,18 +8,36 @@ use crate::error::{FfiValidationError, ImplementationError};
 /// Error building a Sender from a SenderBuilder.
 ///
 /// This error is unrecoverable.
+///
+/// When the error is caused by an invalid original PSBT input, the
+/// [`input_index`](BuildSenderError::input_index) method returns the
+/// zero-based position of the offending input so that FFI consumers can
+/// surface precise diagnostics.
 #[derive(Debug, PartialEq, Eq, thiserror::Error, uniffi::Object)]
 #[error("Error initializing the sender: {msg}")]
 pub struct BuildSenderError {
     msg: String,
+    input_index: Option<u64>,
+}
+
+#[uniffi::export]
+impl BuildSenderError {
+    /// Returns the zero-based index of the PSBT input that failed
+    /// validation, if this error was caused by an invalid original input.
+    pub fn input_index(&self) -> Option<u64> { self.input_index }
 }
 
 impl From<PsbtParseError> for BuildSenderError {
-    fn from(value: PsbtParseError) -> Self { BuildSenderError { msg: value.to_string() } }
+    fn from(value: PsbtParseError) -> Self {
+        BuildSenderError { msg: value.to_string(), input_index: None }
+    }
 }
 
 impl From<send::BuildSenderError> for BuildSenderError {
-    fn from(value: send::BuildSenderError) -> Self { BuildSenderError { msg: value.to_string() } }
+    fn from(value: send::BuildSenderError) -> Self {
+        let input_index = value.input_index().map(|i| i as u64);
+        BuildSenderError { msg: value.to_string(), input_index }
+    }
 }
 
 /// FFI-visible PSBT parsing error surfaced at the sender boundary.
@@ -193,5 +211,33 @@ where
             return SenderPersistedError::BuildSenderError(Arc::new(api_err.into()));
         }
         SenderPersistedError::Unexpected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ffi_build_sender_error_with_input_index() {
+        let err = BuildSenderError { msg: "invalid PSBT input #5".into(), input_index: Some(5) };
+        assert_eq!(err.input_index(), Some(5));
+        assert!(err.to_string().contains("#5"));
+    }
+
+    #[test]
+    fn ffi_build_sender_error_without_input_index() {
+        let err = BuildSenderError {
+            msg: "the original transaction has no inputs".into(),
+            input_index: None,
+        };
+        assert_eq!(err.input_index(), None);
+    }
+
+    #[test]
+    fn ffi_build_sender_error_from_psbt_parse_error() {
+        let parse_err = PsbtParseError::InvalidPsbt("bad psbt".into());
+        let err = BuildSenderError::from(parse_err);
+        assert_eq!(err.input_index(), None);
     }
 }
