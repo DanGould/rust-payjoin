@@ -7,6 +7,29 @@ payjoin-mailroom is a single, lightweight binary that bundles the two server-sid
 
 Note that this binary is under active development and thus the CLI and configuration file may be unstable.
 
+## Deployment
+
+### How the two roles work together
+
+The relay and directory serve different purposes in BIP 77's privacy design:
+
+- The **relay** sees client IP addresses but cannot read message contents.
+- The **directory** stores and forwards messages but cannot see client IPs.
+
+OHTTP keeps these two views separate. Neither role alone has enough information to link a user's network identity to their payjoin session.
+
+### Running both roles in one process
+
+Running a single `payjoin-mailroom` binary is the simplest deployment. The binary bundles both roles and includes a built-in **sentinel tag** that prevents the relay from looping requests back to its own directory. This means a single-process deployment still enforces the privacy separation: the relay component forwards to _other_ directories, not to itself.
+
+### Connecting to other operators
+
+In production, each `payjoin-mailroom` instance connects to directories and relays run by other operators. BIP 77's `allowed_purposes` mechanism lets any relay forward to any directory that advertises BIP 77 support, so operators do not need to coordinate pairings. The more independent operators participate, the harder it is for any single party to correlate users with their transactions.
+
+### V1 backwards compatibility
+
+V1 (BIP 78) requests bypass OHTTP entirely. When V1 is enabled, the directory can see sender IP addresses and full transaction contents for V1 requests. V1 support exists for backwards compatibility with wallets that have not yet upgraded to V2. Operators who want the strongest privacy guarantees should disable the `[v1]` config section. See the [V1 Address Screening](#v1-address-screening) section for screening options when V1 is enabled.
+
 ## Configuration
 
 payjoin-mailroom reads configuration from `config.toml` (or the path given with `--config`). Every setting can also be supplied via environment variables prefixed with `PJ_`, using double underscores for nesting (e.g., `PJ_TELEMETRY__ENDPOINT`).
