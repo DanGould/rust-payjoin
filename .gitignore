@@ -1,10 +1,23 @@
-target
-*config.toml
-!example.config.toml
-*.sqlite
+# Cargo workspace build output
+target/
+
+# Library workspace lock file (use Cargo-minimal.lock and Cargo-recent.lock)
 Cargo.lock
-.vscode
+
+# cargo-mutants mutation testing output
 mutants.out*
-*.ikm
-*payjoin.sqlite
-data
+
+# VS Code IDE settings
+.vscode/
+
+# JetBrains IDE settings
+.idea/
+
+# macOS Finder metadata
+.DS_Store
+
+# rustfmt backup files
+**/*.rs.bk
+
+# Default persistent storage directory (created by payjoin-directory/payjoin-mailroom)
+data/

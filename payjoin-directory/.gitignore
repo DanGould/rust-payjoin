@@ -1,8 +1,11 @@
-# XOR obfuscation data
-*.dat
-
 # User-specific configuration
 config.toml
+
+# OHTTP server input keying material
+*.ikm
+
+# XOR obfuscation data
+*.dat
 
 # Default persistent storage directory
 data/
