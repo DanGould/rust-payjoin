@@ -1,6 +1,14 @@
 //! Receive BIP 78 Payjoin v1
 //!
 //! This module contains types and methods used to receive payjoin via BIP78.
+//!
+//! # Typestate ownership
+//!
+//! Each check method consumes `self` to enforce the transition order at
+//! compile time. [`Clone`] is derived for serialization/persistence only —
+//! callers **must not** clone to circumvent a state transition.
+//! See the `common` receive module and `AGENTS.md` § *Typestate Conventions*.
+//!
 //! Usage is pretty simple:
 //!
 //! 1. Generate a pj_uri [BIP 21](https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki)
