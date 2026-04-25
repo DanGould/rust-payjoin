@@ -23,9 +23,7 @@ from standup_lib import (
 BOT_LOGIN = "payjoin-bot"
 TRIGGER_RE = re.compile(r"(?im)(^|\s)/check-in\b")
 SUCCESS_MARKER = "### Shipped"
-ERROR_BODY = (
-    "_Bot couldn't gather activity right now. Try again in a few minutes._"
-)
+ERROR_BODY = "_Bot couldn't gather activity right now. Try again in a few minutes._"
 
 
 def has_prior_success(discussion_id, author):
