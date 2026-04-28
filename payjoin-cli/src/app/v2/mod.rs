@@ -241,9 +241,21 @@ impl AppTrait for App {
                 };
                 let mut interrupt = self.interrupt.clone();
                 tokio::select! {
-                    res = self.process_sender_session(sender_state, &persister) => return res,
+                    res = self.process_sender_session(sender_state, &persister) => {
+                        match res {
+                            Ok(()) => return Ok(()),
+                            Err(err) => {
+                                let id = persister.session_id();
+                                println!("Session {id} failed. Run `payjoin-cli fallback {id}` to broadcast the original transaction.");
+                                return Err(err);
+                            }
+                        }
+                    },
                     _ = interrupt.changed() => {
-                        println!("Interrupted. Call `send` with the same arguments to resume this session or `resume` to resume all sessions.");
+                        let id = persister.session_id();
+                        println!(
+                            "Session {id} interrupted. Call `send` again to resume, `resume` to resume all sessions, or `payjoin-cli fallback {id}` to broadcast the original transaction."
+                        );
                         return Err(anyhow!("Interrupted"))
                     }
                 }
@@ -461,6 +473,25 @@ impl AppTrait for App {
 
         Ok(())
     }
+
+    async fn fallback_sender(&self, session_id: i64) -> Result<()> {
+        let persister = SenderPersister::from_id(self.db.clone(), SessionId(session_id));
+        let (session, history) = replay_sender_event_log(&persister)?;
+
+        if let SendSession::Closed(SenderSessionOutcome::Success(_)) = session {
+            println!("Session {session_id} already completed with payjoin. No fallback needed.");
+            return Ok(());
+        }
+
+        let fallback_tx = history.fallback_tx();
+        self.wallet().broadcast_tx(&fallback_tx)?;
+        println!("Broadcasted fallback transaction txid: {}", fallback_tx.compute_txid());
+
+        if let Err(e) = SessionPersister::close(&persister) {
+            tracing::warn!("Failed to close session {session_id} after fallback: {e}");
+        }
+        Ok(())
+    }
 }
 
 impl App {
@@ -489,7 +520,14 @@ impl App {
                 self.process_pj_response(proposal)?;
                 return Ok(());
             }
-            _ => return Err(anyhow!("Unexpected sender state")),
+            SendSession::Closed(SenderSessionOutcome::Failure)
+            | SendSession::Closed(SenderSessionOutcome::Cancel) => {
+                let id = persister.session_id();
+                println!(
+                    "Session {id} ended without payjoin. Run `payjoin-cli fallback {id}` to broadcast the original transaction."
+                );
+                return Ok(());
+            }
         }
         Ok(())
     }

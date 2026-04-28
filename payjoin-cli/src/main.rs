@@ -75,6 +75,10 @@ async fn main() -> Result<()> {
         Commands::History => {
             app.history().await?;
         }
+        #[cfg(feature = "v2")]
+        Commands::Fallback { session_id } => {
+            app.fallback_sender(*session_id).await?;
+        }
     };
 
     Ok(())

@@ -28,6 +28,8 @@ pub trait App: Send + Sync {
     async fn resume_payjoins(&self) -> Result<()>;
     #[cfg(feature = "v2")]
     async fn history(&self) -> Result<()>;
+    #[cfg(feature = "v2")]
+    async fn fallback_sender(&self, session_id: i64) -> Result<()>;
 
     fn create_original_psbt(
         &self,
