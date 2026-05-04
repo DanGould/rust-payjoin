@@ -81,9 +81,9 @@ impl AppTrait for App {
         let fallback_tx = Psbt::from_str(&body)
             .map_err(|e| anyhow!("Failed to load PSBT from base64: {}", e))?
             .extract_tx()?;
-        println!("Sent fallback transaction txid: {}", fallback_tx.compute_txid());
+        println!("Fallback transaction txid: {}", fallback_tx.compute_txid());
         println!(
-            "Sent fallback transaction hex: {:#}",
+            "Fallback transaction hex: {:#}",
             payjoin::bitcoin::consensus::encode::serialize_hex(&fallback_tx)
         );
         let psbt = ctx.process_response(&response.bytes().await?).map_err(|e| {
