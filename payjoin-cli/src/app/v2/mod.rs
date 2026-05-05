@@ -474,8 +474,8 @@ impl AppTrait for App {
         Ok(())
     }
 
-    async fn fallback_sender(&self, session_id: i64) -> Result<()> {
-        let persister = SenderPersister::from_id(self.db.clone(), SessionId(session_id));
+    async fn fallback_sender(&self, session_id: SessionId) -> Result<()> {
+        let persister = SenderPersister::from_id(self.db.clone(), session_id.clone());
         let (session, history) = replay_sender_event_log(&persister)?;
 
         if let SendSession::Closed(SenderSessionOutcome::Success(_)) = session {

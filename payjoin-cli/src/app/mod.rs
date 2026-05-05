@@ -10,6 +10,8 @@ pub mod config;
 pub mod wallet;
 use crate::app::config::Config;
 use crate::app::wallet::BitcoindWallet;
+#[cfg(feature = "v2")]
+use crate::db::v2::SessionId;
 
 #[cfg(feature = "v1")]
 pub(crate) mod v1;
@@ -29,7 +31,7 @@ pub trait App: Send + Sync {
     #[cfg(feature = "v2")]
     async fn history(&self) -> Result<()>;
     #[cfg(feature = "v2")]
-    async fn fallback_sender(&self, session_id: i64) -> Result<()>;
+    async fn fallback_sender(&self, session_id: SessionId) -> Result<()>;
 
     fn create_original_psbt(
         &self,

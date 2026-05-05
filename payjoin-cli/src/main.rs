@@ -3,6 +3,8 @@ use app::config::Config;
 use app::App as AppTrait;
 use clap::Parser;
 use cli::{Cli, Commands};
+#[cfg(feature = "v2")]
+use db::v2::SessionId;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
@@ -77,7 +79,7 @@ async fn main() -> Result<()> {
         }
         #[cfg(feature = "v2")]
         Commands::Fallback { session_id } => {
-            app.fallback_sender(*session_id).await?;
+            app.fallback_sender(SessionId(*session_id)).await?;
         }
     };
 
