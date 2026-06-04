@@ -3,6 +3,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::{Sink, SinkExt, StreamExt};
 use http_body_util::combinators::BoxBody;
@@ -14,8 +15,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
-use tracing::{error, instrument};
+use tracing::{debug, error, instrument};
 
+use crate::ohttp_relay::bootstrap::{copy_bidirectional_with_timeout, TunnelLimits};
 use crate::ohttp_relay::empty;
 use crate::ohttp_relay::error::Error;
 use crate::ohttp_relay::gateway_uri::GatewayUri;
@@ -48,14 +50,23 @@ pub(crate) fn is_websocket_request<B>(req: &Request<B>) -> bool {
 /// This performs the WebSocket handshake to support generic body types.
 /// When bootstrapping moves to axum, this can be replaced with
 /// `axum::extract::ws::WebSocketUpgrade`.
-#[instrument]
+#[instrument(skip(limits))]
 pub(crate) async fn try_upgrade<B>(
     req: Request<B>,
     gateway_origin: GatewayUri,
+    limits: &TunnelLimits,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error>
 where
     B: Send + Debug + 'static,
 {
+    // Reject before doing any work when the tunnel budget is exhausted, so a
+    // flood of bootstrap requests cannot pin an unbounded number of file
+    // descriptors.
+    let permit = match limits.semaphore.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return Err(Error::Unavailable(limits.timeout)),
+    };
+
     let gateway_addr = gateway_origin
         .to_socket_addr()
         .await
@@ -72,7 +83,10 @@ where
 
     let accept_key = derive_accept_key(key.as_bytes());
 
+    let timeout = limits.timeout;
     tokio::spawn(async move {
+        // Hold the permit for the tunnel's lifetime; it is released on drop.
+        let _permit = permit;
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let ws_stream = WebSocketStream::from_raw_socket(
@@ -81,7 +95,7 @@ where
                     None,
                 )
                 .await;
-                if let Err(e) = serve_websocket(ws_stream, gateway_addr).await {
+                if let Err(e) = serve_websocket(ws_stream, gateway_addr, timeout).await {
                     error!("Error in websocket connection: {e}");
                 }
             }
@@ -105,14 +119,21 @@ where
 async fn serve_websocket<S>(
     ws_stream: WebSocketStream<S>,
     gateway_addr: SocketAddr,
+    timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut tcp_stream = tokio::net::TcpStream::connect(gateway_addr).await?;
     let mut ws_io = WsIo::new(ws_stream);
-    let (_, _) = tokio::io::copy_bidirectional(&mut ws_io, &mut tcp_stream).await?;
-    Ok(())
+    match copy_bidirectional_with_timeout(&mut ws_io, &mut tcp_stream, timeout).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            debug!("websocket tunnel exceeded {timeout:?}, closing");
+            Ok(())
+        }
+        Err(e) => Err(Box::new(e)),
+    }
 }
 
 pub struct WsIo<S>
