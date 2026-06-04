@@ -83,6 +83,13 @@ in
         Restart = "on-failure";
         RestartSec = 5;
 
+        # A public directory + OHTTP relay holds many concurrent file
+        # descriptors: inbound connections, long-poll waits, and OHTTP
+        # bootstrap tunnels (2 fds each). The systemd default soft limit
+        # (1024) is exhausted under load, making accept() fail with EMFILE
+        # ("Too many open files"). Raise it well above peak concurrency.
+        LimitNOFILE = 65536;
+
         # Allow binding to privileged ports (e.g. 443 for ACME)
         AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
         CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];

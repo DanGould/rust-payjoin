@@ -9,6 +9,14 @@ services:
       - ./data:/data
     ports:
       - "443:443"
+    # A public directory + OHTTP relay holds many concurrent file descriptors
+    # (inbound connections, long-poll waits, OHTTP bootstrap tunnels). The
+    # default soft limit (often 1024) is exhausted under load, making accept()
+    # fail with EMFILE ("Too many open files"). Raise it above peak load.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     logging:
       driver: "json-file"
       options:
