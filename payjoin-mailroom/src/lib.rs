@@ -8,8 +8,14 @@ use axum::serve::IncomingStream;
 use axum::serve::Listener as AxumListener;
 use axum::Router;
 use config::Config;
+#[cfg(feature = "acme")]
+use futures::Stream;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use rand::Rng;
+#[cfg(feature = "acme")]
+use std::future::Future;
+#[cfg(feature = "acme")]
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -162,9 +168,6 @@ pub async fn serve_acme(
     config: Config,
     meter_provider: Option<SdkMeterProvider>,
 ) -> anyhow::Result<()> {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
     let acme_config = config
         .acme
         .clone()
@@ -194,29 +197,18 @@ pub async fn serve_acme(
         .map_err(|_| anyhow::anyhow!("ACME mode requires a TCP address (e.g., '[::]:443')"))?;
 
     let acme = acme_config.into_rustls_config(&config.storage_dir);
-    let mut state = acme.state();
-    let rustls_config = Arc::new(
-        rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(state.resolver()),
-    );
-    let acceptor = state.axum_acceptor(rustls_config);
-
-    // Drive ACME cert renewal in background
-    tokio::spawn(async move {
-        use tokio_stream::StreamExt;
-        loop {
-            match state.next().await {
-                Some(Ok(ok)) => info!("ACME event: {:?}", ok),
-                Some(Err(err)) => tracing::error!("ACME error: {:?}", err),
-                None => break,
-            }
-        }
-    });
+    let state = acme.state();
+    let rustls_config =
+        rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(state.resolver());
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = AcmeListener::new(listener, state, rustls_config)?;
 
     info!("Payjoin service listening on {} with ACME TLS", addr);
-    axum_server::bind(addr)
-        .acceptor(acceptor)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
+    #[cfg(feature = "access-control")]
+    let app = app.into_make_service_with_connect_info::<middleware::MaybePeerIp>();
+    #[cfg(not(feature = "access-control"))]
+    let app = app.into_make_service();
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
@@ -233,6 +225,16 @@ struct LimitedIo<I> {
     inner: I,
     _permit: OwnedSemaphorePermit,
 }
+
+#[cfg(feature = "acme")]
+struct AddrIo<I> {
+    inner: I,
+    addr: SocketAddr,
+}
+
+#[cfg(feature = "acme")]
+type AcquirePermit =
+    Pin<Box<dyn Future<Output = Result<OwnedSemaphorePermit, tokio::sync::AcquireError>> + Send>>;
 
 impl<L> AxumListener for LimitedListener<L>
 where
@@ -257,6 +259,127 @@ where
     }
 }
 
+#[cfg(feature = "acme")]
+struct LimitedTcpIncoming {
+    listener: tokio::net::TcpListener,
+    local_addr: SocketAddr,
+    permits: Arc<Semaphore>,
+    acquire: Option<AcquirePermit>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+#[cfg(feature = "acme")]
+impl LimitedTcpIncoming {
+    fn new(listener: tokio::net::TcpListener) -> std::io::Result<Self> {
+        let local_addr = listener.local_addr()?;
+        Ok(Self {
+            listener,
+            local_addr,
+            permits: Arc::new(Semaphore::new(MAX_ACCEPTED_CONNECTIONS)),
+            acquire: None,
+            permit: None,
+        })
+    }
+
+    fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+}
+
+#[cfg(feature = "acme")]
+impl Stream for LimitedTcpIncoming {
+    type Item = std::io::Result<AddrIo<LimitedIo<tokio::net::TcpStream>>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.permit.is_none() {
+            if self.acquire.is_none() {
+                self.acquire = Some(Box::pin(self.permits.clone().acquire_owned()));
+            }
+
+            let acquire = self.acquire.as_mut().expect("acquire future exists");
+            match acquire.as_mut().poll(cx) {
+                Poll::Ready(Ok(permit)) => {
+                    self.acquire = None;
+                    self.permit = Some(permit);
+                }
+                Poll::Ready(Err(_)) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        match self.listener.poll_accept(cx) {
+            Poll::Ready(Ok((inner, addr))) => {
+                let permit = self.permit.take().expect("connection permit acquired");
+                let inner = LimitedIo { inner, _permit: permit };
+                Poll::Ready(Some(Ok(AddrIo { inner, addr })))
+            }
+            Poll::Ready(Err(err)) => {
+                self.permit = None;
+                Poll::Ready(Some(Err(err)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[cfg(feature = "acme")]
+struct AcmeListener<EC: std::fmt::Debug + 'static, EA: std::fmt::Debug + 'static> {
+    incoming: tokio_rustls_acme::Incoming<
+        AddrIo<LimitedIo<tokio::net::TcpStream>>,
+        std::io::Error,
+        LimitedTcpIncoming,
+        EC,
+        EA,
+    >,
+    local_addr: SocketAddr,
+}
+
+#[cfg(feature = "acme")]
+impl<EC: std::fmt::Debug + 'static, EA: std::fmt::Debug + 'static> AcmeListener<EC, EA> {
+    fn new(
+        listener: tokio::net::TcpListener,
+        state: tokio_rustls_acme::AcmeState<EC, EA>,
+        rustls_config: rustls::ServerConfig,
+    ) -> std::io::Result<Self> {
+        let incoming = LimitedTcpIncoming::new(listener)?;
+        let local_addr = incoming.local_addr();
+        let incoming = state.incoming_with_server(incoming, rustls_config);
+        Ok(Self { incoming, local_addr })
+    }
+}
+
+#[cfg(feature = "acme")]
+impl<EC: std::fmt::Debug + 'static, EA: std::fmt::Debug + 'static> AxumListener
+    for AcmeListener<EC, EA>
+{
+    type Io = tokio_rustls_acme::tokio_rustls::server::TlsStream<
+        AddrIo<LimitedIo<tokio::net::TcpStream>>,
+    >;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        use futures::StreamExt;
+
+        loop {
+            match self.incoming.next().await {
+                Some(Ok(tls)) => {
+                    let addr = tls.get_ref().0.addr;
+                    return (tls, addr);
+                }
+                Some(Err(err)) => {
+                    tracing::error!("ACME TCP accept failed, retrying: {err:?}");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(self.local_addr)
+    }
+}
+
 impl<I> AsyncRead for LimitedIo<I>
 where
     I: AsyncRead + Unpin,
@@ -271,6 +394,42 @@ where
 }
 
 impl<I> AsyncWrite for LimitedIo<I>
+where
+    I: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(feature = "acme")]
+impl<I> AsyncRead for AddrIo<I>
+where
+    I: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+#[cfg(feature = "acme")]
+impl<I> AsyncWrite for AddrIo<I>
 where
     I: AsyncWrite + Unpin,
 {
@@ -314,6 +473,15 @@ impl Connected<IncomingStream<'_, LimitedListener<tokio::net::TcpListener>>>
     for middleware::MaybePeerIp
 {
     fn connect_info(stream: IncomingStream<'_, LimitedListener<tokio::net::TcpListener>>) -> Self {
+        Self(Some(stream.remote_addr().ip()))
+    }
+}
+
+#[cfg(all(feature = "access-control", feature = "acme"))]
+impl<EC: std::fmt::Debug + 'static, EA: std::fmt::Debug + 'static>
+    Connected<IncomingStream<'_, AcmeListener<EC, EA>>> for middleware::MaybePeerIp
+{
+    fn connect_info(stream: IncomingStream<'_, AcmeListener<EC, EA>>) -> Self {
         Self(Some(stream.remote_addr().ip()))
     }
 }
