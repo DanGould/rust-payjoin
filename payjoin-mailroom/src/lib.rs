@@ -5,10 +5,16 @@ use axum::http::Method;
 use axum::response::{IntoResponse, Response};
 #[cfg(feature = "access-control")]
 use axum::serve::IncomingStream;
+use axum::serve::Listener as AxumListener;
 use axum::Router;
 use config::Config;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use rand::Rng;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_listener::{Listener, SystemOptions, UserOptions};
 use tower::{Service, ServiceBuilder};
 use tracing::info;
@@ -31,6 +37,8 @@ use crate::middleware::{track_connections, track_metrics};
 
 type DirectoryService =
     crate::directory::Service<crate::db::MetricsDb<crate::db::DbServiceAdapter>>;
+
+const MAX_ACCEPTED_CONNECTIONS: usize = 8192;
 
 #[derive(Clone)]
 struct Services {
@@ -73,7 +81,7 @@ pub async fn serve(config: Config, meter_provider: Option<SdkMeterProvider>) -> 
     let listener =
         Listener::bind(&config.listener, &system_options, &UserOptions::default()).await?;
     info!("Payjoin service listening on {:?}", listener.local_addr());
-    axum::serve(listener, app).await?;
+    axum::serve(limit_connections(listener), app).await?;
 
     Ok(())
 }
@@ -137,9 +145,7 @@ pub async fn serve_manual_tls(
         None => {
             info!("Payjoin service listening on port {} without TLS", port);
             tokio::spawn(async move {
-                axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                    .await
-                    .map_err(Into::into)
+                axum::serve(limit_connections(listener), app).await.map_err(Into::into)
             })
         }
     };
@@ -214,19 +220,101 @@ pub async fn serve_acme(
     Ok(())
 }
 
+fn limit_connections<L>(listener: L) -> LimitedListener<L> {
+    LimitedListener { inner: listener, permits: Arc::new(Semaphore::new(MAX_ACCEPTED_CONNECTIONS)) }
+}
+
+struct LimitedListener<L> {
+    inner: L,
+    permits: Arc<Semaphore>,
+}
+
+struct LimitedIo<I> {
+    inner: I,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<L> AxumListener for LimitedListener<L>
+where
+    L: AxumListener,
+{
+    type Io = LimitedIo<L::Io>;
+    type Addr = L::Addr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("connection semaphore must not be closed");
+        let (inner, addr) = self.inner.accept().await;
+        (LimitedIo { inner, _permit: permit }, addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+impl<I> AsyncRead for LimitedIo<I>
+where
+    I: AsyncRead + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<I> AsyncWrite for LimitedIo<I>
+where
+    I: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 /// Generate random sentinel tag at startup.
 /// The relay and directory share this tag in a best-effort attempt
 /// at detecting self loops.
-fn generate_sentinel_tag() -> SentinelTag { SentinelTag::new(rand::thread_rng().gen()) }
+fn generate_sentinel_tag() -> SentinelTag {
+    SentinelTag::new(rand::thread_rng().gen())
+}
 
 #[cfg(feature = "access-control")]
-impl Connected<IncomingStream<'_, Listener>> for middleware::MaybePeerIp {
-    fn connect_info(stream: IncomingStream<'_, Listener>) -> Self {
+impl Connected<IncomingStream<'_, LimitedListener<Listener>>> for middleware::MaybePeerIp {
+    fn connect_info(stream: IncomingStream<'_, LimitedListener<Listener>>) -> Self {
         let ip = match stream.remote_addr() {
             tokio_listener::SomeSocketAddr::Tcp(addr) => Some(addr.ip()),
             _ => None,
         };
         Self(ip)
+    }
+}
+
+#[cfg(all(feature = "access-control", feature = "_manual-tls"))]
+impl Connected<IncomingStream<'_, LimitedListener<tokio::net::TcpListener>>>
+    for middleware::MaybePeerIp
+{
+    fn connect_info(stream: IncomingStream<'_, LimitedListener<tokio::net::TcpListener>>) -> Self {
+        Self(Some(stream.remote_addr().ip()))
     }
 }
 
@@ -403,8 +491,9 @@ async fn route_request(
         // The directory service handles all other requests (including 404)
         match services.directory.call(req).await {
             Ok(res) => res.into_response(),
-            Err(e) =>
-                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => {
+                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            }
         }
     }
 }
@@ -425,7 +514,9 @@ fn is_relay_request(req: &axum::extract::Request) -> bool {
         (&Method::OPTIONS, _) | (&Method::CONNECT, _) | (&Method::POST, "/") => true,
         (&Method::POST, p) | (&Method::GET, p)
             if p.starts_with("/http://") || p.starts_with("/https://") =>
-            true,
+        {
+            true
+        }
         _ => false,
     }
 }
