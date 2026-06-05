@@ -17,6 +17,7 @@ use super::gateway_uri::GatewayUri;
 const MAGIC_BIP77_PURPOSE: &[u8] = b"BIP77 454403bb-9f7b-4385-b31f-acd2dae20b7e";
 const ALLOWED_PURPOSES_CONTENT_TYPE: &str = "application/x-ohttp-allowed-purposes";
 const DEFAULT_CAPACITY: usize = 1000;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub(crate) struct Policy {
@@ -40,10 +41,11 @@ enum Status {
     Known(Policy),
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub(crate) struct Prober {
     gateways: RwLock<KnownGateways>,
     ttl_config: TTLConfig,
+    probe_timeout: Option<Duration>,
     client: super::HttpClient,
 }
 
@@ -62,11 +64,15 @@ struct HeapEntry {
 
 impl Ord for HeapEntry {
     /// Reverse ordering by expires for min-heap semantics
-    fn cmp(&self, other: &Self) -> Ordering { Reverse(self.expires).cmp(&Reverse(other.expires)) }
+    fn cmp(&self, other: &Self) -> Ordering {
+        Reverse(self.expires).cmp(&Reverse(other.expires))
+    }
 }
 
 impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Default for KnownGateways {
@@ -270,21 +276,34 @@ impl Prober {
             ))
             .expect("creating GET request must succeed");
 
-        let mut res = self.client.request(req).await;
-
         // opt-in is tracked via a separate mutable variable since it only
         // occurs in the first sub-branch of this large conditional, which is
         // largely concerned with determining the TTL
         let mut bip77_allowed = false;
 
         let ttls = &self.ttl_config;
+        let mut res = match self.probe_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, self.client.request(req)).await {
+                Ok(res) => res,
+                Err(_) => return Policy { bip77_allowed, expires: Instant::now() + ttls.timedout },
+            },
+            None => self.client.request(req).await,
+        };
+
         let ttl = match &mut res {
             Ok(res) => {
                 // TODO handle Cache-Control
                 let status = res.status();
 
                 if status.is_success() {
-                    bip77_allowed = Self::is_explicit_opt_in(res).await.is_some();
+                    bip77_allowed = match self.probe_timeout {
+                        Some(timeout) => tokio::time::timeout(timeout, Self::is_explicit_opt_in(res))
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some(),
+                        None => Self::is_explicit_opt_in(res).await.is_some(),
+                    };
 
                     if bip77_allowed {
                         ttls.opt_in
@@ -327,6 +346,17 @@ impl Prober {
     pub(crate) async fn unavailable_for(&self) -> Duration {
         let mut locked_map = self.gateways.write().await;
         locked_map.no_capacity_for()
+    }
+}
+
+impl Default for Prober {
+    fn default() -> Self {
+        Self {
+            gateways: RwLock::default(),
+            ttl_config: TTLConfig::default(),
+            probe_timeout: Some(PROBE_TIMEOUT),
+            client: super::HttpClient::default(),
+        }
     }
 }
 
@@ -786,9 +816,8 @@ mod tests {
         let mut server = Server::new_async().await;
         let url =
             GatewayUri::from_str(&server.url()).expect("must be able to parse mock server URL");
-        let prober = Prober::default();
-
         let retry_after_secs = 120u64;
+        let prober = Prober { probe_timeout: None, ..Default::default() };
         let mock_429 = server
             .mock("GET", RFC_9540_GATEWAY_PATH)
             .match_query(mockito::Matcher::Regex("^allowed_purposes$".into()))

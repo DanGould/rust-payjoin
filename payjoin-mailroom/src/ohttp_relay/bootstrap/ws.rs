@@ -1,9 +1,7 @@
 use std::fmt::Debug;
 use std::io;
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use futures::{Sink, SinkExt, StreamExt};
 use http_body_util::combinators::BoxBody;
@@ -12,12 +10,13 @@ use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 use tracing::{debug, error, instrument};
 
-use crate::ohttp_relay::bootstrap::{copy_bidirectional_with_timeout, TunnelLimits};
+use crate::ohttp_relay::bootstrap::TunnelLimits;
 use crate::ohttp_relay::empty;
 use crate::ohttp_relay::error::Error;
 use crate::ohttp_relay::gateway_uri::GatewayUri;
@@ -67,12 +66,6 @@ where
         Err(_) => return Err(Error::Unavailable(limits.timeout)),
     };
 
-    let gateway_addr = gateway_origin
-        .to_socket_addr()
-        .await
-        .map_err(|e| Error::InternalServerError(Box::new(e)))?
-        .ok_or_else(|| Error::NotFound)?;
-
     let key = req
         .headers()
         .get(SEC_WEBSOCKET_KEY)
@@ -85,21 +78,11 @@ where
 
     let timeout = limits.timeout;
     tokio::spawn(async move {
-        // Hold the permit for the tunnel's lifetime; it is released on drop.
-        let _permit = permit;
-        match hyper::upgrade::on(req).await {
-            Ok(upgraded) => {
-                let ws_stream = WebSocketStream::from_raw_socket(
-                    TokioIo::new(upgraded),
-                    tungstenite::protocol::Role::Server,
-                    None,
-                )
-                .await;
-                if let Err(e) = serve_websocket(ws_stream, gateway_addr, timeout).await {
-                    error!("Error in websocket connection: {e}");
-                }
-            }
-            Err(e) => error!("WebSocket upgrade error: {}", e),
+        match tokio::time::timeout(timeout, serve_after_upgrade(req, gateway_origin, permit)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("Error in websocket connection: {e}"),
+            Err(_) => debug!("websocket tunnel exceeded {timeout:?}, closing"),
         }
     });
 
@@ -114,26 +97,43 @@ where
     Ok(res)
 }
 
+async fn serve_after_upgrade<B>(
+    req: Request<B>,
+    gateway_origin: GatewayUri,
+    permit: OwnedSemaphorePermit,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
+where
+    B: Send + Debug + 'static,
+{
+    // Hold the permit for the entire tunnel lifecycle: DNS, HTTP upgrade,
+    // outbound connect, and byte proxying.
+    let _permit = permit;
+    let gateway_addr = gateway_origin.to_socket_addr().await?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "gateway resolved to no addresses")
+    })?;
+    let upgraded = hyper::upgrade::on(req).await?;
+    let ws_stream = WebSocketStream::from_raw_socket(
+        TokioIo::new(upgraded),
+        tungstenite::protocol::Role::Server,
+        None,
+    )
+    .await;
+    serve_websocket(ws_stream, gateway_addr).await
+}
+
 /// Stream WebSocket frames from the client to the gateway server's TCP socket and vice versa.
 #[instrument(skip(ws_stream))]
 async fn serve_websocket<S>(
     ws_stream: WebSocketStream<S>,
-    gateway_addr: SocketAddr,
-    timeout: Duration,
+    gateway_addr: std::net::SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut tcp_stream = tokio::net::TcpStream::connect(gateway_addr).await?;
     let mut ws_io = WsIo::new(ws_stream);
-    match copy_bidirectional_with_timeout(&mut ws_io, &mut tcp_stream, timeout).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            debug!("websocket tunnel exceeded {timeout:?}, closing");
-            Ok(())
-        }
-        Err(e) => Err(Box::new(e)),
-    }
+    tokio::io::copy_bidirectional(&mut ws_io, &mut tcp_stream).await?;
+    Ok(())
 }
 
 pub struct WsIo<S>
@@ -220,9 +220,10 @@ where
     ) -> Poll<Result<usize, io::Error>> {
         let self_mut = self.get_mut();
         match Pin::new(&mut self_mut.ws_stream).poll_ready(cx) {
-            Poll::Ready(Ok(())) =>
+            Poll::Ready(Ok(())) => {
                 start_send(&mut self_mut.ws_stream, Message::Binary(data.to_vec().into()))
-                    .map(|r| r.map(|_| data.len())),
+                    .map(|r| r.map(|_| data.len()))
+            }
             Poll::Ready(Err(e)) => Poll::Ready(Err(map_ws_error(e))),
             Poll::Pending => Poll::Pending,
         }

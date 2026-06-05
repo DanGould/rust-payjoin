@@ -35,6 +35,7 @@ pub mod bootstrap;
 
 pub const EXPECTED_MEDIA_TYPE: HeaderValue = HeaderValue::from_static("message/ohttp-req");
 pub const DEFAULT_GATEWAY: &str = "https://payjo.in";
+const MAX_IDLE_RELAY_CONNECTIONS_PER_HOST: usize = 16;
 
 #[derive(Debug)]
 struct RelayConfig {
@@ -130,18 +131,24 @@ impl std::ops::Deref for HttpClient {
         HttpsConnector<HttpConnector>,
         BoxBody<Bytes, hyper::Error>,
     >;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl From<HttpsConnectorBuilder<WantsSchemes>> for HttpClient {
     fn from(builder: HttpsConnectorBuilder<WantsSchemes>) -> Self {
         let https = builder.https_or_http().enable_http1().build();
-        Self(Client::builder(TokioExecutor::new()).build(https))
+        let mut client_builder = Client::builder(TokioExecutor::new());
+        client_builder.pool_max_idle_per_host(MAX_IDLE_RELAY_CONNECTIONS_PER_HOST);
+        Self(client_builder.build(https))
     }
 }
 
 impl Default for HttpClient {
-    fn default() -> Self { HttpsConnectorBuilder::new().with_webpki_roots().into() }
+    fn default() -> Self {
+        HttpsConnectorBuilder::new().with_webpki_roots().into()
+    }
 }
 
 impl From<rustls::RootCertStore> for HttpClient {
@@ -179,8 +186,9 @@ where
         #[cfg(any(feature = "connect-bootstrap", feature = "ws-bootstrap"))]
         (&Method::GET, _) | (&Method::CONNECT, _) => {
             match parse_gateway_uri(&method, path, authority, config).await {
-                Ok(gateway_uri) =>
-                    bootstrap::handle_ohttp_keys(req, gateway_uri, &config.tunnel_limits).await,
+                Ok(gateway_uri) => {
+                    bootstrap::handle_ohttp_keys(req, gateway_uri, &config.tunnel_limits).await
+                }
                 Err(e) => Err(e),
             }
         }
@@ -251,7 +259,9 @@ fn handle_preflight() -> Response<BoxBody<Bytes, hyper::Error>> {
     res
 }
 
-async fn health_check() -> Response<BoxBody<Bytes, hyper::Error>> { Response::new(empty()) }
+async fn health_check() -> Response<BoxBody<Bytes, hyper::Error>> {
+    Response::new(empty())
+}
 
 #[instrument]
 async fn handle_ohttp_relay<B>(
