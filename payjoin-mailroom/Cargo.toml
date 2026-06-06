@@ -46,9 +46,17 @@ hyper-rustls = { version = "0.27.7", default-features = false, features = [
   "http1",
   "ring",
 ] }
-hyper-util = { version = "0.1.16", features = ["client-legacy", "service"] }
+hyper-util = { version = "0.1.16", features = [
+  "client-legacy",
+  "http1",
+  "http2",
+  "server-auto",
+  "service",
+  "tokio",
+] }
 hyperloglogplus = "0.4.1"
 ipnet = { version = "2", optional = true }
+libc = "0.2"
 maxminddb = { version = "0.27", optional = true }
 ohttp = { package = "bitcoin-ohttp", version = "0.6.0" }
 opentelemetry = "0.31"

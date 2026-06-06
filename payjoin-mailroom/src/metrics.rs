@@ -5,13 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hyperloglogplus::{HyperLogLog, HyperLogLogPlus};
-use opentelemetry::metrics::{Counter, MeterProvider, ObservableGauge, UpDownCounter};
+use opentelemetry::metrics::{Counter, Gauge, MeterProvider, ObservableGauge};
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use payjoin::directory::ShortId;
 
 pub(crate) const TOTAL_CONNECTIONS: &str = "total_connections";
 pub(crate) const ACTIVE_CONNECTIONS: &str = "active_connections";
+pub(crate) const CONNECTION_SHEDS: &str = "connection_shed_total";
 pub(crate) const HTTP_REQUESTS: &str = "http_request_total";
 pub(crate) const DB_ENTRIES: &str = "db_entries_total";
 pub(crate) const UNIQUE_SHORT_IDS: &str = "unique_short_ids";
@@ -158,7 +159,9 @@ pub struct MetricsService {
     /// Total number of connections
     total_connections: Counter<u64>,
     /// Number of active connections right now
-    active_connections: UpDownCounter<i64>,
+    active_connections: Gauge<u64>,
+    /// Total number of connections shed by configured transport caps
+    connection_sheds_total: Counter<u64>,
     /// Total v1/v2 mailbox entries written, labelled by `version`
     db_entries_total: Counter<u64>,
     tracker: UniqueShortIdTracker,
@@ -195,8 +198,13 @@ impl MetricsService {
             .build();
 
         let active_connections = meter
-            .i64_up_down_counter(ACTIVE_CONNECTIONS)
+            .u64_gauge(ACTIVE_CONNECTIONS)
             .with_description("Number of active connections")
+            .build();
+
+        let connection_sheds_total = meter
+            .u64_counter(CONNECTION_SHEDS)
+            .with_description("Total number of connections shed by transport caps")
             .build();
 
         let db_entries_total = meter
@@ -240,6 +248,7 @@ impl MetricsService {
             http_requests_total,
             total_connections,
             active_connections,
+            connection_sheds_total,
             db_entries_total,
             tracker,
             _unique_ids_gauge: unique_ids_gauge,
@@ -257,12 +266,18 @@ impl MetricsService {
         );
     }
 
-    pub fn record_connection_open(&self) {
+    pub fn record_connection_accepted(&self, active: usize) {
         self.total_connections.add(1, &[]);
-        self.active_connections.add(1, &[]);
+        self.active_connections.record(active as u64, &[]);
     }
 
-    pub fn record_connection_close(&self) { self.active_connections.add(-1, &[]); }
+    pub fn record_active_connections(&self, active: usize) {
+        self.active_connections.record(active as u64, &[]);
+    }
+
+    pub fn record_connection_shed(&self, reason: &'static str) {
+        self.connection_sheds_total.add(1, &[KeyValue::new("reason", reason)]);
+    }
 
     pub fn record_db_entry(&self, version: PayjoinVersion) {
         self.db_entries_total.add(1, &[KeyValue::new("version", version.to_string())]);

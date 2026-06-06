@@ -13,6 +13,28 @@
 # Request timeout in seconds
 # timeout = 30
 
+# --- Connection hygiene ---
+# These are transport/peer-relay limits. They do not identify or ration end
+# users, which may be hidden behind OHTTP relays.
+# [connection]
+
+# Maximum concurrent inbound connections before new connections are shed.
+# max_inbound_connections = 8192
+
+# File-descriptor headroom reserved below the process soft RLIMIT_NOFILE for
+# tunnels, outbound sockets, files, ACME, telemetry, and logs.
+# fd_reserve = 1024
+
+# Maximum concurrent inbound connections from one connecting peer IP.
+# max_connections_per_source = 1024
+
+# IPv6 source aggregation prefix for peer fairness accounting.
+# ipv6_source_prefix = 64
+
+# Seconds allowed to finish request headers while idle between requests.
+# In-flight long-polls are not interrupted by this timeout.
+# header_read_timeout = 10
+
 # --- Telemetry (requires `telemetry` feature) ---
 # [telemetry]
 

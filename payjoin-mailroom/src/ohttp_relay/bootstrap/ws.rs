@@ -220,10 +220,9 @@ where
     ) -> Poll<Result<usize, io::Error>> {
         let self_mut = self.get_mut();
         match Pin::new(&mut self_mut.ws_stream).poll_ready(cx) {
-            Poll::Ready(Ok(())) => {
+            Poll::Ready(Ok(())) =>
                 start_send(&mut self_mut.ws_stream, Message::Binary(data.to_vec().into()))
-                    .map(|r| r.map(|_| data.len()))
-            }
+                    .map(|r| r.map(|_| data.len())),
             Poll::Ready(Err(e)) => Poll::Ready(Err(map_ws_error(e))),
             Poll::Pending => Poll::Pending,
         }

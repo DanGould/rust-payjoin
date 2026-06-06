@@ -29,10 +29,9 @@ pub(crate) const TUNNEL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Resource bounds shared by the CONNECT and WebSocket bootstrap tunnels.
 ///
-/// Bootstrap tunnels are the only relay path that holds descriptors open for an
-/// unbounded time without these limits: a stalled or malicious client can pin
-/// two descriptors per tunnel indefinitely. The semaphore caps concurrency and
-/// the timeout caps lifetime, so total descriptor use stays bounded.
+/// Bootstrap tunnels pin one inbound upgraded socket plus one outbound gateway
+/// socket. The semaphore caps tunnel concurrency and the timeout caps tunnel
+/// lifetime; separate listener-level limits cap inbound HTTP connections.
 #[derive(Debug, Clone)]
 pub(crate) struct TunnelLimits {
     /// Caps the number of concurrent tunnels.

@@ -12,9 +12,7 @@ use crate::ohttp_relay::bootstrap::TunnelLimits;
 use crate::ohttp_relay::error::Error;
 use crate::ohttp_relay::{empty, GatewayUri};
 
-pub(crate) fn is_connect_request<B>(req: &Request<B>) -> bool {
-    Method::CONNECT == req.method()
-}
+pub(crate) fn is_connect_request<B>(req: &Request<B>) -> bool { Method::CONNECT == req.method() }
 
 #[instrument(skip(limits))]
 pub(crate) async fn try_upgrade<B>(

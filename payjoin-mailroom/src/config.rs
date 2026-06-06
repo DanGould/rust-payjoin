@@ -14,6 +14,7 @@ pub struct Config {
     pub timeout: Duration,
     #[serde(deserialize_with = "deserialize_duration_secs")]
     pub mailbox_ttl: Duration,
+    pub connection: ConnectionConfig,
     pub v1: Option<V1Config>,
     #[cfg(feature = "telemetry")]
     pub telemetry: Option<TelemetryConfig>,
@@ -21,6 +22,29 @@ pub struct Config {
     pub acme: Option<AcmeConfig>,
     #[cfg(feature = "access-control")]
     pub access_control: Option<AccessControlConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ConnectionConfig {
+    pub max_inbound_connections: usize,
+    pub fd_reserve: usize,
+    pub max_connections_per_source: usize,
+    pub ipv6_source_prefix: u8,
+    #[serde(deserialize_with = "deserialize_duration_secs")]
+    pub header_read_timeout: Duration,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            max_inbound_connections: 8192,
+            fd_reserve: 1024,
+            max_connections_per_source: 1024,
+            ipv6_source_prefix: 64,
+            header_read_timeout: Duration::from_secs(10),
+        }
+    }
 }
 
 /// V1 protocol configuration.
@@ -88,6 +112,7 @@ impl Default for Config {
             storage_dir: PathBuf::from("./data"),
             timeout: Duration::from_secs(30),
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
+            connection: ConnectionConfig::default(),
             v1: None,
             #[cfg(feature = "telemetry")]
             telemetry: None,
@@ -119,6 +144,7 @@ impl Config {
             storage_dir,
             timeout,
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
+            connection: ConnectionConfig::default(),
             v1,
             #[cfg(feature = "telemetry")]
             telemetry: None,

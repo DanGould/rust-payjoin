@@ -60,14 +60,3 @@ fn sanitize_short_id(path: &str) -> String {
         _ => path.to_string(),
     }
 }
-
-pub async fn track_connections(
-    metrics: axum::extract::State<MetricsService>,
-    req: Request,
-    next: Next,
-) -> Response {
-    metrics.record_connection_open();
-    let response = next.run(req).await;
-    metrics.record_connection_close();
-    response
-}

@@ -93,12 +93,13 @@ pub async fn init_directory(
     BoxSendSyncError,
 > {
     let tempdir = tempdir()?;
-    let config = payjoin_mailroom::config::Config::new(
+    let mut config = payjoin_mailroom::config::Config::new(
         "[::]:0".parse().expect("valid listener address"),
         tempdir.path().to_path_buf(),
         Duration::from_secs(2),
         Some(payjoin_mailroom::config::V1Config::default()),
     );
+    config.connection.fd_reserve = 0;
 
     let tls_config = RustlsConfig::from_der(vec![local_cert_key.0], local_cert_key.1).await?;
 
@@ -123,12 +124,13 @@ pub async fn init_ohttp_relay(
     BoxSendSyncError,
 > {
     let tempdir = tempdir()?;
-    let config = payjoin_mailroom::config::Config::new(
+    let mut config = payjoin_mailroom::config::Config::new(
         "[::]:0".parse().expect("valid listener address"),
         tempdir.path().to_path_buf(),
         Duration::from_secs(2),
         None,
     );
+    config.connection.fd_reserve = 0;
 
     let (port, handle) =
         payjoin_mailroom::serve_manual_tls(config, None, root_store, default_gateway)

@@ -131,9 +131,7 @@ impl std::ops::Deref for HttpClient {
         HttpsConnector<HttpConnector>,
         BoxBody<Bytes, hyper::Error>,
     >;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+    fn deref(&self) -> &Self::Target { &self.0 }
 }
 
 impl From<HttpsConnectorBuilder<WantsSchemes>> for HttpClient {
@@ -146,9 +144,7 @@ impl From<HttpsConnectorBuilder<WantsSchemes>> for HttpClient {
 }
 
 impl Default for HttpClient {
-    fn default() -> Self {
-        HttpsConnectorBuilder::new().with_webpki_roots().into()
-    }
+    fn default() -> Self { HttpsConnectorBuilder::new().with_webpki_roots().into() }
 }
 
 impl From<rustls::RootCertStore> for HttpClient {
@@ -186,9 +182,8 @@ where
         #[cfg(any(feature = "connect-bootstrap", feature = "ws-bootstrap"))]
         (&Method::GET, _) | (&Method::CONNECT, _) => {
             match parse_gateway_uri(&method, path, authority, config).await {
-                Ok(gateway_uri) => {
-                    bootstrap::handle_ohttp_keys(req, gateway_uri, &config.tunnel_limits).await
-                }
+                Ok(gateway_uri) =>
+                    bootstrap::handle_ohttp_keys(req, gateway_uri, &config.tunnel_limits).await,
                 Err(e) => Err(e),
             }
         }
@@ -259,9 +254,7 @@ fn handle_preflight() -> Response<BoxBody<Bytes, hyper::Error>> {
     res
 }
 
-async fn health_check() -> Response<BoxBody<Bytes, hyper::Error>> {
-    Response::new(empty())
-}
+async fn health_check() -> Response<BoxBody<Bytes, hyper::Error>> { Response::new(empty()) }
 
 #[instrument]
 async fn handle_ohttp_relay<B>(

@@ -64,15 +64,11 @@ struct HeapEntry {
 
 impl Ord for HeapEntry {
     /// Reverse ordering by expires for min-heap semantics
-    fn cmp(&self, other: &Self) -> Ordering {
-        Reverse(self.expires).cmp(&Reverse(other.expires))
-    }
+    fn cmp(&self, other: &Self) -> Ordering { Reverse(self.expires).cmp(&Reverse(other.expires)) }
 }
 
 impl PartialOrd for HeapEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
 impl Default for KnownGateways {
@@ -297,11 +293,12 @@ impl Prober {
 
                 if status.is_success() {
                     bip77_allowed = match self.probe_timeout {
-                        Some(timeout) => tokio::time::timeout(timeout, Self::is_explicit_opt_in(res))
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_some(),
+                        Some(timeout) =>
+                            tokio::time::timeout(timeout, Self::is_explicit_opt_in(res))
+                                .await
+                                .ok()
+                                .flatten()
+                                .is_some(),
                         None => Self::is_explicit_opt_in(res).await.is_some(),
                     };
 
