@@ -227,8 +227,10 @@ pub enum SessionOutcome {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
     use std::time::{Duration, SystemTime};
 
+    use bitcoin::hashes::Hash;
     use payjoin_test_utils::{BoxError, EXAMPLE_URL};
 
     use super::*;
@@ -237,9 +239,9 @@ mod tests {
     use crate::receive::v2::test::{mock_err, SHARED_CONTEXT};
     use crate::receive::v2::{
         Initialized, MaybeInputsOwned, PendingFallback, ProvisionalProposal, Receiver,
-        UncheckedOriginalPayload,
+        UncheckedOriginalPayload, WantsOutputs,
     };
-    use crate::receive::{InternalPayloadError, PayloadError};
+    use crate::receive::{InputPair, InternalPayloadError, PayloadError};
 
     fn unchecked_receiver_from_test_vector() -> Receiver<UncheckedOriginalPayload> {
         Receiver {
@@ -828,6 +830,142 @@ mod tests {
         };
         run_session_history_test(&test);
         run_session_history_test_async(&test).await;
+    }
+
+    // Drives a fresh v2 receiver through the safety checks to the `WantsOutputs`
+    // typestate, persisting each step to `persister`. Exactly one output (the
+    // receiver output at vout 1 in the test vector) is identified as owned so a
+    // single-script substitution succeeds.
+    fn wants_outputs_with_persister(
+        persister: &InMemoryPersister<SessionEvent>,
+    ) -> Receiver<WantsOutputs> {
+        let receiver_script =
+            original_from_test_vector().psbt.unsigned_tx.output[1].script_pubkey.clone();
+        // Seed the log with the events that precede the directly-constructed
+        // `UncheckedOriginalPayload` receiver so that replay can reach it.
+        persister
+            .save_event(SessionEvent::Created(SHARED_CONTEXT.clone()))
+            .expect("In memory persister shouldn't fail");
+        persister
+            .save_event(SessionEvent::RetrievedOriginalPayload {
+                original: original_from_test_vector(),
+                reply_key: None,
+            })
+            .expect("In memory persister shouldn't fail");
+        let maybe_inputs_owned = unchecked_receiver_from_test_vector()
+            .assume_interactive_receiver()
+            .save(persister)
+            .expect("Save should not fail");
+        let maybe_inputs_seen = maybe_inputs_owned
+            .check_inputs_not_owned(&mut |_| Ok(false))
+            .save(persister)
+            .expect("No inputs should be owned");
+        let outputs_unknown = maybe_inputs_seen
+            .check_no_inputs_seen_before(&mut |_| Ok(false))
+            .save(persister)
+            .expect("No inputs should be seen before");
+        outputs_unknown
+            .identify_receiver_outputs(&mut |script| Ok(script == receiver_script.as_script()))
+            .save(persister)
+            .expect("Outputs should be identified")
+    }
+
+    // A non-degenerate receiver output substitution: replaces the single owned
+    // receiver output with a fresh drain output plus extra outputs that
+    // `replace_receiver_outputs` interleaves at random indices. The interleave
+    // shuffle can move the drain output (and therefore `change_vout`) away from
+    // its original index, which is precisely the lossy fact the old replay
+    // reconstruction dropped.
+    fn replacement_outputs() -> (Vec<bitcoin::TxOut>, bitcoin::ScriptBuf) {
+        let drain_script =
+            bitcoin::ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([0x11; 32]));
+        let outputs = vec![
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(50_000),
+                script_pubkey: drain_script.clone(),
+            },
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(10_000),
+                script_pubkey: bitcoin::ScriptBuf::new_p2wsh(
+                    &bitcoin::WScriptHash::from_byte_array([0x22; 32]),
+                ),
+            },
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(10_000),
+                script_pubkey: bitcoin::ScriptBuf::new_p2wsh(
+                    &bitcoin::WScriptHash::from_byte_array([0x33; 32]),
+                ),
+            },
+        ];
+        (outputs, drain_script)
+    }
+
+    // Replaying a session resumed at `WantsInputs` must reproduce the live
+    // state, including the post-substitution `change_vout` and output set. The
+    // substitution shuffles outputs via the RNG, so the live object is the
+    // oracle; we compare replay against that exact instance.
+    #[test]
+    fn test_replay_to_wants_inputs_matches_live() {
+        let persister = InMemoryPersister::<SessionEvent>::default();
+        let wants_outputs = wants_outputs_with_persister(&persister);
+
+        let (outputs, drain_script) = replacement_outputs();
+        let live_wants_inputs = wants_outputs
+            .replace_receiver_outputs(outputs, drain_script.as_script())
+            .expect("Substitution should succeed")
+            .commit_outputs()
+            .save(&persister)
+            .expect("Save should not fail");
+
+        let (replayed, _) = replay_event_log(&persister).expect("replay should succeed");
+        let replayed = match replayed {
+            ReceiveSession::WantsInputs(r) => r,
+            other => panic!("Expected WantsInputs, got {other:?}"),
+        };
+        assert_eq!(replayed, live_wants_inputs, "replayed WantsInputs must equal the live state");
+    }
+
+    // Replaying a session resumed at `WantsFeeRange` must reproduce the live
+    // state, including the contributed inputs and the change increment that the
+    // RNG-driven `contribute_inputs` produced.
+    #[test]
+    fn test_replay_to_wants_fee_range_matches_live() {
+        let persister = InMemoryPersister::<SessionEvent>::default();
+        let wants_outputs = wants_outputs_with_persister(&persister);
+
+        let (outputs, drain_script) = replacement_outputs();
+        let wants_inputs = wants_outputs
+            .replace_receiver_outputs(outputs, drain_script.as_script())
+            .expect("Substitution should succeed")
+            .commit_outputs()
+            .save(&persister)
+            .expect("Save should not fail");
+
+        let proposal_psbt =
+            bitcoin::Psbt::from_str(payjoin_test_utils::RECEIVER_INPUT_CONTRIBUTION)
+                .expect("valid proposal psbt");
+        let input = InputPair::new(
+            proposal_psbt.unsigned_tx.input[1].clone(),
+            proposal_psbt.inputs[1].clone(),
+            None,
+        )
+        .expect("valid input pair");
+        let live_wants_fee_range = wants_inputs
+            .contribute_inputs([input])
+            .expect("Contribution should succeed")
+            .commit_inputs()
+            .save(&persister)
+            .expect("Save should not fail");
+
+        let (replayed, _) = replay_event_log(&persister).expect("replay should succeed");
+        let replayed = match replayed {
+            ReceiveSession::WantsFeeRange(r) => r,
+            other => panic!("Expected WantsFeeRange, got {other:?}"),
+        };
+        assert_eq!(
+            replayed, live_wants_fee_range,
+            "replayed WantsFeeRange must equal the live state"
+        );
     }
 
     #[tokio::test]
