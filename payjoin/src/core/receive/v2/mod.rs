@@ -1043,23 +1043,18 @@ impl Receiver<WantsOutputs> {
     ///
     /// Outputs cannot be modified after this function is called.
     pub fn commit_outputs(self) -> NextStateTransition<SessionEvent, Receiver<WantsInputs>> {
-        let inner = self.state.inner.clone().commit_outputs();
+        let inner = self.state.inner.commit_outputs();
+        // Persist the full post-commit state. `replace_receiver_outputs` mutates
+        // `payjoin_psbt` and recomputes `change_vout` using `thread_rng`, so a
+        // summary event cannot be replayed faithfully. Carrying the whole struct
+        // keeps live, persisted, and replayed state identical by construction.
         NextStateTransition::success(
-            SessionEvent::CommittedOutputs(self.state.inner.payjoin_psbt.unsigned_tx.output),
+            SessionEvent::CommittedOutputs(inner.clone()),
             Receiver { state: WantsInputs { inner }, session_context: self.session_context },
         )
     }
 
-    pub(crate) fn apply_committed_outputs(self, outputs: Vec<TxOut>) -> ReceiveSession {
-        let mut payjoin_proposal = self.inner.payjoin_psbt.clone();
-        let outputs_len = outputs.len();
-        // Add the outputs that may have been replaced
-        payjoin_proposal.unsigned_tx.output = outputs;
-        payjoin_proposal.outputs = vec![Default::default(); outputs_len];
-
-        let mut inner = self.state.inner.commit_outputs();
-        inner.payjoin_psbt = payjoin_proposal;
-
+    pub(crate) fn apply_committed_outputs(self, inner: common::WantsInputs) -> ReceiveSession {
         let new_state =
             Receiver { state: WantsInputs { inner }, session_context: self.session_context };
         ReceiveSession::WantsInputs(new_state)
@@ -1104,24 +1099,18 @@ impl Receiver<WantsInputs> {
     ///
     /// Inputs cannot be modified after this function is called.
     pub fn commit_inputs(self) -> NextStateTransition<SessionEvent, Receiver<WantsFeeRange>> {
-        let inner = self.state.inner.clone().commit_inputs();
+        let inner = self.state.inner.commit_inputs();
+        // Persist the full post-commit state. `contribute_inputs` inserts inputs
+        // at random indices and bumps the change output, none of which can be
+        // reconstructed from a summary event. Carrying the whole struct keeps
+        // live, persisted, and replayed state identical by construction.
         NextStateTransition::success(
-            SessionEvent::CommittedInputs(inner.receiver_inputs.clone()),
+            SessionEvent::CommittedInputs(inner.clone()),
             Receiver { state: WantsFeeRange { inner }, session_context: self.session_context },
         )
     }
 
-    pub(crate) fn apply_committed_inputs(
-        self,
-        contributed_inputs: Vec<InputPair>,
-    ) -> ReceiveSession {
-        let inner = common::WantsFeeRange {
-            original_psbt: self.state.inner.original_psbt.clone(),
-            payjoin_psbt: self.state.inner.payjoin_psbt.clone(),
-            params: self.state.inner.params.clone(),
-            change_vout: self.state.inner.change_vout,
-            receiver_inputs: contributed_inputs,
-        };
+    pub(crate) fn apply_committed_inputs(self, inner: common::WantsFeeRange) -> ReceiveSession {
         let new_state =
             Receiver { state: WantsFeeRange { inner }, session_context: self.session_context };
         ReceiveSession::WantsFeeRange(new_state)
