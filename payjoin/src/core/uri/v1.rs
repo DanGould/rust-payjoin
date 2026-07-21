@@ -38,8 +38,9 @@ mod tests {
     use payjoin_test_utils::BoxError;
 
     use super::*;
+    use crate::uri::error::{InternalUriParseError, UriParseError};
     use crate::uri::MaybePayjoinExtras;
-    use crate::{OutputSubstitution, PjParam, Uri, UriExt};
+    use crate::{OutputSubstitution, PjParam, Uri};
 
     #[test]
     fn test_missing_amount() {
@@ -79,7 +80,7 @@ mod tests {
                    %23OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC"
             )
             .unwrap()
-            .extras
+            .extras()
             .pj_is_supported(),
             "Uri expected a success with a well formatted pj extras, but it failed"
         );
@@ -90,7 +91,7 @@ mod tests {
         let uri = "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX?amount=0.01\
                    &pjos=0&pj=HTTPS://EXAMPLE.COM/missing_short_id\
                    %23oh1qypm5jxyns754y4r45qwe336qfx6zr8dqgvqculvztv20tfveydmfqc";
-        let extras = Uri::try_from(uri).unwrap().extras;
+        let extras = Uri::try_from(uri).unwrap().extras().clone();
         match extras {
             crate::uri::MaybePayjoinExtras::Supported(extras) => {
                 assert!(matches!(extras.pj_param, crate::uri::PjParam::V1(_)));
@@ -108,9 +109,9 @@ mod tests {
         let pjuri = Uri::try_from(uri);
         assert!(matches!(
             pjuri,
-            Err(bitcoin_uri::de::Error::Extras(PjParseError(
+            Err(UriParseError(InternalUriParseError::PjParam(PjParseError(
                 InternalPjParseError::DuplicateParams("pjos")
-            )))
+            ))))
         ));
         let uri =
             "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX?pjos=1&pj=HTTPS://EXAMPLE.COM/\
@@ -119,9 +120,9 @@ mod tests {
         let pjuri = Uri::try_from(uri);
         assert!(matches!(
             pjuri,
-            Err(bitcoin_uri::de::Error::Extras(PjParseError(
+            Err(UriParseError(InternalUriParseError::PjParam(PjParseError(
                 InternalPjParseError::DuplicateParams("pj")
-            )))
+            ))))
         ));
     }
 
@@ -136,13 +137,13 @@ mod tests {
             .check_pj_supported()
             .expect("Could not parse pj extras");
 
-        pjuri.extras.output_substitution = OutputSubstitution::Disabled;
+        pjuri.set_output_substitution(OutputSubstitution::Disabled);
         assert!(
             pjuri.to_string().contains(expected_is_disabled),
             "Pj uri should contain param: {expected_is_disabled}, but it did not"
         );
 
-        pjuri.extras.output_substitution = OutputSubstitution::Enabled;
+        pjuri.set_output_substitution(OutputSubstitution::Enabled);
         assert!(
             !pjuri.to_string().contains(expected_is_enabled),
             "Pj uri should elide param: {expected_is_enabled}, but it did not"
@@ -154,7 +155,7 @@ mod tests {
         // pjos=0 should disable output substitution
         let uri = "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX?pj=https://example.com&pjos=0";
         let parsed = Uri::try_from(uri).unwrap();
-        match parsed.extras {
+        match parsed.extras() {
             MaybePayjoinExtras::Supported(extras) =>
                 assert_eq!(extras.output_substitution, OutputSubstitution::Disabled),
             _ => panic!("Expected Supported PayjoinExtras"),
@@ -163,7 +164,7 @@ mod tests {
         // pjos=1 should allow output substitution
         let uri = "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX?pj=https://example.com&pjos=1";
         let parsed = Uri::try_from(uri).unwrap();
-        match parsed.extras {
+        match parsed.extras() {
             MaybePayjoinExtras::Supported(extras) =>
                 assert_eq!(extras.output_substitution, OutputSubstitution::Enabled),
             _ => panic!("Expected Supported PayjoinExtras"),
@@ -172,7 +173,7 @@ mod tests {
         // Elided pjos=1 should allow output substitution
         let uri = "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX?pj=https://example.com";
         let parsed = Uri::try_from(uri).unwrap();
-        match parsed.extras {
+        match parsed.extras() {
             MaybePayjoinExtras::Supported(extras) =>
                 assert_eq!(extras.output_substitution, OutputSubstitution::Enabled),
             _ => panic!("Expected Supported PayjoinExtras"),
