@@ -31,6 +31,8 @@ _core = [
   "bitcoin/serde",
 ]
 directory = []
+#[doc = "Conversions between payjoin's URI types and the `bitcoin_uri` types they are built on. Exempt from semver: it names types payjoin does not own, so the `bitcoin_uri` major version behind it may change in a payjoin minor release."]
+bitcoin-uri-interop = []
 v1 = ["_core"]
 v2 = ["_core", "hpke", "hkdf", "bhttp", "ohttp", "directory"]
 #[doc = "Functions to fetch OHTTP keys via CONNECT proxy using reqwest. Enables `v2` since only `v2` uses OHTTP."]

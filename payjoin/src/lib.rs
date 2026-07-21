@@ -25,6 +25,11 @@
 //!   send and receive operations.
 //! - `io`: helper functions for fetching and parsing OHTTP keys.
 //! - `directory`: type for identifying Payjoin Directory entries as defined in BIP 77.
+//! - `bitcoin-uri-interop`: `From` conversions between [`Uri`]/[`PjUri`] and the
+//!   [`bitcoin_uri`] types they wrap, for downstream code that already speaks that crate.
+//!   **Exempt from this crate's semver guarantees**, because it names types payjoin does
+//!   not own: the `bitcoin_uri` major version behind it may change in a payjoin minor
+//!   release. Without it, no `bitcoin_uri` type appears in payjoin's public API.
 //!
 //! Only the `v2` feature is enabled by default.
 //!

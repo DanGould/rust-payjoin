@@ -4,6 +4,11 @@
 //! These are reused where the state machinery is used.
 
 pub extern crate bitcoin;
+/// The BIP 21 parser payjoin is built on, re-exported so that downstream code can name a
+/// version-compatible type. Only available with the semver-exempt `bitcoin-uri-interop`
+/// feature; see the crate level feature documentation.
+#[cfg(feature = "bitcoin-uri-interop")]
+pub extern crate bitcoin_uri;
 
 pub mod error;
 pub use error::ImplementationError;

@@ -259,6 +259,37 @@ impl std::fmt::Display for PjUri {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) }
 }
 
+/// Conversions to and from the BIP 21 parser payjoin is built on.
+///
+/// These are the deliberate escape hatch for downstream code that already speaks
+/// [`bitcoin_uri`] and needs to hand URIs across that boundary. They are gated behind the
+/// `bitcoin-uri-interop` feature and exempt from payjoin's semver guarantees, because
+/// they name a type payjoin does not own. See the crate level feature documentation.
+#[cfg(feature = "bitcoin-uri-interop")]
+mod interop {
+    use bitcoin::address::{NetworkChecked, NetworkValidation};
+
+    use super::{MaybePayjoinExtras, PayjoinExtras, PjUri, Uri};
+
+    impl<V: NetworkValidation> From<Uri<V>> for bitcoin_uri::Uri<'static, V, MaybePayjoinExtras> {
+        fn from(uri: Uri<V>) -> Self { uri.0 }
+    }
+
+    impl<V: NetworkValidation> From<bitcoin_uri::Uri<'static, V, MaybePayjoinExtras>> for Uri<V> {
+        fn from(uri: bitcoin_uri::Uri<'static, V, MaybePayjoinExtras>) -> Self { Uri(uri) }
+    }
+
+    impl From<PjUri> for bitcoin_uri::Uri<'static, NetworkChecked, PayjoinExtras> {
+        fn from(uri: PjUri) -> Self { uri.0 }
+    }
+
+    impl From<bitcoin_uri::Uri<'static, NetworkChecked, PayjoinExtras>> for PjUri {
+        fn from(uri: bitcoin_uri::Uri<'static, NetworkChecked, PayjoinExtras>) -> Self {
+            PjUri(uri)
+        }
+    }
+}
+
 impl bitcoin_uri::de::DeserializationError for MaybePayjoinExtras {
     type Error = PjParseError;
 }

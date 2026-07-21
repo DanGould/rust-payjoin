@@ -69,6 +69,22 @@ fn require_network_reports_a_payjoin_error() {
     assert!(!err.to_string().is_empty());
 }
 
+#[cfg(feature = "bitcoin-uri-interop")]
+#[test]
+fn interop_feature_roundtrips_through_bitcoin_uri() {
+    use payjoin::bitcoin_uri;
+    use payjoin::uri::MaybePayjoinExtras;
+
+    let uri = Uri::try_from(NO_PJ).expect("valid BIP 21 uri").assume_checked();
+
+    let foreign: bitcoin_uri::Uri<'static, NetworkChecked, MaybePayjoinExtras> = uri.into();
+    assert_eq!(foreign.to_string(), NO_PJ);
+
+    let back: Uri<NetworkChecked> = foreign.into();
+    assert_eq!(back.to_string(), NO_PJ);
+    assert_eq!(back.amount(), Some(Amount::ONE_BTC));
+}
+
 #[test]
 fn check_pj_supported_hands_back_a_payjoin_uri() {
     // The unsupported branch used to return the parser's own URI type. It now returns
