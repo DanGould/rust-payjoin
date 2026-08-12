@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     scenes::s2_async_board::run(&mut demo).await?;
     scenes::s3_floor::run(&mut demo).await?;
     scenes::s4_token_upgrade::run(&mut demo).await?;
+    scenes::s5_spam_gauntlet::run(&mut demo).await?;
 
     demo.narrator.finish()?;
     Ok(())

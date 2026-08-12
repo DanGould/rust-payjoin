@@ -137,6 +137,26 @@ impl Mailroom {
         Ok(res.status)
     }
 
+    /// Append a raw frame to a queue mailbox, returning the inner
+    /// status. Senders reach the queue through the payjoin client; this
+    /// is the path an attacker uses to inject frames the client would
+    /// never build, so scenes can show the receiver skipping them.
+    pub async fn queue_post_raw(
+        &mut self,
+        queue_id: &str,
+        frame: &[u8],
+    ) -> Result<u16, Box<dyn std::error::Error>> {
+        let res = self
+            .gateway_roundtrip(
+                "POST",
+                &format!("/q/{queue_id}"),
+                Some(frame),
+                ENCAPSULATED_MESSAGE_BYTES,
+            )
+            .await?;
+        Ok(res.status)
+    }
+
     /// Read one fixed-size board page of entries with sequence numbers
     /// at or above `since`. Returns the non-empty slots and the
     /// sequence number to resume from.

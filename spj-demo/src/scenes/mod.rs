@@ -6,6 +6,7 @@ pub mod s1_static_reuse;
 pub mod s2_async_board;
 pub mod s3_floor;
 pub mod s4_token_upgrade;
+pub mod s5_spam_gauntlet;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
 use bitcoin::{Address, Amount, FeeRate, Network, OutPoint, Psbt, ScriptBuf, Transaction, TxOut};
+use payjoin::persist::SessionPersister;
 use payjoin::receive::v2::static_session::{
     replay_static_event_log as replay_receiver_log, InboundProposal, StaticReceiveSession,
     StaticReceiver, StaticReceiverBuilder, StaticSessionEvent as ReceiverStaticEvent,
@@ -34,6 +36,9 @@ use crate::net::{Mailroom, MailroomOpts, BLOB_BYTES};
 use crate::persist::JsonlPersister;
 use crate::sp::{self, SpAddress, SpKeys};
 use crate::wallet::DemoWallet;
+
+/// The byte length of one queue frame (an HPKE-padded message A).
+pub const QUEUE_FRAME_BYTES: usize = 7168;
 
 /// The relay a production client would deliver through. In this demo
 /// its role is played by the in-process gateway, so the value is only a
@@ -72,6 +77,9 @@ pub struct Demo {
     payment_seq: std::cell::Cell<u64>,
     /// Monotonic id for each freshly published static endpoint.
     endpoint_seq: std::cell::Cell<u64>,
+    /// The queue id senders derive for the current endpoint, exposed so
+    /// scenes can inject raw frames the client would never build.
+    pub queue_id: String,
 }
 
 pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
@@ -91,7 +99,7 @@ pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
     bitcoind.client.generate_to_address(1, &miner_address)?;
 
     let mailroom =
-        Mailroom::start(MailroomOpts { board_pow_bits: 14, board_cap: 64, queue_frame_cap: 64 })
+        Mailroom::start(MailroomOpts { board_pow_bits: 12, board_cap: 24, queue_frame_cap: 64 })
             .await?;
 
     let sp_keys = SpKeys::from_seed(b"static payjoin demo receiver seed");
@@ -110,6 +118,7 @@ pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
         sp_keys,
         sp_address,
         static_uri: String::new(),
+        queue_id: String::new(),
         receiver_log: JsonlPersister::new(state_dir.join("receiver-0.jsonl")),
         state_dir,
         seen_outpoints: HashSet::new(),
@@ -137,17 +146,30 @@ impl Demo {
         }
     }
 
-    /// One receiver poll of the static queue: returns the proposals
-    /// retrieved, if any.
+    /// Drain the static queue: poll repeatedly until a poll consumes no
+    /// further frames, returning every proposal retrieved. A single
+    /// queue read returns one fixed page, so a queue holding more than a
+    /// page (e.g. spam ahead of a real payment) needs several polls to
+    /// reach the end.
     pub async fn receiver_poll(&mut self) -> Result<Vec<InboundProposal>, BoxError> {
-        let receiver = self.wake_receiver()?;
-        let (req, ctx) = receiver.create_poll_request(RELAY_URL)?;
-        let body = self.mailroom.deliver(&req).await?;
-        let (_, proposals) = receiver
-            .process_response(&body, ctx)
-            .save(&self.receiver_log)
-            .map_err(|e| format!("static poll failed: {e:?}"))?;
-        Ok(proposals)
+        let mut all = Vec::new();
+        loop {
+            let before = self.receiver_log.load()?.count();
+            let receiver = self.wake_receiver()?;
+            let (req, ctx) = receiver.create_poll_request(RELAY_URL)?;
+            let body = self.mailroom.deliver(&req).await?;
+            let (_, proposals) = receiver
+                .process_response(&body, ctx)
+                .save(&self.receiver_log)
+                .map_err(|e| format!("static poll failed: {e:?}"))?;
+            all.extend(proposals);
+            // A poll that appended no events consumed no frames and did
+            // not advance the cursor: the queue is drained.
+            if self.receiver_log.load()?.count() == before {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// Fresh taproot address from the receiver's bitcoind wallet.
@@ -189,16 +211,22 @@ impl Demo {
             Network::Regtest,
         );
         let ohttp_keys = OhttpKeys::decode(self.mailroom.ohttp_keys())?;
-        let receiver = StaticReceiverBuilder::new(
-            placeholder,
-            DIRECTORY_URL,
-            ohttp_keys,
-            payjoin::HpkeKeyPair::gen_keypair(),
-        )?
-        .build()
-        .save(&self.receiver_log)?;
+        let receiver_key = payjoin::HpkeKeyPair::gen_keypair();
+        self.queue_id = payjoin::directory::ShortId::from(receiver_key.public_key()).to_string();
+        let receiver =
+            StaticReceiverBuilder::new(placeholder, DIRECTORY_URL, ohttp_keys, receiver_key)?
+                .build()
+                .save(&self.receiver_log)?;
         self.static_uri = receiver.pj_uri().to_string();
         Ok(())
+    }
+
+    /// Replace the directory with a fresh one and republish the
+    /// endpoint on it. Scene 5 uses this so its board and queue counts
+    /// are not polluted by earlier scenes' traffic.
+    pub async fn reset_mailroom(&mut self, opts: MailroomOpts) -> Result<(), BoxError> {
+        self.mailroom = Mailroom::start(opts).await?;
+        self.publish_endpoint()
     }
 }
 
@@ -351,21 +379,56 @@ pub async fn respond_with_payjoin(
 
 /// The receiver's abort policy for a proposal it declines to engage
 /// with: broadcast the sender's own original transaction. The payment
-/// still completes; the prober's coins end up paying the receiver.
+/// still completes and the prober's coins pay the receiver. Returns
+/// `None` when the proposal reuses an already-seen input, which is how
+/// a re-probe with the same coins is dropped before any broadcast.
+///
+/// The seen-outpoint check runs inside the broadcast-suitability
+/// closure, the first stage that sees the transaction, so a re-probe is
+/// rejected there rather than reaching an on-chain double spend.
 pub fn respond_with_original_broadcast(
     demo: &mut Demo,
     proposal: InboundProposal,
     label: &str,
-) -> Result<Transaction, BoxError> {
+) -> Result<Option<Transaction>, BoxError> {
     let log = JsonlPersister::<ReceiverSessionEvent>::new(
         demo.state_dir.join(format!("receiver-abort-{label}.jsonl")),
     );
     let receiver = proposal.save(&log)?;
-    let receiver = check_broadcastable(demo, receiver, &log)?;
-    let original = receiver.extract_tx_to_schedule_broadcast();
+
+    let dropped = std::cell::Cell::new(false);
+    let to_record = std::cell::RefCell::new(Vec::new());
+    let checked = {
+        let seen = &demo.seen_outpoints;
+        let miner = &demo.miner;
+        receiver.check_broadcast_suitability(None, |tx| {
+            let inputs: Vec<OutPoint> = tx.input.iter().map(|i| i.previous_output).collect();
+            if inputs.iter().any(|outpoint| seen.contains(outpoint)) {
+                dropped.set(true);
+                return Ok(false);
+            }
+            *to_record.borrow_mut() = inputs;
+            Ok(miner
+                .test_mempool_accept(std::slice::from_ref(tx))
+                .map_err(ImplementationError::new)?
+                .0
+                .first()
+                .ok_or(ImplementationError::from("testmempoolaccept returned nothing"))?
+                .allowed)
+        })
+    };
+    let checked = match checked.save(&log) {
+        Ok(checked) => checked,
+        Err(_) if dropped.get() => return Ok(None),
+        Err(e) => return Err(format!("broadcast suitability: {e:?}").into()),
+    };
+    for outpoint in to_record.into_inner() {
+        demo.seen_outpoints.insert(outpoint);
+    }
+    let original = checked.extract_tx_to_schedule_broadcast();
     demo.broadcast(&original)?;
     demo.mine(1)?;
-    Ok(original)
+    Ok(Some(original))
 }
 
 fn check_broadcastable(
