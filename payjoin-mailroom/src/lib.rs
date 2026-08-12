@@ -275,6 +275,22 @@ async fn init_directory(
         queues.spawn_background_prune().await;
         service = service.with_queues(queues);
     }
+    if config.board {
+        let board_dir = config.storage_dir.join("board");
+        let store = crate::db::board::BoardStore::init(
+            board_dir.clone(),
+            config.mailbox_ttl,
+            config.board_cap,
+        )
+        .await?;
+        store.spawn_background_prune().await;
+        let dedupe = crate::admission::DedupeSet::open(board_dir.join("admitted.tags")).await?;
+        let admission = std::sync::Arc::new(crate::admission::PowAdmission::new(
+            config.board_pow_bits,
+            Some(dedupe),
+        ));
+        service = service.with_board(crate::directory::Board::new(store, admission));
+    }
     Ok(service)
 }
 

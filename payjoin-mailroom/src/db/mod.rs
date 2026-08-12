@@ -7,6 +7,7 @@ use payjoin::directory::ShortId;
 use tower::util::BoxCloneSyncService;
 use tower::{Service, ServiceExt};
 
+pub mod board;
 pub mod files;
 pub mod queues;
 use crate::metrics::{MetricsService, PayjoinVersion};

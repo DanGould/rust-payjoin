@@ -11,6 +11,8 @@ use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
 use tracing::{error, warn};
 
+use crate::admission::{Admission, Rejection, POW_NONCE_BYTES};
+use crate::db::board::{BoardStore, Error as BoardError, BLOB_BYTES};
 use crate::db::queues::{Error as QueueError, QueueStore, FRAME_BYTES};
 use crate::db::{Db, Error as DbError, SendableError};
 use crate::ohttp_relay::SentinelTag;
@@ -45,6 +47,24 @@ const _: () = assert!(
 
 /// Response header carrying the index to resume reading a queue from.
 const NEXT_INDEX_HEADER: &str = "x-pj-next";
+
+/// Blobs per bulletin board read response.
+const K_BLOBS_PER_RESPONSE: usize = 16;
+
+/// The fixed size of every encapsulated board read response.
+///
+/// A page of [`K_BLOBS_PER_RESPONSE`] blobs cannot fit the standard
+/// response, so board reads form their own fixed size class with the
+/// same rationale as queue reads: length reveals only the operation
+/// class, never how many live entries the page carries.
+const ENCAPSULATED_BOARD_RESPONSE_BYTES: usize = 2 * ENCAPSULATED_MESSAGE_BYTES;
+
+// A board page plus bhttp framing and headers must fit within the
+// padded response, with slack for the header block.
+const _: () = assert!(
+    K_BLOBS_PER_RESPONSE * BLOB_BYTES + 256
+        <= ENCAPSULATED_BOARD_RESPONSE_BYTES - ENCAPSULATION_OVERHEAD_BYTES
+);
 
 const V1_REJECT_RES_JSON: &str =
     r#"{{"errorCode": "original-psbt-rejected ", "message": "Body is not a string"}}"#;
@@ -114,6 +134,20 @@ fn parse_address_lines(text: &str) -> std::collections::HashSet<bitcoin::ScriptB
         .collect()
 }
 
+/// Bulletin board configuration: storage plus the admission mechanism
+/// gating submissions.
+#[derive(Clone)]
+pub struct Board {
+    store: BoardStore,
+    admission: Arc<dyn Admission>,
+}
+
+impl Board {
+    pub fn new(store: BoardStore, admission: Arc<dyn Admission>) -> Self {
+        Self { store, admission }
+    }
+}
+
 #[derive(Clone)]
 pub struct Service<D: Db> {
     db: D,
@@ -121,6 +155,7 @@ pub struct Service<D: Db> {
     sentinel_tag: SentinelTag,
     v1: Option<V1>,
     queues: Option<QueueStore>,
+    board: Option<Board>,
 }
 
 impl<D: Db, B> tower::Service<Request<B>> for Service<D>
@@ -145,7 +180,7 @@ where
 
 impl<D: Db> Service<D> {
     pub fn new(db: D, ohttp: ohttp::Server, sentinel_tag: SentinelTag, v1: Option<V1>) -> Self {
-        Self { db, ohttp, sentinel_tag, v1, queues: None }
+        Self { db, ohttp, sentinel_tag, v1, queues: None, board: None }
     }
 
     /// Serve queue mailbox endpoints (`/q/{id}`) from `queues`. Without
@@ -153,6 +188,14 @@ impl<D: Db> Service<D> {
     /// same responses they did before queues were introduced.
     pub fn with_queues(mut self, queues: QueueStore) -> Self {
         self.queues = Some(queues);
+        self
+    }
+
+    /// Serve bulletin board endpoints (`/board`). Without this, board
+    /// routes do not exist and requests to them return the same
+    /// responses they did before the board was introduced.
+    pub fn with_board(mut self, board: Board) -> Self {
+        self.board = Some(board);
         self
     }
 
@@ -303,6 +346,8 @@ impl<D: Db> Service<D> {
         match (req.method(), path_segments.as_slice()) {
             (&Method::GET, &["", "q", _]) if self.queues.is_some() =>
                 ENCAPSULATED_QUEUE_RESPONSE_BYTES,
+            (&Method::GET, &["", "board"]) if self.board.is_some() =>
+                ENCAPSULATED_BOARD_RESPONSE_BYTES,
             _ => ENCAPSULATED_MESSAGE_BYTES,
         }
     }
@@ -324,6 +369,11 @@ impl<D: Db> Service<D> {
                 Some(queues) => self.get_queue(queues, id, &query).await,
                 None => Ok(not_found()),
             },
+            // Without a board, "board" falls through to the mailbox
+            // arms below, which reject it as an invalid id exactly as
+            // they did before the board existed.
+            (Method::POST, &["", "board"]) if self.board.is_some() => self.post_board(body).await,
+            (Method::GET, &["", "board"]) if self.board.is_some() => self.get_board(&query).await,
             (Method::POST, &["", id]) => self.post_mailbox(id, body).await,
             (Method::GET, &["", id]) => self.get_mailbox(id).await,
             (Method::PUT, &["", id]) if self.v1.is_some() => self.put_payjoin_v1(id, body).await,
@@ -418,6 +468,86 @@ impl<D: Db> Service<D> {
             page.extend_from_slice(frame);
         }
         page.resize(K_FRAMES_PER_RESPONSE * FRAME_BYTES, 0);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(NEXT_INDEX_HEADER, next)
+            .body(full(page))?)
+    }
+
+    /// Route POST /board: submit one blob, gated by admission control.
+    ///
+    /// The body is `nonce || blob`, fixed at
+    /// `POW_NONCE_BYTES + BLOB_BYTES` so every submission looks
+    /// identical on the wire. As with queue endpoints, client errors are
+    /// inner statuses. A submission whose admission tag was already
+    /// recorded is acknowledged without being stored again, so a client
+    /// that never saw its response (e.g. an OHTTP retransmit) can retry
+    /// without duplicating its entry, mirroring idempotent mailbox
+    /// posts.
+    async fn post_board(&self, body: Body) -> Result<Response<Body>, HandlerError> {
+        let board = self.board.as_ref().expect("router guards on board presence");
+        let submission = body
+            .collect()
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?
+            .to_bytes();
+        if submission.len() != POW_NONCE_BYTES + BLOB_BYTES {
+            return inner_status(StatusCode::BAD_REQUEST);
+        }
+        let tag = match board.admission.verify(&submission).await {
+            Ok(tag) => tag,
+            Err(Rejection::Malformed) => return inner_status(StatusCode::BAD_REQUEST),
+            Err(Rejection::InsufficientWork) => return inner_status(StatusCode::TOO_MANY_REQUESTS),
+        };
+        match board.admission.seen(&tag).await {
+            Ok(false) => {}
+            Ok(true) => return inner_status(StatusCode::OK),
+            Err(e) => return Err(HandlerError::InternalServerError(e.into())),
+        }
+        match board.store.post(&submission[POW_NONCE_BYTES..]).await {
+            Ok(_seq) => {}
+            Err(BoardError::InvalidBlobSize(_)) => return inner_status(StatusCode::BAD_REQUEST),
+            Err(BoardError::OverCapacity) => return inner_status(StatusCode::SERVICE_UNAVAILABLE),
+            Err(BoardError::IO(e)) => return Err(HandlerError::InternalServerError(e.into())),
+        }
+        // Record the tag only now that the entry is stored, so a
+        // submission rejected above (e.g. board full) can be retried
+        // with the same proof.
+        board
+            .admission
+            .record_success(&tag)
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?;
+        inner_status(StatusCode::OK)
+    }
+
+    /// Route GET /board?since=n: read a fixed-size page of entries with
+    /// sequence numbers at or above n.
+    ///
+    /// The page always spans [`K_BLOBS_PER_RESPONSE`] blob slots in
+    /// sequence order, zero-filled past the last live entry; readers
+    /// recognize entries addressed to them by trial decryption. The
+    /// `x-pj-next` header carries the sequence number to resume from.
+    /// Expired entries leave gaps in the sequence that readers cannot
+    /// observe.
+    async fn get_board(&self, query: &str) -> Result<Response<Body>, HandlerError> {
+        let board = self.board.as_ref().expect("router guards on board presence");
+        let Some(since) = parse_index_param(query, "since") else {
+            return inner_status(StatusCode::BAD_REQUEST);
+        };
+        let entries = board
+            .store
+            .read(since, K_BLOBS_PER_RESPONSE)
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?;
+        let next = entries.last().map(|(seq, _)| seq + 1).unwrap_or(since);
+
+        let mut page = Vec::with_capacity(K_BLOBS_PER_RESPONSE * BLOB_BYTES);
+        for (_seq, blob) in &entries {
+            page.extend_from_slice(blob);
+        }
+        page.resize(K_BLOBS_PER_RESPONSE * BLOB_BYTES, 0);
 
         Ok(Response::builder()
             .status(StatusCode::OK)

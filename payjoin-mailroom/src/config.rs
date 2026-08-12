@@ -8,6 +8,15 @@ use tokio_listener::ListenerAddress;
 /// Default maximum frames per queue mailbox.
 const DEFAULT_QUEUE_FRAME_CAP: usize = 64;
 
+/// Default proof-of-work target for board submissions, in leading zero
+/// bits: about a million hashes per submission, cheap for a wallet
+/// posting an announcement and costly for a flood.
+const DEFAULT_BOARD_POW_BITS: u8 = 20;
+
+/// Default maximum live board entries: 4096 entries of 512 bytes bound
+/// the board at 2 MiB.
+const DEFAULT_BOARD_CAP: usize = 4096;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -24,6 +33,16 @@ pub struct Config {
     /// Maximum frames one queue mailbox holds. Appends beyond the cap
     /// are rejected until the queue expires.
     pub queue_frame_cap: usize,
+    /// Serve bulletin board endpoints (`/board`) through the OHTTP
+    /// gateway. Off by default. Enabling only adds routes; existing
+    /// endpoint behavior is unchanged.
+    pub board: bool,
+    /// Proof-of-work target for board submissions, in leading zero
+    /// bits.
+    pub board_pow_bits: u8,
+    /// Maximum live board entries. Submissions to a full board are
+    /// rejected until entries expire.
+    pub board_cap: usize,
     pub v1: Option<V1Config>,
     #[cfg(feature = "telemetry")]
     pub telemetry: Option<TelemetryConfig>,
@@ -100,6 +119,9 @@ impl Default for Config {
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
             queue_mailboxes: false,
             queue_frame_cap: DEFAULT_QUEUE_FRAME_CAP,
+            board: false,
+            board_pow_bits: DEFAULT_BOARD_POW_BITS,
+            board_cap: DEFAULT_BOARD_CAP,
             v1: None,
             #[cfg(feature = "telemetry")]
             telemetry: None,
@@ -133,6 +155,9 @@ impl Config {
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
             queue_mailboxes: false,
             queue_frame_cap: DEFAULT_QUEUE_FRAME_CAP,
+            board: false,
+            board_pow_bits: DEFAULT_BOARD_POW_BITS,
+            board_cap: DEFAULT_BOARD_CAP,
             v1,
             #[cfg(feature = "telemetry")]
             telemetry: None,
