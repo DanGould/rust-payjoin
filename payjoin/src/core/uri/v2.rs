@@ -149,6 +149,80 @@ impl PjParam {
     }
 }
 
+/// Payjoin endpoint parameters for a static session: a long-lived endpoint
+/// that many senders may pay over its lifetime.
+///
+/// The `pj` URL fragment carries the receiver's public key (`RK`) and the
+/// directory's OHTTP keys (`OH`) like a standard v2 endpoint, but no
+/// expiration (`EX`): the endpoint itself does not expire. Any deadline on
+/// an individual payment is the sender's policy, decided per payment,
+/// rather than a property of the receiving endpoint.
+#[cfg(feature = "_static-session")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StaticPjParam {
+    directory: Url,
+    id: ShortId,
+    ohttp_keys: OhttpKeys,
+    receiver_pubkey: HpkePublicKey,
+}
+
+#[cfg(feature = "_static-session")]
+impl StaticPjParam {
+    pub(crate) fn new(
+        directory: Url,
+        id: ShortId,
+        ohttp_keys: OhttpKeys,
+        receiver_pubkey: HpkePublicKey,
+    ) -> Self {
+        Self { directory, id, ohttp_keys, receiver_pubkey }
+    }
+
+    pub(super) fn parse(url: Url) -> Result<Self, PjParseError> {
+        let path_segments: Vec<&str> = url.path_segments().map(|c| c.collect()).unwrap_or_default();
+        let id = if path_segments.len() == 1 {
+            ShortId::from_str(path_segments[0]).map_err(|_| PjParseError::NotV2)?
+        } else {
+            return Err(PjParseError::NotV2);
+        };
+
+        match url.fragment() {
+            Some(fragment) => {
+                if fragment.chars().any(|c| c.is_lowercase()) {
+                    return Err(PjParseError::LowercaseFragment);
+                }
+
+                // An EX parameter marks a standard, expiring v2 endpoint,
+                // which is not this parser's job to accept.
+                if !fragment.contains("RK1")
+                    || !fragment.contains("OH1")
+                    || fragment.contains("EX1")
+                {
+                    return Err(PjParseError::NotV2);
+                }
+            }
+            None => return Err(PjParseError::NotV2),
+        }
+
+        let rk = receiver_pubkey(&url).map_err(PjParseError::InvalidReceiverPubkey)?;
+        let oh = ohttp(&url).map_err(PjParseError::InvalidOhttpKeys)?;
+
+        Ok(Self::new(url, id, oh, rk))
+    }
+
+    /// The receiver's public key. Unlike a standard v2 session key, it is
+    /// deliberately long-lived: every sender paying this endpoint sees the
+    /// same value, so seeing it again is expected rather than a sign of
+    /// session reuse.
+    pub fn receiver_pubkey(&self) -> &HpkePublicKey { &self.receiver_pubkey }
+
+    pub(crate) fn endpoint(&self) -> Url {
+        let mut endpoint = self.directory.clone().join(&self.id.to_string()).unwrap();
+        set_receiver_pubkey(&mut endpoint, &self.receiver_pubkey);
+        set_ohttp(&mut endpoint, &self.ohttp_keys);
+        endpoint
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum ParseFragmentError {
     InvalidChar(char),
@@ -700,5 +774,80 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(PjParam::parse(url), Err(PjParseError::NotV2)));
+    }
+
+    #[cfg(feature = "_static-session")]
+    mod static_session {
+        use super::*;
+
+        const STATIC_ENDPOINT: &str = "https://example.com/TXJCGKTKXLUUZ\
+             #OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC\
+             -RK1Q0DJS3VVDXWQQTLQ8022QGXSX7ML9PHZ6EDSF6AKEWQG758JPS2EV";
+
+        #[test]
+        fn test_parse_static_endpoint() {
+            let url = Url::parse(STATIC_ENDPOINT).unwrap();
+            let static_param = StaticPjParam::parse(url).expect("static endpoint should parse");
+            assert_eq!(
+                static_param.receiver_pubkey(),
+                &receiver_pubkey(&Url::parse(STATIC_ENDPOINT).unwrap()).unwrap()
+            );
+            // The endpoint round-trips: same mailbox path, RK and OH
+            // fragment parameters, and no EX.
+            let endpoint = static_param.endpoint();
+            assert!(StaticPjParam::parse(endpoint).is_ok());
+        }
+
+        #[test]
+        fn test_static_endpoint_rejects_ex_fragment() {
+            // An expiring endpoint belongs to the standard v2 parser.
+            let url = Url::parse(
+                "https://example.com/TXJCGKTKXLUUZ#EX1C4UC6ES\
+                 -OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC\
+                 -RK1Q0DJS3VVDXWQQTLQ8022QGXSX7ML9PHZ6EDSF6AKEWQG758JPS2EV",
+            )
+            .unwrap();
+            assert!(matches!(StaticPjParam::parse(url), Err(PjParseError::NotV2)));
+        }
+
+        #[test]
+        fn test_static_endpoint_rejects_invalid_receiver_pubkey() {
+            // RK1 present but undecodable is a hard error, not a fallthrough:
+            // the URL claims to be a static endpoint and fails to be one.
+            let url = Url::parse(
+                "https://example.com/TXJCGKTKXLUUZ#OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC-RK10",
+            )
+            .unwrap();
+            assert!(matches!(
+                StaticPjParam::parse(url),
+                Err(PjParseError::InvalidReceiverPubkey(_))
+            ));
+        }
+
+        #[test]
+        fn test_static_endpoint_rejects_lowercase_fragment() {
+            let url = Url::parse(
+                "https://example.com/TXJCGKTKXLUUZ\
+                 #oh1qypm5jxyns754y4r45qwe336qfx6zr8dqgvqculvztv20tfveydmfqc\
+                 -rk1q0djs3vvdxwqqtlq8022qgxsx7ml9phz6edsf6akewqg758jps2ev",
+            )
+            .unwrap();
+            assert!(matches!(StaticPjParam::parse(url), Err(PjParseError::LowercaseFragment)));
+        }
+
+        #[test]
+        fn test_static_pj_uri_on_bip21_round_trips() {
+            let uri = "bitcoin:12c6DSiU4Rq3P4ZxziKxzrL5LmMBrzjrJX?amount=0.01\
+                       &pjos=0&pj=HTTPS://EXAMPLE.COM/TXJCGKTKXLUUZ\
+                       %23OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC\
+                       -RK1Q0DJS3VVDXWQQTLQ8022QGXSX7ML9PHZ6EDSF6AKEWQG758JPS2EV";
+            let pjuri = Uri::try_from(uri)
+                .expect("static pj URI should parse")
+                .assume_checked()
+                .check_pj_supported()
+                .expect("static pj URI should support payjoin");
+            assert!(matches!(pjuri.extras().pj_param(), crate::uri::PjParam::V2Static(_)));
+            assert_eq!(format!("{pjuri}"), uri);
+        }
     }
 }

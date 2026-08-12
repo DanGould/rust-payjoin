@@ -77,6 +77,9 @@ impl SenderBuilder {
             crate::uri::PjParam::V1(_) => unimplemented!("V2 SenderBuilder only supports v2 URLs"),
             crate::uri::PjParam::V2(pj_param) =>
                 Self::from_parts(psbt, pj_param, uri.address(), uri.amount()),
+            #[cfg(feature = "_static-session")]
+            crate::uri::PjParam::V2Static(_) =>
+                unimplemented!("V2 SenderBuilder only supports standard v2 URLs"),
         }
     }
 

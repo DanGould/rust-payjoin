@@ -2,7 +2,7 @@
 set -e
 
 # Individual features with no defaults.
-features=("v1" "v2" "directory")
+features=("v1" "v2" "directory" "_static-session")
 
 for feature in "${features[@]}"; do
     # Don't duplicate --all-targets clippy. Clippy end-user code, not tests.

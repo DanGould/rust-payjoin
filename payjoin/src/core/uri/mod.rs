@@ -27,6 +27,10 @@ pub enum PjParam {
     V1(v1::PjParam),
     #[cfg(feature = "v2")]
     V2(v2::PjParam),
+    /// A static session endpoint: like `V2` but long-lived and without an
+    /// expiration, serving many senders over its lifetime.
+    #[cfg(feature = "_static-session")]
+    V2Static(v2::StaticPjParam),
 }
 
 impl PjParam {
@@ -37,6 +41,13 @@ impl PjParam {
         match v2::PjParam::parse(endpoint.clone()) {
             Err(v2::PjParseError::NotV2) => (), // continue
             Ok(v2) => return Ok(PjParam::V2(v2)),
+            Err(e) => return Err(InternalPjParseError::V2(e).into()),
+        }
+
+        #[cfg(feature = "_static-session")]
+        match v2::StaticPjParam::parse(endpoint.clone()) {
+            Err(v2::PjParseError::NotV2) => (), // continue
+            Ok(static_param) => return Ok(PjParam::V2Static(static_param)),
             Err(e) => return Err(InternalPjParseError::V2(e).into()),
         }
 
@@ -58,6 +69,8 @@ impl PjParam {
             PjParam::V1(url) => url.endpoint(),
             #[cfg(feature = "v2")]
             PjParam::V2(url) => url.endpoint(),
+            #[cfg(feature = "_static-session")]
+            PjParam::V2Static(url) => url.endpoint(),
         }
     }
 }
