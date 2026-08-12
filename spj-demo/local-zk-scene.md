@@ -134,7 +134,7 @@ trait that yields a public dedupe tag.
 3. Roll the epoch (`context_label` changes): the same coin proves again and is
    accepted, demonstrating per-epoch allowance renewal, including a post that
    straddles the rollover.
-4. A double-spend of the queue token (if the token path is wired) is rejected;
+4. A double-spend of the queue token is rejected;
    a proof replayed under a stale epoch is rejected.
 5. Narrate the mainnet quote: on mainnet the set is ~238K taproot keys of at
    least 500K sats, reproduced by anyone with a node, held by no one. Regtest

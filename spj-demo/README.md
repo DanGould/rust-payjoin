@@ -52,8 +52,9 @@ run, not byte-reproducible.
    and completes. The directory's whole view is printed.
 3. **The floor** — the receiver never returns; the sender's patience elapses and
    it broadcasts the original, a plain silent payment. No payment is lost.
-4. **Token upgrade** — a returning sender presents a token and reaches the queue
-   directly, leaving no board entry.
+4. **Token upgrade** — the mailroom starts requiring queue tokens; a returning
+   sender presents one minted by the receiver's mailbox key and reaches the
+   queue directly, while un-tokened posts and token replays are refused.
 5. **The spam gauntlet** — one attacker-versus-receiver ledger per spam class.
 
 Two further scenes run on a machine outside this build host's boundary; see
@@ -62,14 +63,14 @@ a Curve Trees membership credential.
 
 ## What is real and what is a stub
 
-- Real: the mailroom directory (queues, board, proof-of-work admission), all
-  OHTTP encapsulation and padding, the static session client, on-chain
-  construction, broadcast, and confirmation.
+- Real: the mailroom directory (queues, board, proof-of-work admission, queue
+  token admission with replay dedupe), all OHTTP encapsulation and padding, the
+  static session client, on-chain construction, broadcast, and confirmation.
 - Stub, documented as such in the code and narration: silent payment derivation
   is done directly with secp256k1 group operations for one output per
-  transaction (`src/sp.rs`), and the returning-sender token in scene 4 is checked
-  in process. Production gates the token at the mailroom queue, which the current
-  feature branches do not yet enforce.
+  transaction (`src/sp.rs`), and the scene 4 queue token rides into the sender's
+  post through the demo transport, because the stock sender cannot attach one
+  yet. The mailroom's verification of that token is the production code path.
 
 The directory runs in process as a `tower` service, so every wire byte crosses
 the real gateway code without binding a port.

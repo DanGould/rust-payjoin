@@ -1,4 +1,4 @@
-Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-demo" <not executed on terminal>]
+Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-demo" <not executed on terminal>]
 ======================================================================
  STATIC PAYJOIN — recorded property demonstration
  regtest, in-process directory, real wire bytes
@@ -14,32 +14,32 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
 
   * the receiver publishes one static payment string and goes about
     its day
-      static string: bitcoin:bcrt1prmuytrgjrcxqc8sqsfynrragj320g3fs90rjsqmd6gcrs22enjpqkdtks0?pjos=0&pj=HTTPS://MAILROOM.LOCALHOST/P82Q3E27SRG82%23OH1QYPL4MEDFFYGSK2CT5CLXTGYZJUN2KLPD55WTESAUSGDFSKY7YYWDQQ-RK1QW2RZK498J9YHGE0MN923JKGLZ229NXD9X2NQC63J04D6RRUDLWL5
+      static string: bitcoin:bcrt1prmuytrgjrcxqc8sqsfynrragj320g3fs90rjsqmd6gcrs22enjpqkdtks0?pjos=0&pj=HTTPS://MAILROOM.LOCALHOST/FJGVY94PGE9TZ%23OH1QYPXQRWECAJ3VX2WVT5J0C4QQ20FWWSVEXQYMFFKWLUFF7T4QLJMRTS-RK1QGSX2725TL0UPM5ECKPJ04Z0PVQGY3NJ5592320GH2888LGQ8YFKU
       | the address slot is a placeholder derived from the receiver's
       | spend key; each sender replaces it with an output only they
       | can derive, so the string itself never appears on chain
   * payment 1: Alice derives her one-time output and posts to the
     queue
-      payjoin txid: f325e96c90788c3253fe0e04db3ddf1479f602fead403a79eb409aed22b445cb
-      receiver output: bcrt1pujxnrvucxgadghvv9k98fw0c2k4hs68kk5eyudzt4fdz2r8q74tstwrvtm — fresh wallet address (payjoin)
+      payjoin txid: 060f3696e6555d830a6392aeb1cff18efd6a5c542889f2b194987960bd807b51
+      receiver output: bcrt1pqvkn64hpaqfg0pmcv48x5tgedwzpge890aercqg5wsxenctpvn6qadkaux — fresh wallet address (payjoin)
   * payment 2: Bob pays the same string; his derivation differs
-      payjoin txid: 75f843e892c6a511b984b6c6340f27479898b0951332494a675eaa39d5a0c445
-      receiver output: bcrt1p0m5demttd8w7m0q8n6cvx3spgv0gq7fw3y8tl3l36swd7q490q2q55q43l — fresh wallet address (payjoin)
+      payjoin txid: ada5afe3570dc27be9544b8aa7c75eefb2f7f9ad9c1fd12063843b27dc1d5284
+      receiver output: bcrt1p2xshplktgspfhglgty6qwdddwka3jk844mqstx767s824q7y0nns020f2z — fresh wallet address (payjoin)
   * payment 3: Bob pays the string again, but the receiver is away;
     Bob's patience lapses and his wallet broadcasts the original
     transaction unchanged
-      fallback txid: 03c16b38ec8d91ab0e0c886327c4a39c7de1aa2fc7fe11767a735c4ffab60a64
-      receiver output: bcrt1pwzqdam9um0ncztr2z0rhcz8jcc7t28pfwz0w0wwpfnf8gxh05nhsy4t8a7 — derived one-time output
+      fallback txid: 7ba1e499fd6006d494b1dadaa0b80d846950efa64f8f4895e9e11f66af08a942
+      receiver output: bcrt1pf4ftn7dkeg2h04vf0qt204n43c3ge7v5ff8w3cfre3wstglctgdsaxns0n — derived one-time output
   * compare the three on-chain receiver outputs
-      payment 1: bcrt1pujxnrvucxgadghvv9k98fw0c2k4hs68kk5eyudzt4fdz2r8q74tstwrvtm
-      payment 2: bcrt1p0m5demttd8w7m0q8n6cvx3spgv0gq7fw3y8tl3l36swd7q490q2q55q43l
-      payment 3: bcrt1pwzqdam9um0ncztr2z0rhcz8jcc7t28pfwz0w0wwpfnf8gxh05nhsy4t8a7
+      payment 1: bcrt1pqvkn64hpaqfg0pmcv48x5tgedwzpge890aercqg5wsxenctpvn6qadkaux
+      payment 2: bcrt1p2xshplktgspfhglgty6qwdddwka3jk844mqstx767s824q7y0nns020f2z
+      payment 3: bcrt1pf4ftn7dkeg2h04vf0qt204n43c3ge7v5ff8w3cfre3wstglctgdsaxns0n
   * disaster drill: throw the receiver's wallet away and restore on
     a fresh one from seed material alone
       restored wallet rescan balance: 5.70000000 BTC
   * scan the chain with the scan key for anything the rescan missed
       silent payment scan: 1 unclaimed payment(s) found
-      sweep txid: 3e815aef1658dcdd905072df90915dbdd49073277ee415adf73021c13915cf87
+      sweep txid: 03d1ca4b3488cf59b4bcaf574b1a21ab46537bdc00736a74eed8d5deb04be63b
 
   VERDICT [PASS]: three payments, three distinct taproot outputs; wallet
                  rescan recovered 5.70000000 BTC and the scan key
@@ -62,7 +62,7 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
   * Carol posts her payment to the queue and a notification to the
     board
       board post status: 200
-      proof-of-work hashes: 187
+      proof-of-work hashes: 13402
   * show everything the directory operator can observe
       stored objects: 15
       total bytes at rest: 47071
@@ -73,7 +73,7 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
       board entries scanned: 7
       notifications addressed to me: 1
   * the notification says to poll; the receiver drains its queue
-      completed payjoin txid: b5d80af8bbad967e046bd7370941757505bb23488a5633235bc335dca8e19647
+      completed payjoin txid: 8d0f6797279ce99a0fd7e4d1283fc8cefd06662eeb75527d03e48eab29154824
 
   VERDICT [PASS]: the receiver was offline when the payment began and
                  still completed it, having found exactly one real
@@ -89,10 +89,10 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
   CLAIM: silent payment.
 
   * Dave pays the string; the receiver is gone for good
-      intended output: bcrt1pxkew6eug479m820xz0s4q89r7xdn98rpn9phjsz8qk7fa4h3kshs8tfhe4
+      intended output: bcrt1pu9lmftzhsql5zh8ylp4c0e8extftgau4nma8usfhs7g9djpe2tpqyf7nze
   * the receiver never polls; Dave's patience window closes
       broadcast: original transaction (no receiver contribution)
-      fallback txid: 452e4b79ba127fb7ddadbdda4cf86b97355b92b95a33d02fae2f7c452d9792fd
+      fallback txid: 0d24f48d7f372bef2a0a195d4684f6ec89e41d981a73db28d6587698b52eabaa
   * later, the receiver scans the chain with its scan key
       silent payments found: 2
       recovered: 0.70000000 BTC
@@ -105,24 +105,31 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
  SCENE 4 — Token upgrade for a returning sender
 ======================================================================
   CLAIM: The board carries first contact only. After one payment the
-  CLAIM: receiver hands the sender a token; the next payment presents
-  CLAIM: it and reaches the queue directly, with no board entry and
-  CLAIM: no proof of work.
+  CLAIM: receiver mints a token with its mailbox key; the next
+  CLAIM: payment presents it and reaches the queue directly, with no
+  CLAIM: board entry and no proof of work, while the mailroom refuses
+  CLAIM: posts that carry no token.
 
   * first payment: Frank is a stranger, so he announces on the board
       board notification: posted
-      proof-of-work hashes: 719
-      first payjoin txid: e817f33cd04c620092d560bf0fa2764c606f341937eac4d098f1c81dad72e4a4
-  * the receiver includes a queue token in its reply
-      token issued: tkn-e817f33cd04c620092d560bf0fa2764c606f341937eac4d098f1c81dad72e4a4
+      proof-of-work hashes: 789
+      first payjoin txid: 2efc36fd1558cd9a7e198ca08211b1654f4d9ea10ee16addbab94c61fbc2b327
+  * the mailroom turns on its queue token requirement
+  * the receiver mints a queue token with its mailbox key
+      token issued: d6b4e063fa42e4ca… (113 bytes)
+  * a stranger posts to the queue without a token
+      un-tokened post: rejected, inner status 400
   * second payment: Frank presents the token and skips the board
-      second payjoin txid: 3d36d0ed5074b2d5e3dcd6de51152596a5f6bcae5db88090f54c9055473d5376
-      board entries before / after second payment: 8 / 8
+      second payjoin txid: 4678b3a32769c759afa24f2948e84347486498ff1929a04075fc467138f9806a
+      replaying the spent token: inner status 409
+      board entries since the token requirement: 0
 
-  VERDICT [PASS]: the returning payment reached the queue with a token and
-                 left no board entry. Demo-side token; production gates
-                 it at the mailroom queue, which this branch does not yet
-                 enforce.
+  VERDICT [PASS]: the mailroom refused the stranger's un-tokened post,
+                 admitted Frank's tokened frame once, refused the replay,
+                 and the return payment left no board entry. The token is
+                 minted and verified at the mailroom; the demo transport
+                 splices it into the queue post because the stock sender
+                 cannot attach one yet.
 
 ======================================================================
  SCENE 5 — The spam gauntlet
@@ -137,10 +144,10 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
       LEDGER — (a) board garbage
         attacker: unworked posts rejected      8 / 8
         attacker: worked posts admitted        12 / 12
-        attacker: hashes burned for admission  31547
+        attacker: hashes burned for admission  43059
         receiver: blobs scanned                13
         receiver: bytes downloaded             6656
-        receiver: scan time                    9.048727ms
+        receiver: scan time                    9.780378ms
         receiver: real notifications found     1
       | on mainnet the board post is gated by a real cost, and the
       | receiver's scan is a cheap trial-decryption per blob. Here it
@@ -151,7 +158,7 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
       LEDGER — (b) addressed garbage
         attacker: garbage frames injected   6
         receiver: frames trial-decrypted    7
-        receiver: drain time                45.102462ms
+        receiver: drain time                44.172022ms
         receiver: real proposals recovered  1
   * class (c): a valid probe crafted to extract a response
 
@@ -168,7 +175,7 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
 
       LEDGER — (f) board-cap flood
         attacker: board posts to reach cap  7
-        attacker: hashes burned             29112
+        attacker: hashes burned             41430
         attacker: regtest coin cost         0 (free on regtest)
         honest sender: board post status    503
         honest sender: payment outcome      completed as vanilla silent payment
@@ -185,4 +192,4 @@ Script started on 2026-08-12 22:48:27+08:00 [COMMAND="cargo run --quiet -p spj-d
                  worst downgrades one upgrade to vanilla silent payment.
                  Zero payments failed.
 
-Script done on 2026-08-12 22:49:00+08:00 [COMMAND_EXIT_CODE="0"]
+Script done on 2026-08-13 00:37:53+08:00 [COMMAND_EXIT_CODE="0"]

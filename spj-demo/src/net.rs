@@ -20,7 +20,7 @@ use axum::http::{Method, Request as HttpRequest};
 use bitcoin::hashes::{sha256d, Hash};
 use http_body_util::BodyExt;
 use payjoin::directory::ENCAPSULATED_MESSAGE_BYTES;
-use payjoin_mailroom::admission::{DedupeSet, PowAdmission, POW_NONCE_BYTES};
+use payjoin_mailroom::admission::{DedupeSet, PowAdmission, TokenAdmission, POW_NONCE_BYTES};
 use payjoin_mailroom::db::board::BoardStore;
 use payjoin_mailroom::db::queues::QueueStore;
 use payjoin_mailroom::db::FilesDb;
@@ -46,6 +46,9 @@ pub struct MailroomOpts {
     pub board_pow_bits: u8,
     pub board_cap: usize,
     pub queue_frame_cap: usize,
+    /// Require queue appends to carry an owner-minted token, the
+    /// mailroom's `queue_requires_token` setting.
+    pub queue_requires_token: bool,
 }
 
 /// A decapsulated response from the directory.
@@ -64,6 +67,10 @@ impl InnerResponse {
 pub struct Mailroom {
     svc: Service<FilesDb>,
     ohttp_keys: Vec<u8>,
+    /// The gateway's own OHTTP keys, held so the demo transport can
+    /// open a client's encapsulated request when it splices in a queue
+    /// token on the sender's behalf.
+    ohttp_server: ohttp::Server,
     storage_dir: PathBuf,
     board_pow_bits: u8,
 }
@@ -79,11 +86,16 @@ impl Mailroom {
         let dedupe = DedupeSet::open(storage_dir.join("board-admitted.hex")).await?;
         let admission = PowAdmission::new(opts.board_pow_bits, Some(dedupe));
         let ohttp: ohttp::Server = gen_ohttp_server_config()?.into();
+        let ohttp_server = ohttp.clone();
         let mut svc = Service::new(db, ohttp, SentinelTag::new([0u8; 32]), None)
             .with_queues(queues)
             .with_board(Board::new(board_store, std::sync::Arc::new(admission)));
+        if opts.queue_requires_token {
+            let dedupe = DedupeSet::open(storage_dir.join("queue-admitted.hex")).await?;
+            svc = svc.with_queue_admission(std::sync::Arc::new(TokenAdmission::new(Some(dedupe))));
+        }
         let ohttp_keys = fetch_ohttp_keys(&mut svc).await?;
-        Ok(Self { svc, ohttp_keys, storage_dir, board_pow_bits: opts.board_pow_bits })
+        Ok(Self { svc, ohttp_keys, ohttp_server, storage_dir, board_pow_bits: opts.board_pow_bits })
     }
 
     /// The encoded OHTTP key configuration clients encapsulate to.
@@ -104,6 +116,59 @@ impl Mailroom {
             return Err(format!("gateway returned {}", res.status()).into());
         }
         Ok(res.into_body().collect().await?.to_bytes().to_vec())
+    }
+
+    /// Deliver a sender's queue post with `token` spliced ahead of the
+    /// frame inside the encapsulation.
+    ///
+    /// The payjoin sender does not attach queue tokens yet, so the demo
+    /// transport plays the token-aware client: it opens the sender's
+    /// encapsulated request with the gateway's own keys, prepends the
+    /// token to the frame, and submits the result. The mailroom's
+    /// verification of the token is the production code path; only the
+    /// splice is demo-side. The inner response is re-encapsulated for
+    /// the sender's context, so the stock sender completes its round
+    /// unchanged.
+    pub async fn deliver_with_queue_token(
+        &mut self,
+        req: &payjoin::Request,
+        token: &[u8],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let (bhttp_bytes, sender_res_ctx) = self.ohttp_server.decapsulate(&req.body)?;
+        let inner = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(bhttp_bytes))?;
+        let path = inner.control().path().unwrap_or_default().to_vec();
+        if !path.starts_with(b"/q/") {
+            return Err("token delivery is only for queue posts".into());
+        }
+
+        let mut tokened = bhttp::Message::request(
+            inner.control().method().unwrap_or_default().to_vec(),
+            inner.control().scheme().unwrap_or_default().to_vec(),
+            inner.control().authority().unwrap_or_default().to_vec(),
+            path,
+        );
+        for field in inner.header().fields() {
+            tokened.put_header(field.name().to_vec(), field.value().to_vec());
+        }
+        let mut content = token.to_vec();
+        content.extend_from_slice(inner.content());
+        tokened.write_content(&content);
+        let mut padded = vec![0u8; PADDED_BHTTP_REQ_BYTES];
+        tokened.write_bhttp(bhttp::Mode::KnownLength, &mut padded.as_mut_slice())?;
+
+        let (enc_req, client_ctx) =
+            ohttp::ClientRequest::from_encoded_config(&self.ohttp_keys)?.encapsulate(&padded)?;
+        let http_req = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("http://localhost/.well-known/ohttp-gateway")
+            .body(Body::from(enc_req))?;
+        let res = tower::Service::call(&mut self.svc, http_req).await?;
+        if !res.status().is_success() {
+            return Err(format!("gateway returned {}", res.status()).into());
+        }
+        let enc_res = res.into_body().collect().await?.to_bytes();
+        let inner_res = client_ctx.decapsulate(&enc_res[..])?;
+        Ok(sender_res_ctx.encapsulate(&inner_res)?)
     }
 
     /// Find a nonce making sha256d(nonce || blob) clear the board's
@@ -304,7 +369,12 @@ mod tests {
     use super::*;
 
     fn opts() -> MailroomOpts {
-        MailroomOpts { board_pow_bits: 8, board_cap: 32, queue_frame_cap: 8 }
+        MailroomOpts {
+            board_pow_bits: 8,
+            board_cap: 32,
+            queue_frame_cap: 8,
+            queue_requires_token: false,
+        }
     }
 
     #[tokio::test]

@@ -35,6 +35,7 @@ pub async fn run(demo: &mut Demo) -> Result<(), BoxError> {
         board_pow_bits: 12,
         board_cap: 20,
         queue_frame_cap: 64,
+        queue_requires_token: false,
     })
     .await?;
 

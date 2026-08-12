@@ -70,9 +70,6 @@ pub struct Demo {
     pub state_dir: PathBuf,
     pub seen_outpoints: HashSet<OutPoint>,
     pub scan_from_height: u64,
-    /// Demo-side repeat-sender tokens. Production gates these at the
-    /// mailroom queue; here the demo enforces them at delivery time.
-    pub tokens: HashSet<String>,
     /// Monotonic id giving every payment a unique session-log path.
     payment_seq: std::cell::Cell<u64>,
     /// Monotonic id for each freshly published static endpoint.
@@ -80,6 +77,10 @@ pub struct Demo {
     /// The queue id senders derive for the current endpoint, exposed so
     /// scenes can inject raw frames the client would never build.
     pub queue_id: String,
+    /// The secp256k1 secret behind the current endpoint's receiver key,
+    /// retained so the receiver can mint queue tokens: the mailroom
+    /// admits a token only under the key its queue id is derived from.
+    pub queue_owner_key: Option<bitcoin::secp256k1::SecretKey>,
 }
 
 pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
@@ -98,9 +99,13 @@ pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
     miner.send_to_address(&receiver_funding, Amount::from_btc(5.0)?)?;
     bitcoind.client.generate_to_address(1, &miner_address)?;
 
-    let mailroom =
-        Mailroom::start(MailroomOpts { board_pow_bits: 12, board_cap: 24, queue_frame_cap: 64 })
-            .await?;
+    let mailroom = Mailroom::start(MailroomOpts {
+        board_pow_bits: 12,
+        board_cap: 24,
+        queue_frame_cap: 64,
+        queue_requires_token: false,
+    })
+    .await?;
 
     let sp_keys = SpKeys::from_seed(b"static payjoin demo receiver seed");
     let sp_address = sp_keys.address(&secp);
@@ -119,11 +124,11 @@ pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
         sp_address,
         static_uri: String::new(),
         queue_id: String::new(),
+        queue_owner_key: None,
         receiver_log: JsonlPersister::new(state_dir.join("receiver-0.jsonl")),
         state_dir,
         seen_outpoints: HashSet::new(),
         scan_from_height,
-        tokens: HashSet::new(),
         payment_seq: std::cell::Cell::new(0),
         endpoint_seq: std::cell::Cell::new(0),
     };
@@ -213,6 +218,12 @@ impl Demo {
         let ohttp_keys = OhttpKeys::decode(self.mailroom.ohttp_keys())?;
         let receiver_key = payjoin::HpkeKeyPair::gen_keypair();
         self.queue_id = payjoin::directory::ShortId::from(receiver_key.public_key()).to_string();
+        // Retain the scalar for queue token minting. The HPKE secret
+        // key exposes its bytes only through serde, so take them
+        // through a serde value round-trip.
+        let owner_bytes: Vec<u8> =
+            serde_json::from_value(serde_json::to_value(receiver_key.secret_key())?)?;
+        self.queue_owner_key = Some(bitcoin::secp256k1::SecretKey::from_slice(&owner_bytes)?);
         let receiver =
             StaticReceiverBuilder::new(placeholder, DIRECTORY_URL, ohttp_keys, receiver_key)?
                 .build()
@@ -257,6 +268,27 @@ pub async fn send_message_a(
     amount: Amount,
     patience: Option<Duration>,
 ) -> Result<InFlightPayment, BoxError> {
+    send_message_a_impl(demo, wallet, amount, patience, None).await
+}
+
+/// [`send_message_a`] for a token-requiring queue: the demo transport
+/// splices `token` into the queue post on the sender's behalf.
+pub async fn send_message_a_with_token(
+    demo: &mut Demo,
+    wallet: &DemoWallet,
+    amount: Amount,
+    token: &[u8],
+) -> Result<InFlightPayment, BoxError> {
+    send_message_a_impl(demo, wallet, amount, None, Some(token)).await
+}
+
+async fn send_message_a_impl(
+    demo: &mut Demo,
+    wallet: &DemoWallet,
+    amount: Amount,
+    patience: Option<Duration>,
+    token: Option<&[u8]>,
+) -> Result<InFlightPayment, BoxError> {
     let fee_headroom = Amount::from_sat(2_000);
     let (outpoint, prevout) =
         wallet.select_utxo(amount + fee_headroom).ok_or("sender lacks a large enough coin")?;
@@ -293,7 +325,10 @@ pub async fn send_message_a(
     let sender = builder.build_recommended(FeeRate::BROADCAST_MIN)?.save(&log)?;
 
     let (req, ctx) = sender.create_v2_post_request(RELAY_URL)?;
-    let body = demo.mailroom.deliver(&req).await?;
+    let body = match token {
+        Some(token) => demo.mailroom.deliver_with_queue_token(&req, token).await?,
+        None => demo.mailroom.deliver(&req).await?,
+    };
     sender
         .process_response(&body, ctx)
         .save(&log)

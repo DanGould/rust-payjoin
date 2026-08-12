@@ -6,10 +6,10 @@
 | ------------------------------------- | ---------- |
 | attacker: unworked posts rejected     | 8 / 8      |
 | attacker: worked posts admitted       | 12 / 12    |
-| attacker: hashes burned for admission | 31547      |
+| attacker: hashes burned for admission | 43059      |
 | receiver: blobs scanned               | 13         |
 | receiver: bytes downloaded            | 6656       |
-| receiver: scan time                   | 9.048727ms |
+| receiver: scan time                   | 9.780378ms |
 | receiver: real notifications found    | 1          |
 
 ## (b) addressed garbage
@@ -18,7 +18,7 @@
 | ---------------------------------- | ----------- |
 | attacker: garbage frames injected  | 6           |
 | receiver: frames trial-decrypted   | 7           |
-| receiver: drain time               | 45.102462ms |
+| receiver: drain time               | 44.172022ms |
 | receiver: real proposals recovered | 1           |
 
 ## (c) valid-decoy probe
@@ -35,7 +35,7 @@
 |                                    |                                     |
 | ---------------------------------- | ----------------------------------- |
 | attacker: board posts to reach cap | 7                                   |
-| attacker: hashes burned            | 29112                               |
+| attacker: hashes burned            | 41430                               |
 | attacker: regtest coin cost        | 0 (free on regtest)                 |
 | honest sender: board post status   | 503                                 |
 | honest sender: payment outcome     | completed as vanilla silent payment |
