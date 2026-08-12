@@ -1,0 +1,4 @@
+======================================================================
+ STATIC PAYJOIN — recorded property demonstration
+ regtest, in-process directory, real wire bytes
+======================================================================
