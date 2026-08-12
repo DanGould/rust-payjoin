@@ -18,6 +18,7 @@ use crate::ohttp_relay::SentinelTag;
 
 #[cfg(feature = "access-control")]
 pub mod access_control;
+pub mod admission;
 pub mod cli;
 pub mod config;
 pub mod db;
