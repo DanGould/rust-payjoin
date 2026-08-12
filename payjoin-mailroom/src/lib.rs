@@ -18,6 +18,7 @@ use crate::ohttp_relay::SentinelTag;
 
 #[cfg(feature = "access-control")]
 pub mod access_control;
+pub mod admission;
 pub mod cli;
 pub mod config;
 pub mod db;
@@ -263,7 +264,34 @@ async fn init_directory(
     } else {
         None
     };
-    Ok(crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1))
+    let mut service = crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1);
+    if config.queue_mailboxes {
+        let queues = crate::db::queues::QueueStore::init(
+            config.storage_dir.join("queues"),
+            config.mailbox_ttl,
+            config.queue_frame_cap,
+        )
+        .await?;
+        queues.spawn_background_prune().await;
+        service = service.with_queues(queues);
+    }
+    if config.board {
+        let board_dir = config.storage_dir.join("board");
+        let store = crate::db::board::BoardStore::init(
+            board_dir.clone(),
+            config.mailbox_ttl,
+            config.board_cap,
+        )
+        .await?;
+        store.spawn_background_prune().await;
+        let dedupe = crate::admission::DedupeSet::open(board_dir.join("admitted.tags")).await?;
+        let admission = std::sync::Arc::new(crate::admission::PowAdmission::new(
+            config.board_pow_bits,
+            Some(dedupe),
+        ));
+        service = service.with_board(crate::directory::Board::new(store, admission));
+    }
+    Ok(service)
 }
 
 #[cfg(feature = "access-control")]

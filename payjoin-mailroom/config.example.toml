@@ -13,6 +13,25 @@
 # Request timeout in seconds
 # timeout = 30
 
+# Serve queue mailbox endpoints (/q/{id}) through the OHTTP gateway.
+# Off by default; enabling only adds routes.
+# queue_mailboxes = false
+
+# Maximum frames one queue mailbox holds. Appends beyond the cap are
+# rejected until the queue expires.
+# queue_frame_cap = 64
+
+# Serve bulletin board endpoints (/board) through the OHTTP gateway.
+# Off by default; enabling only adds routes.
+# board = false
+
+# Proof-of-work target for board submissions, in leading zero bits.
+# board_pow_bits = 20
+
+# Maximum live board entries. Submissions to a full board are rejected
+# until entries expire.
+# board_cap = 4096
+
 # --- Telemetry (requires `telemetry` feature) ---
 # [telemetry]
 

@@ -11,14 +11,60 @@ use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
 use tracing::{error, warn};
 
+use crate::admission::{Admission, Rejection, POW_NONCE_BYTES};
+use crate::db::board::{BoardStore, Error as BoardError, BLOB_BYTES};
+use crate::db::queues::{Error as QueueError, QueueStore, FRAME_BYTES};
 use crate::db::{Db, Error as DbError, SendableError};
 use crate::ohttp_relay::SentinelTag;
 
 const CHACHA20_POLY1305_NONCE_LEN: usize = 32; // chacha20poly1305 n_k
 const POLY1305_TAG_SIZE: usize = 16;
-pub const BHTTP_REQ_BYTES: usize =
-    ENCAPSULATED_MESSAGE_BYTES - (CHACHA20_POLY1305_NONCE_LEN + POLY1305_TAG_SIZE);
+/// Bytes OHTTP response encapsulation adds to a padded bhttp response.
+const ENCAPSULATION_OVERHEAD_BYTES: usize = CHACHA20_POLY1305_NONCE_LEN + POLY1305_TAG_SIZE;
+pub const BHTTP_REQ_BYTES: usize = ENCAPSULATED_MESSAGE_BYTES - ENCAPSULATION_OVERHEAD_BYTES;
 const V1_MAX_BUFFER_SIZE: usize = 65536;
+
+/// Frames returned by one queue mailbox read.
+const K_FRAMES_PER_RESPONSE: usize = 4;
+
+/// The fixed size of every encapsulated queue read response.
+///
+/// A page of [`K_FRAMES_PER_RESPONSE`] frames cannot fit the standard
+/// [`ENCAPSULATED_MESSAGE_BYTES`] response, so queue reads form their
+/// own fixed size class. Padding every queue read to the same length
+/// keeps the response independent of how many real frames it carries:
+/// the transporting relay learns that a queue read happened, but never
+/// how full the queue is. All other responses, including queue appends,
+/// keep the standard v2 mailbox size.
+const ENCAPSULATED_QUEUE_RESPONSE_BYTES: usize = 4 * ENCAPSULATED_MESSAGE_BYTES;
+
+// A queue response page plus bhttp framing and headers must fit within
+// the padded response, with slack for the header block.
+const _: () = assert!(
+    K_FRAMES_PER_RESPONSE * FRAME_BYTES + 256
+        <= ENCAPSULATED_QUEUE_RESPONSE_BYTES - ENCAPSULATION_OVERHEAD_BYTES
+);
+
+/// Response header carrying the index to resume reading a queue from.
+const NEXT_INDEX_HEADER: &str = "x-pj-next";
+
+/// Blobs per bulletin board read response.
+const K_BLOBS_PER_RESPONSE: usize = 16;
+
+/// The fixed size of every encapsulated board read response.
+///
+/// A page of [`K_BLOBS_PER_RESPONSE`] blobs cannot fit the standard
+/// response, so board reads form their own fixed size class with the
+/// same rationale as queue reads: length reveals only the operation
+/// class, never how many live entries the page carries.
+const ENCAPSULATED_BOARD_RESPONSE_BYTES: usize = 2 * ENCAPSULATED_MESSAGE_BYTES;
+
+// A board page plus bhttp framing and headers must fit within the
+// padded response, with slack for the header block.
+const _: () = assert!(
+    K_BLOBS_PER_RESPONSE * BLOB_BYTES + 256
+        <= ENCAPSULATED_BOARD_RESPONSE_BYTES - ENCAPSULATION_OVERHEAD_BYTES
+);
 
 const V1_REJECT_RES_JSON: &str =
     r#"{{"errorCode": "original-psbt-rejected ", "message": "Body is not a string"}}"#;
@@ -88,12 +134,28 @@ fn parse_address_lines(text: &str) -> std::collections::HashSet<bitcoin::ScriptB
         .collect()
 }
 
+/// Bulletin board configuration: storage plus the admission mechanism
+/// gating submissions.
+#[derive(Clone)]
+pub struct Board {
+    store: BoardStore,
+    admission: Arc<dyn Admission>,
+}
+
+impl Board {
+    pub fn new(store: BoardStore, admission: Arc<dyn Admission>) -> Self {
+        Self { store, admission }
+    }
+}
+
 #[derive(Clone)]
 pub struct Service<D: Db> {
     db: D,
     ohttp: ohttp::Server,
     sentinel_tag: SentinelTag,
     v1: Option<V1>,
+    queues: Option<QueueStore>,
+    board: Option<Board>,
 }
 
 impl<D: Db, B> tower::Service<Request<B>> for Service<D>
@@ -118,7 +180,23 @@ where
 
 impl<D: Db> Service<D> {
     pub fn new(db: D, ohttp: ohttp::Server, sentinel_tag: SentinelTag, v1: Option<V1>) -> Self {
-        Self { db, ohttp, sentinel_tag, v1 }
+        Self { db, ohttp, sentinel_tag, v1, queues: None, board: None }
+    }
+
+    /// Serve queue mailbox endpoints (`/q/{id}`) from `queues`. Without
+    /// this, queue routes do not exist and requests to them return the
+    /// same responses they did before queues were introduced.
+    pub fn with_queues(mut self, queues: QueueStore) -> Self {
+        self.queues = Some(queues);
+        self
+    }
+
+    /// Serve bulletin board endpoints (`/board`). Without this, board
+    /// routes do not exist and requests to them return the same
+    /// responses they did before the board was introduced.
+    pub fn with_board(mut self, board: Board) -> Self {
+        self.board = Some(board);
+        self
     }
 
     async fn serve_request<B>(&self, req: Request<B>) -> Result<Response<Body>>
@@ -220,6 +298,11 @@ impl<D: Db> Service<D> {
         }
         let request = http_req.body(full(body))?;
 
+        // The response size class is a function of the requested route,
+        // fixed before the request is handled so it cannot depend on the
+        // outcome.
+        let encapsulated_response_bytes = self.encapsulated_response_bytes(&request);
+
         // Handle decapsulated request
         let response = self.handle_decapsulated_request(request).await?;
 
@@ -242,12 +325,31 @@ impl<D: Db> Service<D> {
         bhttp_res
             .write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_bytes)
             .map_err(|e| HandlerError::InternalServerError(e.into()))?;
-        bhttp_bytes.resize(BHTTP_REQ_BYTES, 0);
+        bhttp_bytes.resize(encapsulated_response_bytes - ENCAPSULATION_OVERHEAD_BYTES, 0);
         let ohttp_res = res_ctx
             .encapsulate(&bhttp_bytes)
             .map_err(|e| HandlerError::InternalServerError(e.into()))?;
-        assert!(ohttp_res.len() == ENCAPSULATED_MESSAGE_BYTES, "Unexpected OHTTP response size");
+        assert!(ohttp_res.len() == encapsulated_response_bytes, "Unexpected OHTTP response size");
         Ok(Response::new(full(ohttp_res)))
+    }
+
+    /// The fixed size to pad the encapsulated response of a decapsulated
+    /// request to.
+    ///
+    /// Only queue reads use a larger class than the standard
+    /// [`ENCAPSULATED_MESSAGE_BYTES`], because their page of frames does
+    /// not fit it. When queues are not enabled the standard size applies
+    /// everywhere, exactly as before queues existed.
+    fn encapsulated_response_bytes<B>(&self, req: &Request<B>) -> usize {
+        let path = req.uri().path();
+        let path_segments: Vec<&str> = path.split('/').collect();
+        match (req.method(), path_segments.as_slice()) {
+            (&Method::GET, &["", "q", _]) if self.queues.is_some() =>
+                ENCAPSULATED_QUEUE_RESPONSE_BYTES,
+            (&Method::GET, &["", "board"]) if self.board.is_some() =>
+                ENCAPSULATED_BOARD_RESPONSE_BYTES,
+            _ => ENCAPSULATED_MESSAGE_BYTES,
+        }
     }
 
     async fn handle_decapsulated_request(
@@ -255,9 +357,23 @@ impl<D: Db> Service<D> {
         req: Request<Body>,
     ) -> Result<Response<Body>, HandlerError> {
         let path = req.uri().path().to_string();
+        let query = req.uri().query().unwrap_or_default().to_string();
         let (parts, body) = req.into_parts();
         let path_segments: Vec<&str> = path.split('/').collect();
         match (parts.method, path_segments.as_slice()) {
+            (Method::POST, &["", "q", id]) => match &self.queues {
+                Some(queues) => self.post_queue(queues, id, body).await,
+                None => Ok(not_found()),
+            },
+            (Method::GET, &["", "q", id]) => match &self.queues {
+                Some(queues) => self.get_queue(queues, id, &query).await,
+                None => Ok(not_found()),
+            },
+            // Without a board, "board" falls through to the mailbox
+            // arms below, which reject it as an invalid id exactly as
+            // they did before the board existed.
+            (Method::POST, &["", "board"]) if self.board.is_some() => self.post_board(body).await,
+            (Method::GET, &["", "board"]) if self.board.is_some() => self.get_board(&query).await,
             (Method::POST, &["", id]) => self.post_mailbox(id, body).await,
             (Method::GET, &["", id]) => self.get_mailbox(id).await,
             (Method::PUT, &["", id]) if self.v1.is_some() => self.put_payjoin_v1(id, body).await,
@@ -286,6 +402,157 @@ impl<D: Db> Service<D> {
         let id = ShortId::from_str(id)?;
         let timeout_response = Response::builder().status(StatusCode::ACCEPTED).body(empty())?;
         handle_peek(self.db.wait_for_v2_payload(&id).await, timeout_response)
+    }
+
+    /// Route POST /q/{id}: append one frame to a queue mailbox.
+    ///
+    /// Queue endpoints report client errors as inner statuses so they
+    /// stay encapsulated: a rejected request produces the same
+    /// fixed-size response as an accepted one on the wire. Only
+    /// internal failures escape as unencapsulated errors.
+    async fn post_queue(
+        &self,
+        queues: &QueueStore,
+        id: &str,
+        body: Body,
+    ) -> Result<Response<Body>, HandlerError> {
+        let Ok(id) = ShortId::from_str(id) else {
+            return inner_status(StatusCode::BAD_REQUEST);
+        };
+        let frame = body
+            .collect()
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?
+            .to_bytes();
+        match queues.append(&id, &frame).await {
+            Ok(()) => inner_status(StatusCode::OK),
+            Err(QueueError::InvalidFrameSize(len)) => {
+                warn!("Queue frame must be exactly {FRAME_BYTES} bytes, got {len}");
+                inner_status(StatusCode::BAD_REQUEST)
+            }
+            Err(QueueError::QueueFull) => inner_status(StatusCode::TOO_MANY_REQUESTS),
+            Err(QueueError::OverCapacity) => inner_status(StatusCode::SERVICE_UNAVAILABLE),
+            Err(QueueError::IO(e)) => Err(HandlerError::InternalServerError(e.into())),
+        }
+    }
+
+    /// Route GET /q/{id}?after=n: read a fixed-size page of frames
+    /// starting at frame index n.
+    ///
+    /// The page always spans [`K_FRAMES_PER_RESPONSE`] frame slots, with
+    /// unused slots zero-filled so the inner body length is constant. An
+    /// all-zero slot cannot be mistaken for content: readers recognize
+    /// their frames by HPKE trial decryption, which a zero-filled slot
+    /// fails. The `x-pj-next` header carries the index to resume from,
+    /// so a reader polls with `after` set to the last value it received.
+    async fn get_queue(
+        &self,
+        queues: &QueueStore,
+        id: &str,
+        query: &str,
+    ) -> Result<Response<Body>, HandlerError> {
+        let Ok(id) = ShortId::from_str(id) else {
+            return inner_status(StatusCode::BAD_REQUEST);
+        };
+        let Some(after) = parse_index_param(query, "after") else {
+            return inner_status(StatusCode::BAD_REQUEST);
+        };
+        let frames = queues
+            .read(&id, after, K_FRAMES_PER_RESPONSE)
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?;
+        let next = after + frames.len() as u64;
+
+        let mut page = Vec::with_capacity(K_FRAMES_PER_RESPONSE * FRAME_BYTES);
+        for frame in &frames {
+            page.extend_from_slice(frame);
+        }
+        page.resize(K_FRAMES_PER_RESPONSE * FRAME_BYTES, 0);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(NEXT_INDEX_HEADER, next)
+            .body(full(page))?)
+    }
+
+    /// Route POST /board: submit one blob, gated by admission control.
+    ///
+    /// The body is `nonce || blob`, fixed at
+    /// `POW_NONCE_BYTES + BLOB_BYTES` so every submission looks
+    /// identical on the wire. As with queue endpoints, client errors are
+    /// inner statuses. A submission whose admission tag was already
+    /// recorded is acknowledged without being stored again, so a client
+    /// that never saw its response (e.g. an OHTTP retransmit) can retry
+    /// without duplicating its entry, mirroring idempotent mailbox
+    /// posts.
+    async fn post_board(&self, body: Body) -> Result<Response<Body>, HandlerError> {
+        let board = self.board.as_ref().expect("router guards on board presence");
+        let submission = body
+            .collect()
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?
+            .to_bytes();
+        if submission.len() != POW_NONCE_BYTES + BLOB_BYTES {
+            return inner_status(StatusCode::BAD_REQUEST);
+        }
+        let tag = match board.admission.verify(&submission).await {
+            Ok(tag) => tag,
+            Err(Rejection::Malformed) => return inner_status(StatusCode::BAD_REQUEST),
+            Err(Rejection::InsufficientWork) => return inner_status(StatusCode::TOO_MANY_REQUESTS),
+        };
+        match board.admission.seen(&tag).await {
+            Ok(false) => {}
+            Ok(true) => return inner_status(StatusCode::OK),
+            Err(e) => return Err(HandlerError::InternalServerError(e.into())),
+        }
+        match board.store.post(&submission[POW_NONCE_BYTES..]).await {
+            Ok(_seq) => {}
+            Err(BoardError::InvalidBlobSize(_)) => return inner_status(StatusCode::BAD_REQUEST),
+            Err(BoardError::OverCapacity) => return inner_status(StatusCode::SERVICE_UNAVAILABLE),
+            Err(BoardError::IO(e)) => return Err(HandlerError::InternalServerError(e.into())),
+        }
+        // Record the tag only now that the entry is stored, so a
+        // submission rejected above (e.g. board full) can be retried
+        // with the same proof.
+        board
+            .admission
+            .record_success(&tag)
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?;
+        inner_status(StatusCode::OK)
+    }
+
+    /// Route GET /board?since=n: read a fixed-size page of entries with
+    /// sequence numbers at or above n.
+    ///
+    /// The page always spans [`K_BLOBS_PER_RESPONSE`] blob slots in
+    /// sequence order, zero-filled past the last live entry; readers
+    /// recognize entries addressed to them by trial decryption. The
+    /// `x-pj-next` header carries the sequence number to resume from.
+    /// Expired entries leave gaps in the sequence that readers cannot
+    /// observe.
+    async fn get_board(&self, query: &str) -> Result<Response<Body>, HandlerError> {
+        let board = self.board.as_ref().expect("router guards on board presence");
+        let Some(since) = parse_index_param(query, "since") else {
+            return inner_status(StatusCode::BAD_REQUEST);
+        };
+        let entries = board
+            .store
+            .read(since, K_BLOBS_PER_RESPONSE)
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?;
+        let next = entries.last().map(|(seq, _)| seq + 1).unwrap_or(since);
+
+        let mut page = Vec::with_capacity(K_BLOBS_PER_RESPONSE * BLOB_BYTES);
+        for (_seq, blob) in &entries {
+            page.extend_from_slice(blob);
+        }
+        page.resize(K_BLOBS_PER_RESPONSE * BLOB_BYTES, 0);
+
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(NEXT_INDEX_HEADER, next)
+            .body(full(page))?)
     }
 
     /// Screen a V1 PSBT body against the address blocklist.
@@ -404,6 +671,23 @@ impl<D: Db> Service<D> {
         res.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(res)
     }
+}
+
+/// An empty inner response carrying only a status code, for handlers
+/// whose errors must remain encapsulated.
+fn inner_status(status: StatusCode) -> Result<Response<Body>, HandlerError> {
+    Ok(Response::builder().status(status).body(empty())?)
+}
+
+/// Parse a non-negative integer query parameter: zero when absent,
+/// `None` when present but malformed.
+fn parse_index_param(query: &str, name: &str) -> Option<u64> {
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix(name).and_then(|rest| rest.strip_prefix('=')) {
+            return value.parse().ok();
+        }
+    }
+    Some(0)
 }
 
 fn handle_peek<E: SendableError>(
