@@ -4,6 +4,8 @@
 
 pub mod s1_static_reuse;
 pub mod s2_async_board;
+pub mod s3_floor;
+pub mod s4_token_upgrade;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
