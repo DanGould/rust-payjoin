@@ -3,16 +3,19 @@
 //! Mailbox and queue writes are implicitly gated by their ids: only a
 //! party that learns an id can write to it. An endpoint that accepts
 //! submissions from anyone has no such secret, so submissions pass an
-//! [`Admission`] check instead. Proof of work is the first mechanism;
-//! the trait keeps routing code independent of which mechanism an
-//! operator deploys, so alternatives (e.g. an external verification
-//! service) can be substituted without touching the endpoints.
+//! [`Admission`] check instead. Proof of work admits strangers at a
+//! computational cost; owner-minted tokens admit senders the mailbox
+//! owner chose, for free. The trait keeps routing code independent of
+//! which mechanism an operator deploys, so alternatives (e.g. an
+//! external verification service) can be substituted without touching
+//! the endpoints.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bitcoin::hashes::{sha256d, Hash};
+use bitcoin::hashes::{sha256, sha256d, Hash};
+use bitcoin::secp256k1::{ecdsa, Message, PublicKey, Secp256k1, SecretKey, VerifyOnly};
 use futures::future::BoxFuture;
 use hex::{DisplayHex, FromHex};
 use tokio::io::{self, AsyncWriteExt};
@@ -25,6 +28,9 @@ pub enum Rejection {
     Malformed,
     /// The submission does not carry sufficient work.
     InsufficientWork,
+    /// The submission does not prove authorization by the owner of the
+    /// resource it targets.
+    Unauthorized,
 }
 
 /// An admission mechanism for submissions that anyone may make.
@@ -112,6 +118,131 @@ fn leading_zero_bits(bytes: &[u8]) -> u32 {
         }
     }
     bits
+}
+
+/// The nonce length of a queue token. The nonce is the token's one-show
+/// identity for replay detection.
+pub const TOKEN_NONCE_BYTES: usize = 16;
+
+/// The serialized length of a queue token: nonce, compressed secp256k1
+/// public key, then compact ECDSA signature.
+pub const TOKEN_BYTES: usize = TOKEN_NONCE_BYTES + TOKEN_PUBKEY_BYTES + TOKEN_SIG_BYTES;
+
+const TOKEN_PUBKEY_BYTES: usize = 33;
+const TOKEN_SIG_BYTES: usize = 64;
+
+/// The length of a queue mailbox id, a truncated SHA256 of the owner's
+/// compressed public key (see [`payjoin::directory::ShortId`]).
+const MAILBOX_ID_BYTES: usize = 8;
+
+/// Domain separation prefix of the token signature hash, so a token
+/// signature cannot be confused with any other signature by the same
+/// key.
+const TOKEN_SIGNING_DOMAIN: &[u8] = b"payjoin queue token v0";
+
+/// Owner-minted token admission for queue appends.
+///
+/// A queue mailbox id is the truncated SHA256 of a compressed secp256k1
+/// public key, so the holder of the matching private key can prove it
+/// owns the mailbox while anyone else knows only the public id. A token
+/// is `nonce || pubkey || signature`: the owner signs the domain-tagged
+/// hash of the mailbox id and a fresh nonce ([`mint_queue_token`]) and
+/// hands the token to a sender of its choosing. An append is admitted
+/// iff the token's public key hashes to the target mailbox id and the
+/// signature verifies, with no receiver online and no per-request
+/// callback. A token does not commit to the frame it admits, because it
+/// is minted before the frame exists.
+///
+/// The verification input is the target mailbox id followed by the
+/// token, as assembled by the queue route; a token presented for any
+/// other mailbox fails the id binding. The replay tag is the mailbox id
+/// and nonce together, so each token admits exactly one append and
+/// replay history is scoped to its mailbox.
+///
+/// Key-reuse caveat: a BIP 77 receiver's mailbox id is derived from its
+/// HPKE encryption key, so this scheme signs with that same key. Using
+/// one secp256k1 key for both ECDSA and HPKE is accepted only for this
+/// default-off, pre-standardization feature; production deployments
+/// should advertise a dedicated token-signing key.
+pub struct TokenAdmission {
+    secp: Secp256k1<VerifyOnly>,
+    dedupe: Option<DedupeSet>,
+}
+
+impl TokenAdmission {
+    pub fn new(dedupe: Option<DedupeSet>) -> Self {
+        Self { secp: Secp256k1::verification_only(), dedupe }
+    }
+}
+
+/// The token signature hash: a domain-tagged SHA256 of the mailbox id
+/// and nonce.
+fn token_sighash(mailbox_id: &[u8], nonce: &[u8]) -> Message {
+    let mut preimage =
+        Vec::with_capacity(TOKEN_SIGNING_DOMAIN.len() + MAILBOX_ID_BYTES + TOKEN_NONCE_BYTES);
+    preimage.extend_from_slice(TOKEN_SIGNING_DOMAIN);
+    preimage.extend_from_slice(mailbox_id);
+    preimage.extend_from_slice(nonce);
+    Message::from_digest(sha256::Hash::hash(&preimage).to_byte_array())
+}
+
+/// Mint a token authorizing one append to the queue mailbox of `key`.
+///
+/// The mailbox id is derived from the key's public key, so a token
+/// cannot be minted for a mailbox the signer does not own. The nonce is
+/// the token's one-show identity: mint every token with a fresh random
+/// nonce, or the directory will admit only one of them.
+pub fn mint_queue_token(key: &SecretKey, nonce: [u8; TOKEN_NONCE_BYTES]) -> [u8; TOKEN_BYTES] {
+    let secp = Secp256k1::signing_only();
+    let pubkey = key.public_key(&secp).serialize();
+    let mailbox_id = &sha256::Hash::hash(&pubkey).to_byte_array()[..MAILBOX_ID_BYTES];
+    let sig = secp.sign_ecdsa(&token_sighash(mailbox_id, &nonce), key).serialize_compact();
+    let mut token = [0u8; TOKEN_BYTES];
+    token[..TOKEN_NONCE_BYTES].copy_from_slice(&nonce);
+    token[TOKEN_NONCE_BYTES..TOKEN_NONCE_BYTES + TOKEN_PUBKEY_BYTES].copy_from_slice(&pubkey);
+    token[TOKEN_NONCE_BYTES + TOKEN_PUBKEY_BYTES..].copy_from_slice(&sig);
+    token
+}
+
+impl Admission for TokenAdmission {
+    fn verify<'a>(&'a self, body: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, Rejection>> {
+        Box::pin(async move {
+            if body.len() != MAILBOX_ID_BYTES + TOKEN_BYTES {
+                return Err(Rejection::Malformed);
+            }
+            let (mailbox_id, token) = body.split_at(MAILBOX_ID_BYTES);
+            let (nonce, rest) = token.split_at(TOKEN_NONCE_BYTES);
+            let (pubkey_bytes, sig_bytes) = rest.split_at(TOKEN_PUBKEY_BYTES);
+            let pubkey = PublicKey::from_slice(pubkey_bytes).map_err(|_| Rejection::Malformed)?;
+            let sig =
+                ecdsa::Signature::from_compact(sig_bytes).map_err(|_| Rejection::Malformed)?;
+            if &sha256::Hash::hash(pubkey_bytes).to_byte_array()[..MAILBOX_ID_BYTES] != mailbox_id {
+                return Err(Rejection::Unauthorized);
+            }
+            self.secp
+                .verify_ecdsa(&token_sighash(mailbox_id, nonce), &sig, &pubkey)
+                .map_err(|_| Rejection::Unauthorized)?;
+            Ok(body[..MAILBOX_ID_BYTES + TOKEN_NONCE_BYTES].to_vec())
+        })
+    }
+
+    fn seen<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<bool>> {
+        Box::pin(async move {
+            match &self.dedupe {
+                Some(dedupe) => dedupe.contains(tag).await,
+                None => Ok(false),
+            }
+        })
+    }
+
+    fn record_success<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            match &self.dedupe {
+                Some(dedupe) => dedupe.insert(tag).await,
+                None => Ok(()),
+            }
+        })
+    }
 }
 
 /// A persistent set of admitted tags, for replay detection.
@@ -293,6 +424,130 @@ mod tests {
         assert!(!pow.seen(&tag).await?, "tag is unseen until recorded");
         pow.record_success(&tag).await?;
         assert!(pow.seen(&tag).await?, "recorded tag is seen");
+
+        Ok(())
+    }
+
+    fn test_key(fill: u8) -> SecretKey {
+        SecretKey::from_slice(&[fill; 32]).expect("nonzero constant is a valid key")
+    }
+
+    fn mailbox_id(key: &SecretKey) -> [u8; MAILBOX_ID_BYTES] {
+        let pubkey = key.public_key(&Secp256k1::signing_only()).serialize();
+        sha256::Hash::hash(&pubkey).to_byte_array()[..MAILBOX_ID_BYTES]
+            .try_into()
+            .expect("id length matches")
+    }
+
+    /// The verification input the queue route assembles: mailbox id
+    /// followed by the token.
+    fn token_input(mailbox_id: &[u8], token: &[u8]) -> Vec<u8> {
+        let mut input = mailbox_id.to_vec();
+        input.extend_from_slice(token);
+        input
+    }
+
+    const TEST_NONCE: [u8; TOKEN_NONCE_BYTES] = [0xA5; TOKEN_NONCE_BYTES];
+
+    #[tokio::test]
+    async fn test_token_from_owner_is_admitted() {
+        let admission = TokenAdmission::new(None);
+        let owner = test_key(0x11);
+        let token = mint_queue_token(&owner, TEST_NONCE);
+
+        let id = mailbox_id(&owner);
+        let tag = admission
+            .verify(&token_input(&id, &token))
+            .await
+            .expect("owner-minted token should be admitted");
+        assert_eq!(tag, token_input(&id, &TEST_NONCE), "tag is the mailbox id and nonce");
+    }
+
+    #[tokio::test]
+    async fn test_token_for_other_mailbox_is_rejected() {
+        // A stranger holds a perfectly valid token for their own
+        // mailbox; presenting it for someone else's must fail the id
+        // binding.
+        let admission = TokenAdmission::new(None);
+        let stranger = test_key(0x22);
+        let token = mint_queue_token(&stranger, TEST_NONCE);
+
+        let victim_id = mailbox_id(&test_key(0x11));
+        assert_eq!(
+            admission.verify(&token_input(&victim_id, &token)).await,
+            Err(Rejection::Unauthorized)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_signed_by_wrong_key_is_rejected() {
+        // The token names the owner's public key, so the id binding
+        // holds, but the signature was made by a different key.
+        let admission = TokenAdmission::new(None);
+        let owner = test_key(0x11);
+        let forger = test_key(0x22);
+        let id = mailbox_id(&owner);
+
+        let secp = Secp256k1::signing_only();
+        let sig = secp.sign_ecdsa(&token_sighash(&id, &TEST_NONCE), &forger).serialize_compact();
+        let mut token = TEST_NONCE.to_vec();
+        token.extend_from_slice(&owner.public_key(&secp).serialize());
+        token.extend_from_slice(&sig);
+
+        assert_eq!(admission.verify(&token_input(&id, &token)).await, Err(Rejection::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn test_token_with_altered_nonce_is_rejected() {
+        // The signature commits to the nonce, so a spent token cannot
+        // be revived by re-randomizing its replay identity.
+        let admission = TokenAdmission::new(None);
+        let owner = test_key(0x11);
+        let mut token = mint_queue_token(&owner, TEST_NONCE);
+        token[0] ^= 0x01;
+
+        assert_eq!(
+            admission.verify(&token_input(&mailbox_id(&owner), &token)).await,
+            Err(Rejection::Unauthorized)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_malformed_is_rejected() {
+        let admission = TokenAdmission::new(None);
+        let owner = test_key(0x11);
+        let id = mailbox_id(&owner);
+        let token = mint_queue_token(&owner, TEST_NONCE);
+
+        for len in [0, MAILBOX_ID_BYTES + TOKEN_BYTES - 1, MAILBOX_ID_BYTES + TOKEN_BYTES + 1] {
+            assert_eq!(
+                admission.verify(&vec![0u8; len]).await,
+                Err(Rejection::Malformed),
+                "input of {len} bytes must be malformed"
+            );
+        }
+
+        // A zeroed public key field is not a curve point.
+        let mut zeroed_key = token_input(&id, &token);
+        zeroed_key[MAILBOX_ID_BYTES + TOKEN_NONCE_BYTES..][..TOKEN_PUBKEY_BYTES].fill(0);
+        assert_eq!(admission.verify(&zeroed_key).await, Err(Rejection::Malformed));
+    }
+
+    #[tokio::test]
+    async fn test_token_dedupe_via_trait_hooks() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let set = DedupeSet::open(dir.path().join("admitted.tags")).await?;
+        let admission = TokenAdmission::new(Some(set));
+        let owner = test_key(0x11);
+        let token = mint_queue_token(&owner, TEST_NONCE);
+
+        let tag = admission
+            .verify(&token_input(&mailbox_id(&owner), &token))
+            .await
+            .expect("owner-minted token should be admitted");
+        assert!(!admission.seen(&tag).await?, "tag is unseen until recorded");
+        admission.record_success(&tag).await?;
+        assert!(admission.seen(&tag).await?, "recorded tag is seen");
 
         Ok(())
     }

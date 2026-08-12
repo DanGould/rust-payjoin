@@ -499,6 +499,7 @@ impl<D: Db> Service<D> {
             Ok(tag) => tag,
             Err(Rejection::Malformed) => return inner_status(StatusCode::BAD_REQUEST),
             Err(Rejection::InsufficientWork) => return inner_status(StatusCode::TOO_MANY_REQUESTS),
+            Err(Rejection::Unauthorized) => return inner_status(StatusCode::UNAUTHORIZED),
         };
         match board.admission.seen(&tag).await {
             Ok(false) => {}
