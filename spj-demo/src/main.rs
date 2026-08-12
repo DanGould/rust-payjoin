@@ -5,14 +5,20 @@
 use std::path::Path;
 
 use spj_demo::narrate::Narrator;
+use spj_demo::scenes;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("artifacts");
     let narrator = Narrator::create(&artifacts)?;
     narrator.header(
         "STATIC PAYJOIN — recorded property demonstration",
         "regtest, in-process directory, real wire bytes",
     );
-    narrator.finish()?;
+
+    let mut demo = scenes::setup(narrator).await?;
+    scenes::s1_static_reuse::run(&mut demo).await?;
+
+    demo.narrator.finish()?;
     Ok(())
 }

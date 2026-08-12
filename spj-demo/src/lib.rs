@@ -16,5 +16,6 @@
 pub mod narrate;
 pub mod net;
 pub mod persist;
+pub mod scenes;
 pub mod sp;
 pub mod wallet;
