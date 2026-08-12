@@ -13,6 +13,14 @@
 # Request timeout in seconds
 # timeout = 30
 
+# Serve queue mailbox endpoints (/q/{id}) through the OHTTP gateway.
+# Off by default; enabling only adds routes.
+# queue_mailboxes = false
+
+# Maximum frames one queue mailbox holds. Appends beyond the cap are
+# rejected until the queue expires.
+# queue_frame_cap = 64
+
 # --- Telemetry (requires `telemetry` feature) ---
 # [telemetry]
 

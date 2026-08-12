@@ -5,6 +5,9 @@ use config::{ConfigError, File};
 use serde::Deserialize;
 use tokio_listener::ListenerAddress;
 
+/// Default maximum frames per queue mailbox.
+const DEFAULT_QUEUE_FRAME_CAP: usize = 64;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -14,6 +17,13 @@ pub struct Config {
     pub timeout: Duration,
     #[serde(deserialize_with = "deserialize_duration_secs")]
     pub mailbox_ttl: Duration,
+    /// Serve queue mailbox endpoints (`/q/{id}`) through the OHTTP
+    /// gateway. Off by default. Enabling only adds routes; existing
+    /// endpoint behavior is unchanged.
+    pub queue_mailboxes: bool,
+    /// Maximum frames one queue mailbox holds. Appends beyond the cap
+    /// are rejected until the queue expires.
+    pub queue_frame_cap: usize,
     pub v1: Option<V1Config>,
     #[cfg(feature = "telemetry")]
     pub telemetry: Option<TelemetryConfig>,
@@ -88,6 +98,8 @@ impl Default for Config {
             storage_dir: PathBuf::from("./data"),
             timeout: Duration::from_secs(30),
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
+            queue_mailboxes: false,
+            queue_frame_cap: DEFAULT_QUEUE_FRAME_CAP,
             v1: None,
             #[cfg(feature = "telemetry")]
             telemetry: None,
@@ -119,6 +131,8 @@ impl Config {
             storage_dir,
             timeout,
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
+            queue_mailboxes: false,
+            queue_frame_cap: DEFAULT_QUEUE_FRAME_CAP,
             v1,
             #[cfg(feature = "telemetry")]
             telemetry: None,

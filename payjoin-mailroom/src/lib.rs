@@ -263,7 +263,18 @@ async fn init_directory(
     } else {
         None
     };
-    Ok(crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1))
+    let mut service = crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1);
+    if config.queue_mailboxes {
+        let queues = crate::db::queues::QueueStore::init(
+            config.storage_dir.join("queues"),
+            config.mailbox_ttl,
+            config.queue_frame_cap,
+        )
+        .await?;
+        queues.spawn_background_prune().await;
+        service = service.with_queues(queues);
+    }
+    Ok(service)
 }
 
 #[cfg(feature = "access-control")]
