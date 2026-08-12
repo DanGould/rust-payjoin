@@ -18,6 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut demo = scenes::setup(narrator).await?;
     scenes::s1_static_reuse::run(&mut demo).await?;
+    scenes::s2_async_board::run(&mut demo).await?;
 
     demo.narrator.finish()?;
     Ok(())

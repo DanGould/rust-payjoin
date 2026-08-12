@@ -3,6 +3,7 @@
 //! policy. Scenes stay short by leaning on these.
 
 pub mod s1_static_reuse;
+pub mod s2_async_board;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -65,6 +66,10 @@ pub struct Demo {
     /// Demo-side repeat-sender tokens. Production gates these at the
     /// mailroom queue; here the demo enforces them at delivery time.
     pub tokens: HashSet<String>,
+    /// Monotonic id giving every payment a unique session-log path.
+    payment_seq: std::cell::Cell<u64>,
+    /// Monotonic id for each freshly published static endpoint.
+    endpoint_seq: std::cell::Cell<u64>,
 }
 
 pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
@@ -91,29 +96,9 @@ pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
     let sp_address = sp_keys.address(&secp);
 
     let state_dir = tempfile::tempdir()?.keep();
-    let receiver_log =
-        JsonlPersister::<ReceiverStaticEvent>::new(state_dir.join("receiver-static.jsonl"));
-
-    // The address slot of the published string holds a placeholder
-    // derived from the spend key; each sender replaces it with the
-    // output they derive. A production string would carry the silent
-    // payment address itself.
-    let placeholder =
-        Address::p2tr(&secp, sp_address.spend.x_only_public_key().0, None, Network::Regtest);
-    let ohttp_keys = OhttpKeys::decode(mailroom.ohttp_keys())?;
-    let receiver = StaticReceiverBuilder::new(
-        placeholder,
-        DIRECTORY_URL,
-        ohttp_keys,
-        payjoin::HpkeKeyPair::gen_keypair(),
-    )?
-    .build()
-    .save(&receiver_log)?;
-    let static_uri = receiver.pj_uri().to_string();
-
     let scan_from_height = block_count(&bitcoind.client)?;
 
-    Ok(Demo {
+    let mut demo = Demo {
         narrator,
         mailroom,
         secp,
@@ -122,13 +107,17 @@ pub async fn setup(narrator: Narrator) -> Result<Demo, BoxError> {
         receiver_wallet,
         sp_keys,
         sp_address,
-        static_uri,
-        receiver_log,
+        static_uri: String::new(),
+        receiver_log: JsonlPersister::new(state_dir.join("receiver-0.jsonl")),
         state_dir,
         seen_outpoints: HashSet::new(),
         scan_from_height,
         tokens: HashSet::new(),
-    })
+        payment_seq: std::cell::Cell::new(0),
+        endpoint_seq: std::cell::Cell::new(0),
+    };
+    demo.publish_endpoint()?;
+    Ok(demo)
 }
 
 impl Demo {
@@ -173,6 +162,41 @@ impl Demo {
         let txid = tx.compute_txid();
         self.miner.send_raw_transaction(tx)?;
         Ok(txid)
+    }
+
+    fn next_payment_id(&self) -> u64 {
+        let id = self.payment_seq.get();
+        self.payment_seq.set(id + 1);
+        id
+    }
+
+    /// Publish a fresh static endpoint: a new receiver HPKE key, hence a
+    /// new queue, on its own session log. Scenes call this so one
+    /// scene's queue traffic never leaks into the next. The silent
+    /// payment keys stay fixed, since they are the receiver's on-chain
+    /// identity, not per-endpoint.
+    pub fn publish_endpoint(&mut self) -> Result<(), BoxError> {
+        let id = self.endpoint_seq.get();
+        self.endpoint_seq.set(id + 1);
+        self.receiver_log =
+            JsonlPersister::new(self.state_dir.join(format!("receiver-{id}.jsonl")));
+        let placeholder = Address::p2tr(
+            &self.secp,
+            self.sp_address.spend.x_only_public_key().0,
+            None,
+            Network::Regtest,
+        );
+        let ohttp_keys = OhttpKeys::decode(self.mailroom.ohttp_keys())?;
+        let receiver = StaticReceiverBuilder::new(
+            placeholder,
+            DIRECTORY_URL,
+            ohttp_keys,
+            payjoin::HpkeKeyPair::gen_keypair(),
+        )?
+        .build()
+        .save(&self.receiver_log)?;
+        self.static_uri = receiver.pj_uri().to_string();
+        Ok(())
     }
 }
 
@@ -227,9 +251,11 @@ pub async fn send_message_a(
         FeeRate::BROADCAST_MIN,
     )?;
 
-    let log = JsonlPersister::<SenderStaticEvent>::new(
-        demo.state_dir.join(format!("{}-{}.jsonl", wallet.name, outpoint.vout)),
-    );
+    let log = JsonlPersister::<SenderStaticEvent>::new(demo.state_dir.join(format!(
+        "sender-{}-{}.jsonl",
+        wallet.name,
+        demo.next_payment_id()
+    )));
     let mut builder = StaticSenderBuilder::new(psbt, uri);
     if let Some(patience) = patience {
         builder = builder.with_patience(patience);
