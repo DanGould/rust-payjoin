@@ -1820,6 +1820,31 @@ pub mod test {
         encrypted
     }
 
+    /// Like [`ohttp_response_for`], but carrying `body` as the inner HTTP
+    /// response content, mimicking a mailbox GET result.
+    fn ohttp_response_with_body(req_body: &[u8], status: http::StatusCode, body: &[u8]) -> Vec<u8> {
+        let server = payjoin_test_utils::ohttp_server();
+        let (_, probe_response) = server.decapsulate(req_body).expect("request should decapsulate");
+        let response_overhead =
+            probe_response.encapsulate(&[]).expect("probe should encrypt").len();
+
+        let (_, server_response) =
+            server.decapsulate(req_body).expect("request should decapsulate again");
+        let mut bhttp_response =
+            vec![0u8; crate::directory::ENCAPSULATED_MESSAGE_BYTES - response_overhead];
+        let mut message = bhttp::Message::response(
+            bhttp::StatusCode::try_from(status.as_u16()).expect("status should be valid"),
+        );
+        message.write_content(body);
+        message
+            .write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_response.as_mut_slice())
+            .expect("BHTTP response should encode");
+        let encrypted =
+            server_response.encapsulate(&bhttp_response).expect("response should encrypt");
+        assert_eq!(encrypted.len(), crate::directory::ENCAPSULATED_MESSAGE_BYTES);
+        encrypted
+    }
+
     /// Build a native SegWit (P2WPKH) original/payjoin PSBT pair for tests
     /// that need a txid-stable sender input.
     ///
@@ -2456,6 +2481,30 @@ pub mod test {
 
         assert!(err.api_error_ref().is_some());
         assert_events(&persister, &[], false);
+        Ok(())
+    }
+
+    /// The proposal mailbox ID is derived from a fresh per-session receiver
+    /// key, so only a sender that has seen the payjoin URI can address it.
+    /// A payload there that fails HPKE decryption signals tampering or
+    /// corruption, and the safe response is to abort the session.
+    #[test]
+    fn undecryptable_poll_response_fatally_closes_session() -> Result<(), BoxError> {
+        let receiver = receiver(Initialized {});
+        let (req, ctx) = receiver.create_poll_request(EXAMPLE_URL)?;
+        // Not valid UTF-8, so the payload is treated as encrypted v2 binary;
+        // not a valid HPKE message A, so decryption fails.
+        let garbage = vec![0xff_u8; 100];
+        let response = ohttp_response_with_body(&req.body, http::StatusCode::OK, &garbage);
+        let persister = InMemoryPersister::<SessionEvent>::default();
+
+        let err = receiver
+            .process_response(&response, ctx)
+            .save(&persister)
+            .expect_err("undecryptable payload should be fatal");
+
+        assert!(err.is_fatal());
+        assert_events(&persister, &[SessionEvent::Closed(SessionOutcome::Aborted)], true);
         Ok(())
     }
 
