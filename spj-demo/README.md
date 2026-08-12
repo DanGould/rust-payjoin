@@ -1,0 +1,75 @@
+# spj-demo
+
+A recorded, human-legible demonstration of static payjoin on regtest.
+
+A static payjoin endpoint is one payment string a receiver publishes once and is
+paid over many times, by many senders, without any two payments sharing an
+on-chain address and without the receiver being online when a payment starts.
+Each scene exercises one property end to end against a real `bitcoind` regtest
+node and the real mailroom directory service, and prints a narrated account with
+a property claim and a verdict.
+
+## Run
+
+From the payjoin dev shell (provides `bitcoind` via `BITCOIND_EXE`):
+
+```sh
+nix develop -c cargo run -p spj-demo
+```
+
+Or record a full run into replayable artifacts:
+
+```sh
+nix develop -c ./spj-demo/run.sh
+```
+
+## Artifacts
+
+`run.sh` writes to `spj-demo/artifacts/`:
+
+- `transcript.txt` — the narrated run, plain text. The most quotable form.
+- `session.log` + `session.timing` — a terminal capture. Replay it at the
+  original pace:
+
+  ```sh
+  scriptreplay -t spj-demo/artifacts/session.timing spj-demo/artifacts/session.log
+  ```
+
+- `ledgers.md` — the scene 5 attacker-versus-receiver tables as standalone
+  markdown.
+
+Regtest keys and txids differ every run, so the artifacts are a snapshot of one
+run, not byte-reproducible.
+
+## Scenes
+
+1. **Static reuse without address reuse** — one string paid three times by two
+   senders lands on three distinct taproot outputs; a receiver restored from seed
+   recovers every coin (payjoin outputs by wallet rescan, an unclaimed fallback
+   by silent payment scan).
+2. **Async first contact via the board** — a sender posts while the receiver is
+   offline; the receiver starts later, finds its one notification among decoys,
+   and completes. The directory's whole view is printed.
+3. **The floor** — the receiver never returns; the sender's patience elapses and
+   it broadcasts the original, a plain silent payment. No payment is lost.
+4. **Token upgrade** — a returning sender presents a token and reaches the queue
+   directly, leaving no board entry.
+5. **The spam gauntlet** — one attacker-versus-receiver ledger per spam class.
+
+Two further scenes run on a machine outside this build host's boundary; see
+[`local-zk-scene.md`](local-zk-scene.md): key separation, and board admission by
+a Curve Trees membership credential.
+
+## What is real and what is a stub
+
+- Real: the mailroom directory (queues, board, proof-of-work admission), all
+  OHTTP encapsulation and padding, the static session client, on-chain
+  construction, broadcast, and confirmation.
+- Stub, documented as such in the code and narration: silent payment derivation
+  is done directly with secp256k1 group operations for one output per
+  transaction (`src/sp.rs`), and the returning-sender token in scene 4 is checked
+  in process. Production gates the token at the mailroom queue, which the current
+  feature branches do not yet enforce.
+
+The directory runs in process as a `tower` service, so every wire byte crosses
+the real gateway code without binding a port.
