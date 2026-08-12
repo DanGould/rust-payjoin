@@ -67,6 +67,8 @@ use crate::{ImplementationError, IntoUrl, IntoUrlError, Request, Version};
 
 mod error;
 mod session;
+#[cfg(feature = "_static-session")]
+pub mod static_session;
 
 const SUPPORTED_VERSIONS: &[Version] = &[Version::One, Version::Two];
 
@@ -711,26 +713,7 @@ impl Receiver<Initialized> {
     }
 
     fn unchecked_from_payload(self, payload: &str) -> Result<OriginalPayload, ProtocolError> {
-        let (base64, padded_query) = payload.split_once('\n').unwrap_or_default();
-        let query = padded_query.trim_matches('\0');
-        tracing::trace!("Received query: {query}, base64: {base64}"); // my guess is no \n so default is wrong
-        let (psbt, mut params) = parse_payload(base64, query, SUPPORTED_VERSIONS)
-            .map_err(ProtocolError::OriginalPayload)?;
-
-        // Output substitution must be disabled for V1 sessions in V2 contexts.
-        //
-        // V2 contexts depend on a payjoin directory to store and forward payjoin
-        // proposals. Plaintext V1 proposals are vulnerable to output replacement
-        // attacks by a malicious directory if output substitution is not disabled.
-        // V2 proposals are authenticated and encrypted to prevent such attacks.
-        //
-        // see: https://github.com/bitcoin/bips/blob/master/bip-0078.mediawiki#unsecured-payjoin-server
-        if params.v == Version::One {
-            params.output_substitution = OutputSubstitution::Disabled;
-        }
-
-        let inner = OriginalPayload { psbt, params };
-        Ok(inner)
+        original_payload_from_str(payload)
     }
 
     /// Build a V2 Payjoin URI from the receiver's context
@@ -1680,6 +1663,31 @@ impl Receiver<Monitor> {
 
         MaybeFatalOrSuccessTransition::no_results(self)
     }
+}
+
+/// Parse the plaintext of a retrieved proposal payload: a base64 Original
+/// PSBT, a newline, and the zero-padded BIP 78 parameter query string.
+fn original_payload_from_str(payload: &str) -> Result<OriginalPayload, ProtocolError> {
+    let (base64, padded_query) = payload.split_once('\n').unwrap_or_default();
+    let query = padded_query.trim_matches('\0');
+    tracing::trace!("Received query: {query}, base64: {base64}"); // my guess is no \n so default is wrong
+    let (psbt, mut params) =
+        parse_payload(base64, query, SUPPORTED_VERSIONS).map_err(ProtocolError::OriginalPayload)?;
+
+    // Output substitution must be disabled for V1 sessions in V2 contexts.
+    //
+    // V2 contexts depend on a payjoin directory to store and forward payjoin
+    // proposals. Plaintext V1 proposals are vulnerable to output replacement
+    // attacks by a malicious directory if output substitution is not disabled.
+    // V2 proposals are authenticated and encrypted to prevent such attacks.
+    //
+    // see: https://github.com/bitcoin/bips/blob/master/bip-0078.mediawiki#unsecured-payjoin-server
+    if params.v == Version::One {
+        params.output_substitution = OutputSubstitution::Disabled;
+    }
+
+    let inner = OriginalPayload { psbt, params };
+    Ok(inner)
 }
 
 /// Derive a mailbox endpoint on a directory given a [`ShortId`].

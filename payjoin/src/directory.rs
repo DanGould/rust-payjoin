@@ -2,6 +2,28 @@
 
 pub const ENCAPSULATED_MESSAGE_BYTES: usize = 8192;
 
+/// Size of one Payjoin Directory queue frame: exactly one padded HPKE
+/// message, so a frame is either a complete message A or noise.
+#[cfg(feature = "_static-session")]
+pub const QUEUE_FRAME_BYTES: usize = crate::core::hpke::PADDED_MESSAGE_BYTES;
+
+/// Number of frames in one Payjoin Directory queue page.
+#[cfg(feature = "_static-session")]
+pub const QUEUE_PAGE_FRAMES: usize = 4;
+
+/// Size of a queue `GET` response body: always exactly
+/// [`QUEUE_PAGE_FRAMES`] frames, with slots beyond the frames actually
+/// delivered zero-filled. The fixed size keeps page length from leaking
+/// queue activity, and clients identify their frames by HPKE trial
+/// decryption anyway, so padding needs no explicit framing.
+#[cfg(feature = "_static-session")]
+pub const QUEUE_PAGE_BYTES: usize = QUEUE_FRAME_BYTES * QUEUE_PAGE_FRAMES;
+
+/// Response header on a queue `GET` carrying the frame index to pass as
+/// the `after` query parameter of the next poll.
+#[cfg(feature = "_static-session")]
+pub const QUEUE_NEXT_HEADER: &str = "x-pj-next";
+
 /// A 64-bit identifier used to identify Payjoin Directory entries.
 ///
 /// ShortId is derived from a truncated SHA256 hash of a compressed public key. While SHA256 is used

@@ -30,11 +30,20 @@ pub(crate) fn ohttp_encapsulate(
         }
         authority.into_bytes()
     };
+    let mut path_and_query = url.path().as_bytes().to_vec();
+    // Only static session queue polls carry a query (the `after` cursor);
+    // standard mailbox targets never have one.
+    if cfg!(feature = "_static-session") {
+        if let Some(query) = url.query() {
+            path_and_query.push(b'?');
+            path_and_query.extend_from_slice(query.as_bytes());
+        }
+    }
     let mut bhttp_message = bhttp::Message::request(
         method.as_bytes().to_vec(),
         url.scheme().as_bytes().to_vec(),
         authority_bytes,
-        url.path().as_bytes().to_vec(),
+        path_and_query,
     );
     // None of our messages include headers, so we don't add them
     if let Some(body) = body {
@@ -138,7 +147,7 @@ fn process_ohttp_res(
 /// decapsulate ohttp, bhttp response and return http response body and status code
 pub(crate) fn ohttp_decapsulate(
     res_ctx: ohttp::ClientResponse,
-    ohttp_body: &[u8; ENCAPSULATED_MESSAGE_BYTES],
+    ohttp_body: &[u8],
 ) -> Result<http::Response<Vec<u8>>, OhttpEncapsulationError> {
     let bhttp_body = res_ctx.decapsulate(ohttp_body)?;
     let mut r = std::io::Cursor::new(bhttp_body);
