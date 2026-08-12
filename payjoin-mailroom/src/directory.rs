@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
 use tracing::{error, warn};
 
-use crate::admission::{Admission, Rejection, POW_NONCE_BYTES};
+use crate::admission::{Admission, Rejection, POW_NONCE_BYTES, TOKEN_BYTES};
 use crate::db::board::{BoardStore, Error as BoardError, BLOB_BYTES};
 use crate::db::queues::{Error as QueueError, QueueStore, FRAME_BYTES};
 use crate::db::{Db, Error as DbError, SendableError};
@@ -155,6 +155,7 @@ pub struct Service<D: Db> {
     sentinel_tag: SentinelTag,
     v1: Option<V1>,
     queues: Option<QueueStore>,
+    queue_admission: Option<Arc<dyn Admission>>,
     board: Option<Board>,
 }
 
@@ -180,7 +181,7 @@ where
 
 impl<D: Db> Service<D> {
     pub fn new(db: D, ohttp: ohttp::Server, sentinel_tag: SentinelTag, v1: Option<V1>) -> Self {
-        Self { db, ohttp, sentinel_tag, v1, queues: None, board: None }
+        Self { db, ohttp, sentinel_tag, v1, queues: None, queue_admission: None, board: None }
     }
 
     /// Serve queue mailbox endpoints (`/q/{id}`) from `queues`. Without
@@ -188,6 +189,15 @@ impl<D: Db> Service<D> {
     /// same responses they did before queues were introduced.
     pub fn with_queues(mut self, queues: QueueStore) -> Self {
         self.queues = Some(queues);
+        self
+    }
+
+    /// Require queue appends to pass `admission`, carrying an
+    /// owner-minted token ahead of the frame. Without this, any party
+    /// that knows a queue id may append to it, exactly as before
+    /// admission existed. Queue reads are never gated.
+    pub fn with_queue_admission(mut self, admission: Arc<dyn Admission>) -> Self {
+        self.queue_admission = Some(admission);
         self
     }
 
@@ -410,6 +420,14 @@ impl<D: Db> Service<D> {
     /// stay encapsulated: a rejected request produces the same
     /// fixed-size response as an accepted one on the wire. Only
     /// internal failures escape as unencapsulated errors.
+    ///
+    /// With queue admission configured, the body is `token || frame`
+    /// and only a token minted by the mailbox owner admits the append;
+    /// a spent token is refused as a conflict rather than acknowledged
+    /// like a board replay, because the token does not commit to the
+    /// frame, so an acknowledgment could claim an arbitrary frame was
+    /// stored. Without admission the body is the frame alone, exactly
+    /// as before admission existed.
     async fn post_queue(
         &self,
         queues: &QueueStore,
@@ -419,21 +437,53 @@ impl<D: Db> Service<D> {
         let Ok(id) = ShortId::from_str(id) else {
             return inner_status(StatusCode::BAD_REQUEST);
         };
-        let frame = body
+        let body = body
             .collect()
             .await
             .map_err(|e| HandlerError::InternalServerError(e.into()))?
             .to_bytes();
-        match queues.append(&id, &frame).await {
-            Ok(()) => inner_status(StatusCode::OK),
+        let (frame, admitted_tag) = match &self.queue_admission {
+            Some(admission) => {
+                let (token, frame) = body.split_at(body.len().min(TOKEN_BYTES));
+                let mut input = Vec::with_capacity(id.as_slice().len() + token.len());
+                input.extend_from_slice(id.as_slice());
+                input.extend_from_slice(token);
+                let tag = match admission.verify(&input).await {
+                    Ok(tag) => tag,
+                    Err(Rejection::Malformed) => return inner_status(StatusCode::BAD_REQUEST),
+                    Err(Rejection::InsufficientWork) =>
+                        return inner_status(StatusCode::TOO_MANY_REQUESTS),
+                    Err(Rejection::Unauthorized) => return inner_status(StatusCode::UNAUTHORIZED),
+                };
+                match admission.seen(&tag).await {
+                    Ok(false) => {}
+                    Ok(true) => return inner_status(StatusCode::CONFLICT),
+                    Err(e) => return Err(HandlerError::InternalServerError(e.into())),
+                }
+                (frame, Some((admission, tag)))
+            }
+            None => (&body[..], None),
+        };
+        match queues.append(&id, frame).await {
+            Ok(()) => {}
             Err(QueueError::InvalidFrameSize(len)) => {
                 warn!("Queue frame must be exactly {FRAME_BYTES} bytes, got {len}");
-                inner_status(StatusCode::BAD_REQUEST)
+                return inner_status(StatusCode::BAD_REQUEST);
             }
-            Err(QueueError::QueueFull) => inner_status(StatusCode::TOO_MANY_REQUESTS),
-            Err(QueueError::OverCapacity) => inner_status(StatusCode::SERVICE_UNAVAILABLE),
-            Err(QueueError::IO(e)) => Err(HandlerError::InternalServerError(e.into())),
+            Err(QueueError::QueueFull) => return inner_status(StatusCode::TOO_MANY_REQUESTS),
+            Err(QueueError::OverCapacity) => return inner_status(StatusCode::SERVICE_UNAVAILABLE),
+            Err(QueueError::IO(e)) => return Err(HandlerError::InternalServerError(e.into())),
         }
+        if let Some((admission, tag)) = admitted_tag {
+            // Record the tag only now that the frame is stored, so an
+            // append rejected above (e.g. queue full) does not spend
+            // its token.
+            admission
+                .record_success(&tag)
+                .await
+                .map_err(|e| HandlerError::InternalServerError(e.into()))?;
+        }
+        inner_status(StatusCode::OK)
     }
 
     /// Route GET /q/{id}?after=n: read a fixed-size page of frames
