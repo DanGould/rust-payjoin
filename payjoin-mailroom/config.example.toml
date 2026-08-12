@@ -21,6 +21,11 @@
 # rejected until the queue expires.
 # queue_frame_cap = 64
 
+# Require queue appends to carry a one-show token minted by the mailbox
+# owner's key. Off by default: without it, any party that knows a queue
+# id may append to it.
+# queue_requires_token = false
+
 # Serve bulletin board endpoints (/board) through the OHTTP gateway.
 # Off by default; enabling only adds routes.
 # board = false

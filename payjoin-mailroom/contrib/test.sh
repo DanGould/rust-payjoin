@@ -5,4 +5,5 @@ cargo test --locked --package payjoin-mailroom --verbose --all-features --lib
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test integration
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test mailbox_wire
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test queue_wire
+cargo test --locked --package payjoin-mailroom --verbose --all-features --test queue_token_wire
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test board_wire

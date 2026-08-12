@@ -266,14 +266,22 @@ async fn init_directory(
     };
     let mut service = crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1);
     if config.queue_mailboxes {
+        let queues_dir = config.storage_dir.join("queues");
         let queues = crate::db::queues::QueueStore::init(
-            config.storage_dir.join("queues"),
+            queues_dir.clone(),
             config.mailbox_ttl,
             config.queue_frame_cap,
         )
         .await?;
         queues.spawn_background_prune().await;
         service = service.with_queues(queues);
+        if config.queue_requires_token {
+            let dedupe =
+                crate::admission::DedupeSet::open(queues_dir.join("admitted.tags")).await?;
+            service = service.with_queue_admission(std::sync::Arc::new(
+                crate::admission::TokenAdmission::new(Some(dedupe)),
+            ));
+        }
     }
     if config.board {
         let board_dir = config.storage_dir.join("board");

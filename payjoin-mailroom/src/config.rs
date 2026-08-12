@@ -33,6 +33,12 @@ pub struct Config {
     /// Maximum frames one queue mailbox holds. Appends beyond the cap
     /// are rejected until the queue expires.
     pub queue_frame_cap: usize,
+    /// Require queue appends to carry a token minted by the mailbox
+    /// owner's key. Off by default: without it, any party that knows a
+    /// queue id may append to it. See
+    /// [`TokenAdmission`](crate::admission::TokenAdmission) for the
+    /// token scheme and its key-reuse caveat.
+    pub queue_requires_token: bool,
     /// Serve bulletin board endpoints (`/board`) through the OHTTP
     /// gateway. Off by default. Enabling only adds routes; existing
     /// endpoint behavior is unchanged.
@@ -119,6 +125,7 @@ impl Default for Config {
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
             queue_mailboxes: false,
             queue_frame_cap: DEFAULT_QUEUE_FRAME_CAP,
+            queue_requires_token: false,
             board: false,
             board_pow_bits: DEFAULT_BOARD_POW_BITS,
             board_cap: DEFAULT_BOARD_CAP,
@@ -155,6 +162,7 @@ impl Config {
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
             queue_mailboxes: false,
             queue_frame_cap: DEFAULT_QUEUE_FRAME_CAP,
+            queue_requires_token: false,
             board: false,
             board_pow_bits: DEFAULT_BOARD_POW_BITS,
             board_cap: DEFAULT_BOARD_CAP,
