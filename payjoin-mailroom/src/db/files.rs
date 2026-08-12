@@ -51,6 +51,24 @@ struct DiskStorage {
     xor: Vec<u8>,
 }
 
+/// Load the storage directory's obfuscation pattern, generating one on
+/// first use. Stored payloads are XORed with this random pattern so that
+/// malicious uploads (e.g. antivirus fingerprints) never appear verbatim
+/// on disk.
+pub(crate) async fn load_or_create_xor_pattern(dir: &std::path::Path) -> io::Result<Vec<u8>> {
+    let xor: Vec<u8>;
+    let xor_file = dir.join("xor.dat");
+    if fs::try_exists(&xor_file).await? {
+        xor = fs::read(xor_file).await?;
+    } else {
+        xor = OsRng.next_u64().to_ne_bytes().to_vec();
+        let mut file = fs::File::create_new(xor_file).await?;
+        file.write_all(&xor).await?;
+        file.sync_all().await?;
+    }
+    Ok(xor)
+}
+
 impl DiskStorage {
     async fn init(dir: PathBuf) -> io::Result<Self> {
         let tmp_dir = &dir.join("tmp");
@@ -60,18 +78,7 @@ impl DiskStorage {
         }
         fs::create_dir_all(tmp_dir).await?;
 
-        // XOR data with a random pattern to obfuscate v1 requests
-        // and writing malicious data such as virus fingerprints
-        let xor: Vec<u8>;
-        let xor_file = dir.join("xor.dat");
-        if fs::try_exists(&xor_file).await? {
-            xor = fs::read(xor_file).await?;
-        } else {
-            xor = OsRng.next_u64().to_ne_bytes().to_vec();
-            let mut file = fs::File::create_new(xor_file).await?;
-            file.write_all(&xor).await?;
-            file.sync_all().await?;
-        }
+        let xor = load_or_create_xor_pattern(&dir).await?;
 
         Ok(Self { dir, xor })
     }

@@ -8,6 +8,7 @@ use tower::util::BoxCloneSyncService;
 use tower::{Service, ServiceExt};
 
 pub mod files;
+pub mod queues;
 use crate::metrics::{MetricsService, PayjoinVersion};
 
 pub trait SendableError:
