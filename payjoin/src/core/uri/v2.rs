@@ -215,6 +215,16 @@ impl StaticPjParam {
     /// session reuse.
     pub fn receiver_pubkey(&self) -> &HpkePublicKey { &self.receiver_pubkey }
 
+    pub(crate) fn ohttp_keys(&self) -> &OhttpKeys { &self.ohttp_keys }
+
+    /// The queue endpoint where senders post message A frames: `/q/{id}`
+    /// on the directory.
+    pub(crate) fn queue_endpoint(&self) -> Url {
+        self.directory
+            .join(&format!("/q/{}", self.id))
+            .expect("replacing the path of a valid URL should never fail")
+    }
+
     pub(crate) fn endpoint(&self) -> Url {
         let mut endpoint = self.directory.clone().join(&self.id.to_string()).unwrap();
         set_receiver_pubkey(&mut endpoint, &self.receiver_pubkey);

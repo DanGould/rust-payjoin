@@ -53,6 +53,8 @@ use crate::{HpkeKeyPair, IntoUrl, PjUri, Request};
 
 mod error;
 mod session;
+#[cfg(feature = "_static-session")]
+pub mod static_session;
 
 /// A builder to construct the properties of a [`Sender`].
 /// V2 SenderBuilder differs from V1 in that it does not allow the receiver's output substitution preference to be disabled.
