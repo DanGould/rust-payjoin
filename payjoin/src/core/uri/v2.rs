@@ -685,4 +685,20 @@ mod tests {
         let url_only_rk1 = Url::parse("https://example.com/TXJCGKTKXLUUZ#RK1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC").unwrap();
         assert!(matches!(PjParam::parse(url_only_rk1), Err(PjParseError::NotV2)));
     }
+
+    /// A fragment whose RK and OH values are individually valid is still not
+    /// a v2 endpoint without EX. The cases above use placeholder values that
+    /// would fail their own parsers, so they cannot distinguish "EX missing"
+    /// from "RK malformed"; this pins that the all-three-required rule alone
+    /// rejects the URL.
+    #[test]
+    fn test_fragment_missing_ex_with_valid_params_is_not_v2() {
+        let url = Url::parse(
+            "https://example.com/TXJCGKTKXLUUZ\
+             #OH1QYPM5JXYNS754Y4R45QWE336QFX6ZR8DQGVQCULVZTV20TFVEYDMFQC\
+             -RK1Q0DJS3VVDXWQQTLQ8022QGXSX7ML9PHZ6EDSF6AKEWQG758JPS2EV",
+        )
+        .unwrap();
+        assert!(matches!(PjParam::parse(url), Err(PjParseError::NotV2)));
+    }
 }
