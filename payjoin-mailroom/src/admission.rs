@@ -14,13 +14,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bitcoin::hashes::{sha256, sha256d, Hash};
 use bitcoin::secp256k1::{ecdsa, Message, PublicKey, Secp256k1, SecretKey, VerifyOnly};
 use futures::future::BoxFuture;
 use hex::{DisplayHex, FromHex};
 use tokio::io::{self, AsyncWriteExt};
+use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 use tracing::warn;
 
 /// Why a submission was not admitted.
@@ -528,6 +531,146 @@ impl Admission for PowThenZk {
 
     fn record_success<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
         self.zk.record_success(tag)
+    }
+}
+
+/// How long one verifier invocation may run before it is abandoned.
+///
+/// A verdict takes on the order of a tenth of a second. The bound is
+/// not for slow proofs but for the paths where no answer is coming: a
+/// proof that passes the signature check and then fails to
+/// deserialize crashes the worker handling it, and the client waits.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The name the proof is staged under for the client to read.
+const STAGED_PROOF_FILE: &str = "pending-proof.bin";
+
+/// The sentences the `autct` client prints for a verification, one
+/// per outcome its server reports.
+const ACCEPTED: &str =
+    "Request was accepted by the Autct verifier! The proof is valid and the (unknown) pubkey is unused.";
+const NOT_IN_TREE: &str = "Request rejected, PedDLEQ proof does not match the tree.";
+const PROOF_INVALID: &str = "Request rejected, PedDLEQ proof is invalid.";
+const KEY_IMAGE_REUSED: &str = "Request rejected, proofs are valid but key image is reused.";
+const CONTEXT_NOT_SERVED: &str = "Request rejected, keyset chosen does not match the server's.";
+const NOT_BASE64: &str = "Invalid encoding of proof, should be base64.";
+const POINT_UNREADABLE: &str = "Curve point deserialization failure in proof.";
+const PROOF_UNREADABLE: &str = "PedDLEQ proof deserialization failed.";
+
+/// Read the verdict out of the client's output.
+///
+/// The client exits successfully whether it accepted or rejected, so
+/// the printed sentence is the whole verdict. Matching whole lines
+/// against the exact set means a reworded or unrecognized message
+/// reads as no verdict at all, and is retried, rather than being
+/// guessed at.
+fn parse_verdict(stdout: &str) -> Result<Verdict, Unavailable> {
+    for line in stdout.lines() {
+        match line.trim() {
+            ACCEPTED => return Ok(Verdict::Accepted),
+            KEY_IMAGE_REUSED => return Ok(Verdict::Reused),
+            NOT_IN_TREE => return Ok(Verdict::NotAMember),
+            PROOF_INVALID | NOT_BASE64 | POINT_UNREADABLE | PROOF_UNREADABLE =>
+                return Ok(Verdict::Invalid),
+            // The sidecar serves a fixed set of context labels chosen
+            // when it started, so a label it does not know is a
+            // misconfiguration rather than a bad submission.
+            CONTEXT_NOT_SERVED =>
+                return Err(Unavailable::new("the verifier does not serve this context label")),
+            _ => {}
+        }
+    }
+    Err(Unavailable::new(format!("no verdict in verifier output: {}", stdout.trim())))
+}
+
+/// Verifier backed by the `autct` client and the sidecar it talks to.
+///
+/// Reading a key set of on-chain scale and building its curve tree
+/// takes tens of seconds, so the verifier is a long-lived process an
+/// operator starts alongside the directory, and each verification is
+/// a short client invocation against it. Driving that client as a
+/// subprocess keeps a proof system out of this binary: what the
+/// directory depends on is an executable named in configuration,
+/// which an operator can pin, sandbox or replace.
+pub struct AutctVerifier {
+    exe: PathBuf,
+    keysets: String,
+    host: String,
+    port: u16,
+    scratch: PathBuf,
+    invocation: Mutex<()>,
+}
+
+impl AutctVerifier {
+    /// `keysets` is the `context_label:keyset_file` pair the sidecar
+    /// serves. `scratch` is a directory this verifier owns: the client
+    /// rewrites a configuration file of its own on every run, which
+    /// belongs there rather than in the operator's home, and the proof
+    /// is staged there for it to read.
+    pub async fn new(
+        exe: PathBuf,
+        keysets: String,
+        host: String,
+        port: u16,
+        scratch: PathBuf,
+    ) -> io::Result<Self> {
+        tokio::fs::create_dir_all(&scratch).await?;
+        Ok(Self { exe, keysets, host, port, scratch, invocation: Mutex::new(()) })
+    }
+}
+
+impl ProofVerifier for AutctVerifier {
+    fn verify<'a>(
+        &'a self,
+        proof: &'a [u8],
+        user_string: &'a str,
+    ) -> BoxFuture<'a, Result<Verdict, Unavailable>> {
+        Box::pin(async move {
+            // One invocation at a time: the client rewrites a shared
+            // configuration file on every run, and the proof is handed
+            // over at a fixed path. Verdicts cost about a tenth of a
+            // second, and the work that gates them costs more.
+            let _serialized = self.invocation.lock().await;
+            let proof_file = self.scratch.join(STAGED_PROOF_FILE);
+            tokio::fs::write(&proof_file, proof)
+                .await
+                .map_err(|e| Unavailable::new(format!("could not stage the proof: {e}")))?;
+
+            let mut command = Command::new(&self.exe);
+            command
+                .args(["-M", "verify"])
+                .args(["-k", &self.keysets])
+                .arg("-P")
+                .arg(&proof_file)
+                .args(["-u", user_string])
+                .args(["-H", &self.host])
+                .args(["-p", &self.port.to_string()])
+                // Without this the client prints its whole
+                // configuration ahead of the verdict.
+                .args(["--verbose", "false"])
+                .env("XDG_CONFIG_HOME", &self.scratch)
+                .current_dir(&self.scratch)
+                .kill_on_drop(true);
+            let output = match timeout(VERIFY_TIMEOUT, command.output()).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(e)) =>
+                    return Err(Unavailable::new(format!(
+                        "could not run {}: {e}",
+                        self.exe.display()
+                    ))),
+                Err(_) => return Err(Unavailable::new("the verifier did not answer in time")),
+            };
+            // The client exits successfully for every verdict it
+            // reports, so a failed exit means it never got one.
+            if !output.status.success() {
+                return Err(Unavailable::new(format!(
+                    "the verifier client failed ({}): {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            parse_verdict(&String::from_utf8_lossy(&output.stdout))
+        })
     }
 }
 
@@ -1150,6 +1293,52 @@ mod tests {
         assert!(!layered.seen(&tag).await?, "tag is unseen until recorded");
         layered.record_success(&tag).await?;
         assert!(layered.seen(&tag).await?, "recorded tag is seen");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_verdict_reads_every_client_message() {
+        assert_eq!(parse_verdict(ACCEPTED).expect("a verdict"), Verdict::Accepted);
+        assert_eq!(parse_verdict(KEY_IMAGE_REUSED).expect("a verdict"), Verdict::Reused);
+        assert_eq!(parse_verdict(NOT_IN_TREE).expect("a verdict"), Verdict::NotAMember);
+        for invalid in [PROOF_INVALID, NOT_BASE64, POINT_UNREADABLE, PROOF_UNREADABLE] {
+            assert_eq!(parse_verdict(invalid).expect("a verdict"), Verdict::Invalid);
+        }
+        assert!(
+            parse_verdict(CONTEXT_NOT_SERVED).is_err(),
+            "a label the verifier does not serve is the operator's fault, not the sender's"
+        );
+    }
+
+    #[test]
+    fn test_parse_verdict_finds_the_message_among_other_output() {
+        let stdout = format!("some preamble\n{ACCEPTED}\n");
+        assert_eq!(parse_verdict(&stdout).expect("a verdict"), Verdict::Accepted);
+    }
+
+    #[test]
+    fn test_parse_verdict_refuses_to_guess() {
+        // The last case is a prefix of the acceptance message: a
+        // verdict is a whole line or it is no verdict at all.
+        for stdout in ["", "Unrecognized error code from server?", "Request was accepted"] {
+            assert!(parse_verdict(stdout).is_err(), "{stdout:?} is not a verdict");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_autct_verifier_reports_a_missing_executable() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let verifier = AutctVerifier::new(
+            dir.path().join("no-such-autct"),
+            "epoch:keys.aks".to_string(),
+            "127.0.0.1".to_string(),
+            1,
+            dir.path().join("scratch"),
+        )
+        .await?;
+
+        let unavailable = verifier.verify(&[0u8; PROOF_BYTES], "00").await;
+        assert!(unavailable.is_err(), "a verifier that cannot run reaches no verdict");
         Ok(())
     }
 }
