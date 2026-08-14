@@ -8,3 +8,4 @@ cargo test --locked --package payjoin-mailroom --verbose --all-features --test q
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test queue_token_wire
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test board_wire
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test board_zk_wire
+cargo test --locked --package payjoin-mailroom --verbose --all-features --test zk_sidecar
