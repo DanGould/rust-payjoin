@@ -10,7 +10,7 @@
 //! external verification service) can be substituted without touching
 //! the endpoints.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -299,6 +299,86 @@ impl DedupeSet {
     }
 }
 
+/// A persistent record of what each verified one-show credential was
+/// spent on.
+///
+/// A one-show mechanism reports only that a credential was used
+/// before, not what it was used for. Pairing each tag with a hash of
+/// the content it was verified against tells an honest retransmit of
+/// the same submission apart from a second submission under the same
+/// credential. Records are appended and flushed before the admitted
+/// operation runs, so a submission whose operation then fails is still
+/// recognized on retry.
+///
+/// Tags and content hashes are public values, so they are stored in
+/// plaintext: one `tag hash` hex pair per line. The file is never
+/// compacted; deleting it forgets history.
+#[derive(Clone)]
+pub struct SpentJournal {
+    inner: Arc<Mutex<JournalInner>>,
+}
+
+struct JournalInner {
+    file: tokio::fs::File,
+    spent: HashMap<Vec<u8>, [u8; 32]>,
+}
+
+/// The length of a content hash recorded in a [`SpentJournal`].
+const CONTENT_HASH_BYTES: usize = 32;
+
+fn parse_journal_line(line: &str) -> Option<(Vec<u8>, [u8; CONTENT_HASH_BYTES])> {
+    let (tag, content) = line.split_once(' ')?;
+    let tag = Vec::<u8>::from_hex(tag).ok()?;
+    let content = Vec::<u8>::from_hex(content).ok()?.try_into().ok()?;
+    (!tag.is_empty()).then_some((tag, content))
+}
+
+impl SpentJournal {
+    /// Open the journal persisted at `path`, creating it if absent.
+    pub async fn open(path: PathBuf) -> io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut spent = HashMap::new();
+        if tokio::fs::try_exists(&path).await? {
+            let contents = tokio::fs::read_to_string(&path).await?;
+            for line in contents.lines() {
+                // Skip unparsable lines, e.g. a torn tail from a crash
+                // mid-append; losing a record costs one honest sender
+                // the retransmit of one submission.
+                if let Some((tag, content)) = parse_journal_line(line) {
+                    spent.insert(tag, content);
+                }
+            }
+        }
+        let file = tokio::fs::OpenOptions::new().append(true).create(true).open(&path).await?;
+        Ok(Self { inner: Arc::new(Mutex::new(JournalInner { file, spent })) })
+    }
+
+    /// The content hash `tag` was verified against, if it is recorded.
+    pub async fn get(&self, tag: &[u8]) -> io::Result<Option<[u8; CONTENT_HASH_BYTES]>> {
+        Ok(self.inner.lock().await.spent.get(tag).copied())
+    }
+
+    /// Record that `tag` was verified against `content`.
+    ///
+    /// The first record for a tag stands: a later call naming different
+    /// content leaves it in place, so a spent credential cannot be
+    /// repointed. The record is durable before this returns, because
+    /// the caller acts on it before the admitted operation runs.
+    pub async fn insert(&self, tag: &[u8], content: &[u8; CONTENT_HASH_BYTES]) -> io::Result<()> {
+        let mut guard = self.inner.lock().await;
+        if guard.spent.contains_key(tag) {
+            return Ok(());
+        }
+        let line = format!("{} {}\n", tag.to_lower_hex_string(), content.to_lower_hex_string());
+        guard.file.write_all(line.as_bytes()).await?;
+        guard.file.sync_data().await?;
+        guard.spent.insert(tag.to_vec(), *content);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +629,73 @@ mod tests {
         admission.record_success(&tag).await?;
         assert!(admission.seen(&tag).await?, "recorded tag is seen");
 
+        Ok(())
+    }
+
+    const CONTENT_A: [u8; CONTENT_HASH_BYTES] = [0x11; CONTENT_HASH_BYTES];
+    const CONTENT_B: [u8; CONTENT_HASH_BYTES] = [0x22; CONTENT_HASH_BYTES];
+
+    #[tokio::test]
+    async fn test_spent_journal_persists_across_reopen() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("spent.journal");
+
+        {
+            let journal = SpentJournal::open(path.clone()).await?;
+            assert_eq!(journal.get(b"tag one").await?, None);
+            journal.insert(b"tag one", &CONTENT_A).await?;
+        }
+
+        let journal = SpentJournal::open(path).await?;
+        assert_eq!(
+            journal.get(b"tag one").await?,
+            Some(CONTENT_A),
+            "records should survive a restart"
+        );
+        assert_eq!(journal.get(b"tag two").await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_spent_journal_keeps_the_first_record() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("spent.journal");
+        let journal = SpentJournal::open(path.clone()).await?;
+
+        journal.insert(b"tag one", &CONTENT_A).await?;
+        journal.insert(b"tag one", &CONTENT_B).await?;
+
+        assert_eq!(
+            journal.get(b"tag one").await?,
+            Some(CONTENT_A),
+            "a spent tag should not be repointed at other content"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?.lines().count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_spent_journal_skips_torn_lines() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("spent.journal");
+
+        {
+            let journal = SpentJournal::open(path.clone()).await?;
+            journal.insert(b"tag one", &CONTENT_A).await?;
+        }
+        // Simulate a crash mid-append: a torn, unparsable tail line.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+            file.write_all(b"0dd 11")?;
+        }
+
+        let journal = SpentJournal::open(path).await?;
+        assert_eq!(
+            journal.get(b"tag one").await?,
+            Some(CONTENT_A),
+            "intact records should still load"
+        );
         Ok(())
     }
 }
