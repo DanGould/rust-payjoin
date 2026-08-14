@@ -5,10 +5,11 @@
 //! submissions from anyone has no such secret, so submissions pass an
 //! [`Admission`] check instead. Proof of work admits strangers at a
 //! computational cost; owner-minted tokens admit senders the mailbox
-//! owner chose, for free. The trait keeps routing code independent of
-//! which mechanism an operator deploys, so alternatives (e.g. an
-//! external verification service) can be substituted without touching
-//! the endpoints.
+//! owner chose, for free; a zero-knowledge credential admits any
+//! holder of a key in a published set, once per epoch, without
+//! learning which key. The trait keeps routing code independent of
+//! which mechanism an operator deploys, so mechanisms can be swapped,
+//! or ordered one behind another, without touching the endpoints.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -20,8 +21,9 @@ use futures::future::BoxFuture;
 use hex::{DisplayHex, FromHex};
 use tokio::io::{self, AsyncWriteExt};
 use tokio::sync::Mutex;
+use tracing::warn;
 
-/// Why a submission was refused admission.
+/// Why a submission was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
     /// The submission is structurally invalid for the mechanism.
@@ -31,6 +33,13 @@ pub enum Rejection {
     /// The submission does not prove authorization by the owner of the
     /// resource it targets.
     Unauthorized,
+    /// The submission spends a one-show credential that was already
+    /// spent on different content.
+    Conflict,
+    /// The mechanism could not decide, because something it depends on
+    /// is unavailable. The submission is not at fault and may be
+    /// retried unchanged.
+    Unavailable,
 }
 
 /// An admission mechanism for submissions that anyone may make.
@@ -296,6 +305,229 @@ impl DedupeSet {
         guard.file.write_all(line.as_bytes()).await?;
         guard.file.sync_data().await?;
         Ok(())
+    }
+}
+
+/// The serialized length of a credential proof.
+///
+/// Serialized aut-ct proof size for the fixed parameterization: curve
+/// tree depth 2, branching factor 1024, batch size 1, default
+/// generator length. Measured identical for a 6-key and a 330,000-key
+/// set. Any other length is rejected before verification so a
+/// parameter change upstream fails loudly at the length gate rather
+/// than deep in the verifier.
+pub const PROOF_BYTES: usize = 2793;
+
+/// Where the one-show tag sits within a serialized proof.
+///
+/// The verifier reports only a verdict; the key image is not in its
+/// output. The serialized proof begins with D, a 33-byte compressed
+/// point, then E, so the tag is bytes 33..66. These bytes are trusted
+/// only after the verifier accepts the proof, which requires
+/// deserializing that same range as a valid point.
+const KEY_IMAGE_RANGE: std::ops::Range<usize> = 33..66;
+
+/// What a [`ProofVerifier`] concluded about a proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The proof is valid and its key image was not seen before.
+    Accepted,
+    /// The proof is valid and its key image was seen before.
+    Reused,
+    /// The proof does not correspond to any member of the keyset.
+    NotAMember,
+    /// The proof does not verify under the verifier's current context.
+    Invalid,
+}
+
+/// A verifier could not reach a verdict.
+///
+/// Distinct from every [`Verdict`], because the submission may be
+/// perfectly good: answering with a client error would blame a sender
+/// for an operator's outage and invite it to rebuild a submission that
+/// was never wrong.
+#[derive(Debug)]
+pub struct Unavailable(String);
+
+impl Unavailable {
+    pub fn new(reason: impl Into<String>) -> Self { Self(reason.into()) }
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// Verifier of zero-knowledge membership proofs.
+///
+/// Separate from [`ZkAdmission`] so that admission logic, which owns
+/// the one-show accounting, can be exercised without a proof system
+/// behind it.
+pub trait ProofVerifier: Send + Sync {
+    /// Verify `proof`, which must have been minted over `user_string`.
+    fn verify<'a>(
+        &'a self,
+        proof: &'a [u8],
+        user_string: &'a str,
+    ) -> BoxFuture<'a, Result<Verdict, Unavailable>>;
+}
+
+/// Zero-knowledge credential admission.
+///
+/// A submission is `proof || blob`, where the proof shows its sender
+/// controls the private key of one member of a published key set,
+/// without revealing which member. It carries a one-show tag, the key
+/// image, that is the same for every proof a given key makes within an
+/// epoch and unlinkable to that key. So a key set of, say, the taproot
+/// outputs at some block height becomes a per-epoch allowance of one
+/// submission per coin, with no account and no issuer.
+///
+/// Key-image scoping and its linkage limit. The one-show tag is
+/// I = x*J, where J is a per-epoch generator derived by hash-to-curve
+/// from the epoch context label and shared by every set member within
+/// the epoch. Because J is constant within an epoch, a party who knows
+/// the scalar difference d between two member private keys can test
+/// I2 - I1 = d*J and link those two admissions within the epoch
+/// without learning either key. Holders of a non-hardened BIP32 xpub,
+/// and BIP 352 senders who know the tweaks of outputs they created,
+/// are such parties. The board is public and entries persist until
+/// expiry, so the test can be run offline over a whole epoch's board.
+/// This is a rate-limiting credential, not an unlinkable identity: the
+/// tag enforces one admission per key per epoch and reveals nothing to
+/// a party that did not already know the key relationship. Per-output
+/// tag generators (I = x*H2C(P), the form Monero and FCMP++ use)
+/// remove the linkage and are the production fix. See AdamISZ/aut-ct
+/// docs/security-analysis.md and delvingbitcoin.org topic 862.
+///
+/// One-show state lives here, not in the verifier: a verifier that
+/// spends the credential when it checks the proof would spend it for
+/// submissions this directory then refuses to store. The journal
+/// records the pair (tag, content) the moment a proof is accepted, and
+/// a later report of reuse is answered against it: the same content is
+/// the same submission arriving twice, anything else is a second
+/// submission under a spent credential.
+pub struct ZkAdmission {
+    verifier: Arc<dyn ProofVerifier>,
+    journal: SpentJournal,
+    dedupe: Option<DedupeSet>,
+}
+
+impl ZkAdmission {
+    pub fn new(
+        verifier: Arc<dyn ProofVerifier>,
+        journal: SpentJournal,
+        dedupe: Option<DedupeSet>,
+    ) -> Self {
+        Self { verifier, journal, dedupe }
+    }
+}
+
+impl Admission for ZkAdmission {
+    fn verify<'a>(&'a self, body: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, Rejection>> {
+        Box::pin(async move {
+            if body.len() <= PROOF_BYTES {
+                return Err(Rejection::Malformed);
+            }
+            let (proof, blob) = body.split_at(PROOF_BYTES);
+            let content = sha256::Hash::hash(blob).to_byte_array();
+            // The verifier folds user_string into the Fiat-Shamir
+            // transcript, so the proof only verifies under the exact
+            // string it was minted with. We pass the hex sha256 of the
+            // stored blob bytes, which binds the credential to this
+            // submission's content: a proof detached from an observed
+            // post cannot admit different bytes, and a mismatch is
+            // rejected before the key image is recorded, so it cannot
+            // consume the prover's per-epoch allowance. Upstream's
+            // RPC-API.md describes the field as unused; the transcript
+            // code (peddleq.rs) is authoritative.
+            let user_string = content.to_lower_hex_string();
+            let verdict = match self.verifier.verify(proof, &user_string).await {
+                Ok(verdict) => verdict,
+                Err(e) => {
+                    warn!("Credential verifier reached no verdict: {e}");
+                    return Err(Rejection::Unavailable);
+                }
+            };
+            let tag = proof[KEY_IMAGE_RANGE].to_vec();
+            match verdict {
+                Verdict::Accepted => match self.journal.insert(&tag, &content).await {
+                    Ok(()) => Ok(tag),
+                    Err(e) => {
+                        // The credential is spent at the verifier but
+                        // unrecorded here, so admitting would leave a
+                        // retransmit indistinguishable from a reuse.
+                        warn!("Could not record an accepted credential: {e}");
+                        Err(Rejection::Unavailable)
+                    }
+                },
+                Verdict::Reused => match self.journal.get(&tag).await {
+                    Ok(Some(spent)) if spent == content => Ok(tag),
+                    Ok(_) => Err(Rejection::Conflict),
+                    Err(e) => {
+                        warn!("Could not read the credential journal: {e}");
+                        Err(Rejection::Unavailable)
+                    }
+                },
+                Verdict::NotAMember => Err(Rejection::Unauthorized),
+                Verdict::Invalid => Err(Rejection::Malformed),
+            }
+        })
+    }
+
+    fn seen<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<bool>> {
+        Box::pin(async move {
+            match &self.dedupe {
+                Some(dedupe) => dedupe.contains(tag).await,
+                None => Ok(false),
+            }
+        })
+    }
+
+    fn record_success<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            match &self.dedupe {
+                Some(dedupe) => dedupe.insert(tag).await,
+                None => Ok(()),
+            }
+        })
+    }
+}
+
+/// Proof-of-work admission ahead of a zero-knowledge credential.
+///
+/// Checking a credential is orders of magnitude more expensive than
+/// checking work, and any keypair at all can produce a proof that only
+/// the membership check rejects. Ordering the two is what keeps that
+/// from being a denial-of-service path: the work over the whole
+/// submission is a microsecond check, and a submission that fails it
+/// never reaches the verifier.
+///
+/// The submission is `nonce || proof || blob`, so the work commits to
+/// the proof as well as to the content. The admission tag is the
+/// credential's key image alone: work is a toll, not an identity, and
+/// re-mining a submission must not buy a second admission.
+pub struct PowThenZk {
+    pow: PowAdmission,
+    zk: ZkAdmission,
+}
+
+impl PowThenZk {
+    pub fn new(pow: PowAdmission, zk: ZkAdmission) -> Self { Self { pow, zk } }
+}
+
+impl Admission for PowThenZk {
+    fn verify<'a>(&'a self, body: &'a [u8]) -> BoxFuture<'a, Result<Vec<u8>, Rejection>> {
+        Box::pin(async move {
+            self.pow.verify(body).await?;
+            self.zk.verify(&body[POW_NONCE_BYTES..]).await
+        })
+    }
+
+    fn seen<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<bool>> { self.zk.seen(tag) }
+
+    fn record_success<'a>(&'a self, tag: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
+        self.zk.record_success(tag)
     }
 }
 
@@ -696,6 +928,228 @@ mod tests {
             Some(CONTENT_A),
             "intact records should still load"
         );
+        Ok(())
+    }
+
+    /// A verifier that answers from a script and records what it was
+    /// asked, so admission can be tested without a proof system.
+    struct MockVerifier {
+        answers: std::sync::Mutex<std::collections::VecDeque<Result<Verdict, Unavailable>>>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockVerifier {
+        fn new(answers: impl IntoIterator<Item = Result<Verdict, Unavailable>>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: std::sync::Mutex::new(answers.into_iter().collect()),
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        /// The user strings the verifier was asked to verify under,
+        /// one per call.
+        fn asked(&self) -> Vec<String> { self.asked.lock().expect("uncontended").clone() }
+    }
+
+    impl ProofVerifier for MockVerifier {
+        fn verify<'a>(
+            &'a self,
+            _proof: &'a [u8],
+            user_string: &'a str,
+        ) -> BoxFuture<'a, Result<Verdict, Unavailable>> {
+            Box::pin(async move {
+                self.asked.lock().expect("uncontended").push(user_string.to_string());
+                self.answers.lock().expect("uncontended").pop_front().expect("an answer per call")
+            })
+        }
+    }
+
+    fn proof_with_tag(tag: u8) -> Vec<u8> {
+        let mut proof = vec![0u8; PROOF_BYTES];
+        proof[KEY_IMAGE_RANGE].fill(tag);
+        proof
+    }
+
+    /// The submission a credential admits: proof then content.
+    fn credential_submission(tag: u8, blob: &[u8]) -> Vec<u8> {
+        let mut body = proof_with_tag(tag);
+        body.extend_from_slice(blob);
+        body
+    }
+
+    fn key_image(tag: u8) -> Vec<u8> { vec![tag; KEY_IMAGE_RANGE.len()] }
+
+    async fn zk_admission(
+        verifier: Arc<MockVerifier>,
+        dir: &tempfile::TempDir,
+    ) -> io::Result<ZkAdmission> {
+        let journal = SpentJournal::open(dir.path().join("spent.journal")).await?;
+        Ok(ZkAdmission::new(verifier, journal, None))
+    }
+
+    #[tokio::test]
+    async fn test_zk_admits_an_accepted_proof() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let admission = zk_admission(MockVerifier::new([Ok(Verdict::Accepted)]), &dir).await?;
+
+        let tag = admission
+            .verify(&credential_submission(0x77, b"board blob"))
+            .await
+            .expect("an accepted proof should be admitted");
+
+        assert_eq!(tag, key_image(0x77), "the tag is the proof's key image");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_binds_the_proof_to_the_content() -> io::Result<()> {
+        // A proof verifies only under the string it was minted with,
+        // so asking under the content hash is what keeps an observed
+        // proof from admitting different bytes.
+        let dir = tempfile::tempdir()?;
+        let verifier = MockVerifier::new([Ok(Verdict::Accepted)]);
+        let admission = zk_admission(verifier.clone(), &dir).await?;
+
+        let blob = b"board blob";
+        admission.verify(&credential_submission(0x77, blob)).await.expect("admitted");
+
+        assert_eq!(
+            verifier.asked(),
+            vec![sha256::Hash::hash(blob).to_byte_array().to_lower_hex_string()]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_rejects_a_submission_without_content() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let verifier = MockVerifier::new([]);
+        let admission = zk_admission(verifier.clone(), &dir).await?;
+
+        for len in [0, PROOF_BYTES - 1, PROOF_BYTES] {
+            assert_eq!(
+                admission.verify(&vec![0u8; len]).await,
+                Err(Rejection::Malformed),
+                "a submission of {len} bytes carries no content to bind"
+            );
+        }
+        assert!(verifier.asked().is_empty(), "the length gate precedes verification");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_maps_verifier_rejections() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let admission =
+            zk_admission(MockVerifier::new([Ok(Verdict::NotAMember), Ok(Verdict::Invalid)]), &dir)
+                .await?;
+        let body = credential_submission(0x77, b"board blob");
+
+        assert_eq!(admission.verify(&body).await, Err(Rejection::Unauthorized));
+        assert_eq!(admission.verify(&body).await, Err(Rejection::Malformed));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_readmits_an_identical_retransmit() -> io::Result<()> {
+        // The board write can fail after a proof is accepted, and a
+        // client that never saw its response retransmits. Neither may
+        // cost the sender its epoch credential.
+        let dir = tempfile::tempdir()?;
+        let admission =
+            zk_admission(MockVerifier::new([Ok(Verdict::Accepted), Ok(Verdict::Reused)]), &dir)
+                .await?;
+        let body = credential_submission(0x77, b"board blob");
+
+        assert_eq!(admission.verify(&body).await, Ok(key_image(0x77)));
+        assert_eq!(
+            admission.verify(&body).await,
+            Ok(key_image(0x77)),
+            "the same submission under a spent credential is that submission again"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_rejects_reuse_on_other_content() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let admission =
+            zk_admission(MockVerifier::new([Ok(Verdict::Accepted), Ok(Verdict::Reused)]), &dir)
+                .await?;
+
+        admission.verify(&credential_submission(0x77, b"first blob")).await.expect("admitted");
+        assert_eq!(
+            admission.verify(&credential_submission(0x77, b"second blob")).await,
+            Err(Rejection::Conflict),
+            "one credential admits one submission per epoch"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_rejects_unrecorded_reuse() -> io::Result<()> {
+        // A verifier spends a key image on proofs it goes on to
+        // reject, so its report of reuse is not evidence that this
+        // directory ever admitted the credential.
+        let dir = tempfile::tempdir()?;
+        let admission = zk_admission(MockVerifier::new([Ok(Verdict::Reused)]), &dir).await?;
+
+        assert_eq!(
+            admission.verify(&credential_submission(0x77, b"board blob")).await,
+            Err(Rejection::Conflict)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zk_reports_an_undecided_verifier_as_retryable() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let admission =
+            zk_admission(MockVerifier::new([Err(Unavailable::new("no verdict"))]), &dir).await?;
+
+        assert_eq!(
+            admission.verify(&credential_submission(0x77, b"board blob")).await,
+            Err(Rejection::Unavailable),
+            "an outage is not the sender's fault"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pow_then_zk_checks_work_first() -> io::Result<()> {
+        // Verification is expensive and any keypair can produce a
+        // proof that only the membership check rejects, so an
+        // unpriced credential path is a flood path.
+        let dir = tempfile::tempdir()?;
+        let verifier = MockVerifier::new([]);
+        let layered = PowThenZk::new(
+            PowAdmission::new(32, None),
+            zk_admission(verifier.clone(), &dir).await?,
+        );
+
+        let body = mine(&credential_submission(0x77, b"board blob"), 8);
+        assert_eq!(layered.verify(&body).await, Err(Rejection::InsufficientWork));
+        assert!(verifier.asked().is_empty(), "unpaid work reaches no verifier");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pow_then_zk_tags_by_key_image() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let dedupe = DedupeSet::open(dir.path().join("admitted.tags")).await?;
+        let journal = SpentJournal::open(dir.path().join("spent.journal")).await?;
+        let layered = PowThenZk::new(
+            PowAdmission::new(8, None),
+            ZkAdmission::new(MockVerifier::new([Ok(Verdict::Accepted)]), journal, Some(dedupe)),
+        );
+
+        let body = mine(&credential_submission(0x77, b"board blob"), 8);
+        let tag = layered.verify(&body).await.expect("a worked, credentialed body is admitted");
+
+        assert_eq!(tag, key_image(0x77), "re-mining must not buy a second admission");
+        assert!(!layered.seen(&tag).await?, "tag is unseen until recorded");
+        layered.record_success(&tag).await?;
+        assert!(layered.seen(&tag).await?, "recorded tag is seen");
         Ok(())
     }
 }

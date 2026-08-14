@@ -454,6 +454,9 @@ impl<D: Db> Service<D> {
                     Err(Rejection::InsufficientWork) =>
                         return inner_status(StatusCode::TOO_MANY_REQUESTS),
                     Err(Rejection::Unauthorized) => return inner_status(StatusCode::UNAUTHORIZED),
+                    Err(Rejection::Conflict) => return inner_status(StatusCode::CONFLICT),
+                    Err(Rejection::Unavailable) =>
+                        return inner_status(StatusCode::SERVICE_UNAVAILABLE),
                 };
                 match admission.seen(&tag).await {
                     Ok(false) => {}
@@ -550,6 +553,8 @@ impl<D: Db> Service<D> {
             Err(Rejection::Malformed) => return inner_status(StatusCode::BAD_REQUEST),
             Err(Rejection::InsufficientWork) => return inner_status(StatusCode::TOO_MANY_REQUESTS),
             Err(Rejection::Unauthorized) => return inner_status(StatusCode::UNAUTHORIZED),
+            Err(Rejection::Conflict) => return inner_status(StatusCode::CONFLICT),
+            Err(Rejection::Unavailable) => return inner_status(StatusCode::SERVICE_UNAVAILABLE),
         };
         match board.admission.seen(&tag).await {
             Ok(false) => {}
