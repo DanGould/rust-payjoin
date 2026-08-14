@@ -7,3 +7,4 @@ cargo test --locked --package payjoin-mailroom --verbose --all-features --test m
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test queue_wire
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test queue_token_wire
 cargo test --locked --package payjoin-mailroom --verbose --all-features --test board_wire
+cargo test --locked --package payjoin-mailroom --verbose --all-features --test board_zk_wire

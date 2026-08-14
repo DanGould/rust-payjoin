@@ -37,6 +37,35 @@
 # until entries expire.
 # board_cap = 4096
 
+# --- Bulletin board credentials ---
+# Uncomment the [board_zk] section to also require a zero-knowledge
+# credential on board submissions, admitting the holder of any key in a
+# published set once per epoch. A verifier sidecar must be running with
+# the same key set and the same context label, which it fixes at
+# startup: rolling the epoch means starting it with the new label too.
+# [board_zk]
+
+# Path to the autct executable used to reach the sidecar.
+# autct_exe = "/usr/local/bin/autct"
+
+# Path to the key set the sidecar serves, written exactly as the
+# sidecar was started with it.
+# keyset_path = "/var/lib/payjoin-mailroom/taproot-outputs.aks"
+
+# The component of the context label naming this deployment. Two
+# deployments sharing a label and key set produce identical one-show
+# tags for the same key, which would let their operators link one
+# wallet's posts across both.
+# deployment_label = "mailroom.example.com"
+
+# The component of the context label naming the current epoch. A
+# credential admits one submission per epoch.
+# epoch = "2026-w33"
+
+# Where the sidecar listens.
+# host = "127.0.0.1"
+# port = 23333
+
 # --- Telemetry (requires `telemetry` feature) ---
 # [telemetry]
 

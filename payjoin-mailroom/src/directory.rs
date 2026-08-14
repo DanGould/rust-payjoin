@@ -11,7 +11,9 @@ use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
 use tracing::{error, warn};
 
-use crate::admission::{Admission, Rejection, POW_NONCE_BYTES, TOKEN_BYTES};
+use crate::admission::{
+    Admission, PowThenZk, Rejection, POW_NONCE_BYTES, PROOF_BYTES, TOKEN_BYTES,
+};
 use crate::db::board::{BoardStore, Error as BoardError, BLOB_BYTES};
 use crate::db::queues::{Error as QueueError, QueueStore, FRAME_BYTES};
 use crate::db::{Db, Error as DbError, SendableError};
@@ -140,11 +142,25 @@ fn parse_address_lines(text: &str) -> std::collections::HashSet<bitcoin::ScriptB
 pub struct Board {
     store: BoardStore,
     admission: Arc<dyn Admission>,
+    /// Bytes of admission material a submission carries ahead of the
+    /// blob it stores.
+    admission_bytes: usize,
 }
 
 impl Board {
+    /// A board gated by proof of work: submissions are `nonce || blob`.
     pub fn new(store: BoardStore, admission: Arc<dyn Admission>) -> Self {
-        Self { store, admission }
+        Self { store, admission, admission_bytes: POW_NONCE_BYTES }
+    }
+
+    /// A board gated by proof of work and then a zero-knowledge
+    /// credential: submissions are `nonce || proof || blob`.
+    ///
+    /// Taking the ordered pair rather than any [`Admission`] is what
+    /// keeps verification behind the cheap gate: an operator cannot
+    /// configure the expensive check on its own.
+    pub fn with_credential(store: BoardStore, admission: Arc<PowThenZk>) -> Self {
+        Self { store, admission, admission_bytes: POW_NONCE_BYTES + PROOF_BYTES }
     }
 }
 
@@ -530,9 +546,9 @@ impl<D: Db> Service<D> {
 
     /// Route POST /board: submit one blob, gated by admission control.
     ///
-    /// The body is `nonce || blob`, fixed at
-    /// `POW_NONCE_BYTES + BLOB_BYTES` so every submission looks
-    /// identical on the wire. As with queue endpoints, client errors are
+    /// The body is the configured admission material followed by the
+    /// blob, at a fixed length so every submission looks identical on
+    /// the wire. As with queue endpoints, client errors are
     /// inner statuses. A submission whose admission tag was already
     /// recorded is acknowledged without being stored again, so a client
     /// that never saw its response (e.g. an OHTTP retransmit) can retry
@@ -545,7 +561,7 @@ impl<D: Db> Service<D> {
             .await
             .map_err(|e| HandlerError::InternalServerError(e.into()))?
             .to_bytes();
-        if submission.len() != POW_NONCE_BYTES + BLOB_BYTES {
+        if submission.len() != board.admission_bytes + BLOB_BYTES {
             return inner_status(StatusCode::BAD_REQUEST);
         }
         let tag = match board.admission.verify(&submission).await {
@@ -561,7 +577,7 @@ impl<D: Db> Service<D> {
             Ok(true) => return inner_status(StatusCode::OK),
             Err(e) => return Err(HandlerError::InternalServerError(e.into())),
         }
-        match board.store.post(&submission[POW_NONCE_BYTES..]).await {
+        match board.store.post(&submission[board.admission_bytes..]).await {
             Ok(_seq) => {}
             Err(BoardError::InvalidBlobSize(_)) => return inner_status(StatusCode::BAD_REQUEST),
             Err(BoardError::OverCapacity) => return inner_status(StatusCode::SERVICE_UNAVAILABLE),

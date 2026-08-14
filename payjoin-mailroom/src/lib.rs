@@ -246,6 +246,7 @@ async fn init_directory(
     sentinel_tag: SentinelTag,
     metrics: &MetricsService,
 ) -> anyhow::Result<DirectoryService> {
+    config.validate()?;
     let files_db =
         crate::db::FilesDb::init(config.timeout, config.storage_dir.clone(), config.mailbox_ttl)
             .await?;
@@ -293,11 +294,41 @@ async fn init_directory(
         .await?;
         store.spawn_background_prune().await;
         let dedupe = crate::admission::DedupeSet::open(board_dir.join("admitted.tags")).await?;
-        let admission = std::sync::Arc::new(crate::admission::PowAdmission::new(
-            config.board_pow_bits,
-            Some(dedupe),
-        ));
-        service = service.with_board(crate::directory::Board::new(store, admission));
+        let board = match &config.board_zk {
+            Some(zk) => {
+                let verifier = crate::admission::AutctVerifier::new(
+                    zk.autct_exe.clone(),
+                    zk.keyset_spec(),
+                    zk.host.clone(),
+                    zk.port,
+                    board_dir.join("autct"),
+                )
+                .await?;
+                let journal =
+                    crate::admission::SpentJournal::open(board_dir.join("spent.journal")).await?;
+                let credential = crate::admission::ZkAdmission::new(
+                    std::sync::Arc::new(verifier),
+                    journal,
+                    Some(dedupe),
+                );
+                // The admitted tag is the key image, which the
+                // credential records, so the work carries no replay
+                // set of its own.
+                let pow = crate::admission::PowAdmission::new(config.board_pow_bits, None);
+                crate::directory::Board::with_credential(
+                    store,
+                    std::sync::Arc::new(crate::admission::PowThenZk::new(pow, credential)),
+                )
+            }
+            None => crate::directory::Board::new(
+                store,
+                std::sync::Arc::new(crate::admission::PowAdmission::new(
+                    config.board_pow_bits,
+                    Some(dedupe),
+                )),
+            ),
+        };
+        service = service.with_board(board);
     }
     Ok(service)
 }
