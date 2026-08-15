@@ -26,7 +26,7 @@ impl Narrator {
         let transcript = File::create(artifacts_dir.join("transcript.txt"))?;
         Ok(Self {
             transcript: RefCell::new(transcript),
-            ledgers: RefCell::new(String::from("# Spam gauntlet ledgers\n")),
+            ledgers: RefCell::new(String::from("# Demo cost ledgers\n")),
             ledgers_path: artifacts_dir.join("ledgers.md"),
         })
     }

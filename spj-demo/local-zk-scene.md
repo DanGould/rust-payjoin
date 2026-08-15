@@ -1,11 +1,10 @@
 # Local scenes: key separation and ZK-credential admission
 
-Two demonstrations that do not run in the recorded harness. Scene 6 (key
-separation) and the Curve Trees credential admission both need things the
-recorded harness deliberately avoids: `aut-ct` pulls crates over the network
-and runs a WebSocket daemon, and the credential keyset is built from a full
-node's UTXO dump. Run these on a machine with network access and a regtest
-`bitcoind`.
+Two demonstrations that do not run in the recorded harness. The key separation
+scene and the Curve Trees credential admission both need things the recorded
+harness deliberately avoids: `aut-ct` pulls crates over the network and runs a
+WebSocket daemon, and the credential keyset is built from a full node's UTXO
+dump. Run these on a machine with network access and a regtest `bitcoind`.
 
 Everything below is regtest. The credential scene proves the _mechanism_
 (one-show tags, epoch rollover, double-show rejection) and quotes mainnet
@@ -14,7 +13,7 @@ sybil capital wall.
 
 ---
 
-## Scene 6 — key separation
+## Key separation
 
 **Property**: handing out the scan key never grants payjoin access. A watch-only
 scanning service given `b_scan` (and the public spend key) finds fallback silent
@@ -41,7 +40,7 @@ The demo already separates these keys:
 
    (Write this small example if you want it; the derivation is
    `SpKeys::from_seed` plus `HpkeKeyPair::gen_keypair`. It is not built into the
-   recorded harness because scene 6 is a local scene.)
+   recorded harness because key separation is a local scene.)
 
 2. Stand up a watch-only scanner holding only `b_scan` and the public spend key.
    Point it at the regtest chain and confirm it finds the fallback outputs from

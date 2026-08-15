@@ -1,4 +1,4 @@
-Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-demo" <not executed on terminal>]
+Script started on 2026-08-15 21:52:39+08:00 [COMMAND="cargo run --quiet -p spj-demo" <not executed on terminal>]
 ======================================================================
  STATIC PAYJOIN — recorded property demonstration
  regtest, in-process directory, real wire bytes
@@ -14,32 +14,32 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
 
   * the receiver publishes one static payment string and goes about
     its day
-      static string: bitcoin:bcrt1prmuytrgjrcxqc8sqsfynrragj320g3fs90rjsqmd6gcrs22enjpqkdtks0?pjos=0&pj=HTTPS://MAILROOM.LOCALHOST/FJGVY94PGE9TZ%23OH1QYPXQRWECAJ3VX2WVT5J0C4QQ20FWWSVEXQYMFFKWLUFF7T4QLJMRTS-RK1QGSX2725TL0UPM5ECKPJ04Z0PVQGY3NJ5592320GH2888LGQ8YFKU
+      static string: bitcoin:bcrt1prmuytrgjrcxqc8sqsfynrragj320g3fs90rjsqmd6gcrs22enjpqkdtks0?pjos=0&pj=HTTPS://MAILROOM.LOCALHOST/738W2W4TGWFZK%23OH1QYPZMVSTXDL56GA5RC36T60J3WYS7M746Z9SW9JDP2HC2P8F8KHY5NQ-RK1Q246C6DJNUCNGNXQ2MNZE3L68QVC7WWNTASN77A67R8TJU493X97U
       | the address slot is a placeholder derived from the receiver's
       | spend key; each sender replaces it with an output only they
       | can derive, so the string itself never appears on chain
   * payment 1: Alice derives her one-time output and posts to the
     queue
-      payjoin txid: 060f3696e6555d830a6392aeb1cff18efd6a5c542889f2b194987960bd807b51
-      receiver output: bcrt1pqvkn64hpaqfg0pmcv48x5tgedwzpge890aercqg5wsxenctpvn6qadkaux — fresh wallet address (payjoin)
+      payjoin txid: c8db6acba34f0deae2b675a2ab238ca0dbe0a5c9e209305cce12478341f0f1d1
+      receiver output: bcrt1pskzucuv3sud3chc607qupj48q04ksdtvgz4yqqka2lvs6te9u5fqt2tels — fresh wallet address (payjoin)
   * payment 2: Bob pays the same string; his derivation differs
-      payjoin txid: ada5afe3570dc27be9544b8aa7c75eefb2f7f9ad9c1fd12063843b27dc1d5284
-      receiver output: bcrt1p2xshplktgspfhglgty6qwdddwka3jk844mqstx767s824q7y0nns020f2z — fresh wallet address (payjoin)
+      payjoin txid: 9c441a6720c556ee38e3f4b9836b63c984bf6f1beefec31eef59457fbe909461
+      receiver output: bcrt1p85taujlvuyfp7lhf79f9tvzky4649jutevl7pf6kmuhe9429gk7q8w6hkk — fresh wallet address (payjoin)
   * payment 3: Bob pays the string again, but the receiver is away;
     Bob's patience lapses and his wallet broadcasts the original
     transaction unchanged
-      fallback txid: 7ba1e499fd6006d494b1dadaa0b80d846950efa64f8f4895e9e11f66af08a942
-      receiver output: bcrt1pf4ftn7dkeg2h04vf0qt204n43c3ge7v5ff8w3cfre3wstglctgdsaxns0n — derived one-time output
+      fallback txid: 3a057188314f1ab07ef482470a634868331168b92c61e08ce74fa6e8d3ea2edd
+      receiver output: bcrt1p35nplecxlutw3q4hux7nvlau7ag2tdug0yewzkt97lpcpx4r5m8sn4p893 — derived one-time output
   * compare the three on-chain receiver outputs
-      payment 1: bcrt1pqvkn64hpaqfg0pmcv48x5tgedwzpge890aercqg5wsxenctpvn6qadkaux
-      payment 2: bcrt1p2xshplktgspfhglgty6qwdddwka3jk844mqstx767s824q7y0nns020f2z
-      payment 3: bcrt1pf4ftn7dkeg2h04vf0qt204n43c3ge7v5ff8w3cfre3wstglctgdsaxns0n
+      payment 1: bcrt1pskzucuv3sud3chc607qupj48q04ksdtvgz4yqqka2lvs6te9u5fqt2tels
+      payment 2: bcrt1p85taujlvuyfp7lhf79f9tvzky4649jutevl7pf6kmuhe9429gk7q8w6hkk
+      payment 3: bcrt1p35nplecxlutw3q4hux7nvlau7ag2tdug0yewzkt97lpcpx4r5m8sn4p893
   * disaster drill: throw the receiver's wallet away and restore on
     a fresh one from seed material alone
       restored wallet rescan balance: 5.70000000 BTC
   * scan the chain with the scan key for anything the rescan missed
       silent payment scan: 1 unclaimed payment(s) found
-      sweep txid: 03d1ca4b3488cf59b4bcaf574b1a21ab46537bdc00736a74eed8d5deb04be63b
+      sweep txid: d573131e83fde5c738e6a80744a4913a8f66927053860f4613705ed00d69343d
 
   VERDICT [PASS]: three payments, three distinct taproot outputs; wallet
                  rescan recovered 5.70000000 BTC and the scan key
@@ -62,7 +62,7 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
   * Carol posts her payment to the queue and a notification to the
     board
       board post status: 200
-      proof-of-work hashes: 13402
+      proof-of-work hashes: 2407
   * show everything the directory operator can observe
       stored objects: 15
       total bytes at rest: 47071
@@ -73,7 +73,7 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
       board entries scanned: 7
       notifications addressed to me: 1
   * the notification says to poll; the receiver drains its queue
-      completed payjoin txid: 8d0f6797279ce99a0fd7e4d1283fc8cefd06662eeb75527d03e48eab29154824
+      completed payjoin txid: 3188a6bd99f7268add7fddf8af024b8d5e0cc94620f0d61ad221ced9080779ae
 
   VERDICT [PASS]: the receiver was offline when the payment began and
                  still completed it, having found exactly one real
@@ -89,17 +89,19 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
   CLAIM: silent payment.
 
   * Dave pays the string; the receiver is gone for good
-      intended output: bcrt1pu9lmftzhsql5zh8ylp4c0e8extftgau4nma8usfhs7g9djpe2tpqyf7nze
+      intended output: bcrt1pmnj2835ntnx9nrrhsueanlrxh33uafct3e3svdzhv3wz4fgwv56s743s3p
   * the receiver never polls; Dave's patience window closes
       broadcast: original transaction (no receiver contribution)
-      fallback txid: 0d24f48d7f372bef2a0a195d4684f6ec89e41d981a73db28d6587698b52eabaa
+      fallback txid: 9dd5e9a82ecb5be776bc4fb76f76d998b86e03c7c5cc7eae9913e66ba00b4e3c
   * later, the receiver scans the chain with its scan key
       silent payments found: 2
-      recovered: 0.70000000 BTC
+  * the receiver sweeps what is still unclaimed into its wallet
+      unclaimed: 1 payment(s), 0.50000000 BTC
+      sweep txid: 4d02fe3ab7fb9fb44bfcfa49a8f45e37ac23ec89e50d3e886c68a40fc235654a
 
   VERDICT [PASS]: no failure path loses a payment. The receiver went dark
-                 and the worst case was a vanilla silent payment the
-                 receiver still owns.
+                 and the worst case was a vanilla silent payment, now
+                 swept into its wallet.
 
 ======================================================================
  SCENE 4 — Token upgrade for a returning sender
@@ -112,15 +114,15 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
 
   * first payment: Frank is a stranger, so he announces on the board
       board notification: posted
-      proof-of-work hashes: 789
-      first payjoin txid: 2efc36fd1558cd9a7e198ca08211b1654f4d9ea10ee16addbab94c61fbc2b327
+      proof-of-work hashes: 15488
+      first payjoin txid: 36de07d7c13044cf10e25a361b58c59817cccd296e669737ca09ef93c3c21345
   * the mailroom turns on its queue token requirement
   * the receiver mints a queue token with its mailbox key
-      token issued: d6b4e063fa42e4ca… (113 bytes)
+      token issued: 1607ec4e61134ecf… (113 bytes)
   * a stranger posts to the queue without a token
       un-tokened post: rejected, inner status 400
   * second payment: Frank presents the token and skips the board
-      second payjoin txid: 4678b3a32769c759afa24f2948e84347486498ff1929a04075fc467138f9806a
+      second payjoin txid: 666baea704405d8e561975bc2053b7de17c1d827bff11358d8bfc4c8ef828ad0
       replaying the spent token: inner status 409
       board entries since the token requirement: 0
 
@@ -144,10 +146,10 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
       LEDGER — (a) board garbage
         attacker: unworked posts rejected      8 / 8
         attacker: worked posts admitted        12 / 12
-        attacker: hashes burned for admission  43059
+        attacker: hashes burned for admission  53812
         receiver: blobs scanned                13
         receiver: bytes downloaded             6656
-        receiver: scan time                    9.780378ms
+        receiver: scan time                    8.193118ms
         receiver: real notifications found     1
       | on mainnet the board post is gated by a real cost, and the
       | receiver's scan is a cheap trial-decryption per blob. Here it
@@ -158,13 +160,14 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
       LEDGER — (b) addressed garbage
         attacker: garbage frames injected   6
         receiver: frames trial-decrypted    7
-        receiver: drain time                44.172022ms
+        receiver: drain time                46.233618ms
         receiver: real proposals recovered  1
   * class (c): a valid probe crafted to extract a response
 
       LEDGER — (c) valid-decoy probe
         attacker: probe cost (spent to receiver)  0.30000000 BTC
         receiver: on-chain revenue                0.30000000 BTC
+        receiver: revenue swept to wallet         c70097102ec3a6a2a98bfdc0b520e6553cde6df4ada0e7637d0ad7ef13c86b97
         attacker: re-probes of the same coin      1
         receiver: re-probes dropped by dedupe     1
       | the abort broadcasts the prober's own transaction, so a probe
@@ -172,14 +175,17 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
       | receiver. The same coin cannot be shown twice
   * class (f): flood the board to its cap
   * an honest stranger tries to announce, but the board is full
+  * the receiver's next drain finds Heidi's frame; the flood only
+    cost the upgrade
 
       LEDGER — (f) board-cap flood
-        attacker: board posts to reach cap  7
-        attacker: hashes burned             41430
-        attacker: regtest coin cost         0 (free on regtest)
-        honest sender: board post status    503
-        honest sender: payment outcome      completed as vanilla silent payment
-        payments failed                     0
+        attacker: board posts to reach cap          7
+        attacker: hashes burned                     19902
+        attacker: regtest coin cost                 0 (free on regtest)
+        honest sender: board post status            503
+        honest sender: payment outcome              completed as vanilla silent payment
+        receiver: payment recovered from its queue  20650ed633595f7657e864a8840c06c1194ba15518b973a2d694bb1fcd292d63
+        payments failed                             0
       | on mainnet reaching the anonymity set means holding roughly
       | 238K taproot keys of at least 500K sats each behind per-post
       | work. The attacker here spent free regtest coins to downgrade
@@ -192,4 +198,101 @@ Script started on 2026-08-13 00:37:15+08:00 [COMMAND="cargo run --quiet -p spj-d
                  worst downgrades one upgrade to vanilla silent payment.
                  Zero payments failed.
 
-Script done on 2026-08-13 00:37:53+08:00 [COMMAND_EXIT_CODE="0"]
+======================================================================
+ SCENE 6 — The fallback notice
+======================================================================
+  CLAIM: A sender whose patience runs out broadcasts the original and
+  CLAIM: posts the same signed transaction back to the queue. The
+  CLAIM: receiver detects the settled payment from its mailbox alone,
+  CLAIM: scanning zero chain transactions, and the math that finds it
+  CLAIM: rejects a notice paying anyone else.
+
+  * Ivan pays the string; the receiver is away
+  * patience runs out: Ivan broadcasts the original, a plain silent
+    payment
+      fallback txid: ab53a3be2505594fe357844c2d3e84675f94082e42e0c3d301fd5575bb22ee68
+  * at broadcast time Ivan also posts the signed transaction to the
+    same queue as a fallback notice
+      notice: posted
+      | nothing new rides the wire: the notice is the same fully
+      | signed original, posted through the same client path and under
+      | the same admission as the payment attempt
+  * an attacker posts a well-formed notice whose transaction pays
+    the attacker
+      foreign notice: posted, carrying 9d4e7a480c224ef1600ece978c93587a217bebc949d4ed422986272f4fa4ea2e
+  * the receiver wakes and drains its queue; no chain scan is
+    running
+      mailbox frames processed: 3
+      distinct candidate transactions: 2
+      | the payment attempt and the notice carry the same transaction,
+      | so they collapse into one candidate by txid
+  * apply the scanning math to each candidate alone, then one
+    targeted lookup for the match
+      payment detected: ab53a3be2505594fe357844c2d3e84675f94082e42e0c3d301fd5575bb22ee68 pays 0.35000000 BTC (2 confirmation(s))
+      foreign candidates rejected: 1
+  * the receiver records the payment and sweeps it into its wallet
+      sweep txid: 825d5e75d6547b2e6a6d19946d9e0201a30277d29d20df94a2409d62f4b564cc
+
+      LEDGER — fallback notice
+        mailbox frames processed           3
+        distinct candidate transactions    2
+        payments detected                  1
+        foreign notices rejected           1
+        chain transactions scanned         0
+        targeted chain lookups (gettxout)  1
+        blocks downloaded                  0
+
+  VERDICT [PASS]: the receiver detected and claimed a settled payment from
+                 its mailbox alone. A notice is self-verifying: one that
+                 fails the math is dropped for free, and one that passes
+                 is not a forgery but a payment.
+
+======================================================================
+ SCENE 7 — Lazy audit from a tweak index
+======================================================================
+  CLAIM: Cooperating senders are detected in the mailbox, so scanning
+  CLAIM: becomes an audit job. A sender holding only the bare address
+  CLAIM: pays on chain; a receiver restored from seed finds the
+  CLAIM: payment from a flat tweak index, one ECDH per eligible
+  CLAIM: transaction, and fetches exactly one block to claim it.
+
+  * Oscar holds only the bare silent payment address: no payjoin
+    endpoint, no mailbox, no notice
+      on-chain payment: eb5015d2ec04d5a7afa201bceeb855f754d4c26544620b92ced2cc1a901f1f23
+      | no notice exists for this payment; only scanning can find it
+  * an indexer with chain access walks the blocks once and emits the
+    tweak index
+      blocks walked: 34
+      eligible transactions indexed: 4
+      entries dropped as fully spent (cut-through): 9
+      index file: artifacts/tweak-index.bin
+      | each record is a transaction's 33-byte tweak plus its taproot
+      | output keys, the record shape deployed tweak servers hand
+      | light clients. This indexer is a toy standing in for that
+      | infrastructure, like the demo's other silent payment code
+  * a receiver restored from seed audits the index alone: one ECDH
+    per record, no block downloads
+      records scanned: 4
+      unclaimed payments found: 1
+  * fetch the one matching block and build the claim
+      sweep txid: 285abb36d2432895e3d7fef2e01a618a1fbba2da0a2e2028f49892b8f21392fd
+
+      LEDGER — lazy audit
+        index bytes                   440
+        full-chain bytes, same range  15657
+        records scanned               4
+        ECDH operations               4
+        unclaimed payments found      1
+        blocks fetched to claim       1
+      | mainnet economics, quoted rather than demonstrated: Sparrow's
+      | Frigate server publishes measured benchmarks of 127,804
+      | eligible transactions in a day of mainnet, a tweak feed of
+      | about 4.2 MB per day at 33 bytes each, and a full day scanned
+      | end to end in 2.7 seconds on a laptop CPU
+
+  VERDICT [PASS]: the restored receiver found the one payment the mailbox
+                 could never know about by reading a flat index a
+                 fraction of the chain's size, and downloaded exactly one
+                 block to claim it.
+
+Script done on 2026-08-15 21:53:18+08:00 [COMMAND_EXIT_CODE="0"]
