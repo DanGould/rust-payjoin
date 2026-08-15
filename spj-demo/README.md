@@ -57,7 +57,7 @@ run, not byte-reproducible.
    queue directly, while un-tokened posts and token replays are refused.
 5. **The spam gauntlet** — one attacker-versus-receiver ledger per spam class.
 
-Two further scenes run on a machine outside this build host's boundary; see
+Two further scenes run outside the recorded harness; see
 [`local-zk-scene.md`](local-zk-scene.md): key separation, and board admission by
 a Curve Trees membership credential.
 

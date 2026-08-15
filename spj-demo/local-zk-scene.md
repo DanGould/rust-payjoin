@@ -1,10 +1,11 @@
 # Local scenes: key separation and ZK-credential admission
 
 Two demonstrations that do not run in the recorded harness. Scene 6 (key
-separation) and the Curve Trees credential admission both need tools that sit
-outside this build host: `aut-ct` pulls crates over the network and runs a
-WebSocket daemon, and the credential keyset is built from a full node's UTXO
-dump. Run these on a machine with network access and a regtest `bitcoind`.
+separation) and the Curve Trees credential admission both need things the
+recorded harness deliberately avoids: `aut-ct` pulls crates over the network
+and runs a WebSocket daemon, and the credential keyset is built from a full
+node's UTXO dump. Run these on a machine with network access and a regtest
+`bitcoind`.
 
 Everything below is regtest. The credential scene proves the _mechanism_
 (one-show tags, epoch rollover, double-show rejection) and quotes mainnet
@@ -107,7 +108,7 @@ wallet first so the keyset is not operator theater.
 ### Run the verifier
 
 ```sh
-# 3. Build aut-ct (network access required; outside this build host)
+# 3. Build aut-ct (network access required)
 git clone https://github.com/AdamISZ/aut-ct && cd aut-ct
 cargo build --release
 
@@ -145,7 +146,6 @@ trait that yields a public dedupe tag.
 ## Why these are not in the recorded harness
 
 `aut-ct`'s build fetches crates from the network and its verifier is a listening
-daemon; both are outside this build host's execution boundary (no network fetch,
-no listeners). The recorded harness runs the directory in process precisely to
-stay inside that boundary. Build and run these two scenes where a network fetch
-and a local daemon are allowed.
+daemon. The recorded harness is self-contained by design: it fetches nothing and
+starts no standalone daemons, running the directory in process instead. Build
+and run these two scenes where a network fetch and a local daemon are allowed.
