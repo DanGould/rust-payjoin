@@ -51,27 +51,37 @@ impl SpKeys {
     /// keys, recompute the shared secret and check whether any output
     /// pays the derived key. Returns the paying output index and the
     /// keypair that spends it.
+    ///
+    /// This is [`tweak_from_tx`] followed by [`Self::scan_with_tweak`]:
+    /// everything the scan needs from the transaction itself is the
+    /// 33-byte tweak and its taproot output keys, which is what lets a
+    /// tweak index scan without the transaction.
     pub fn scan_tx(
         &self,
         secp: &Secp256k1<All>,
         tx: &Transaction,
         input_pubkeys: &[PublicKey],
     ) -> Option<(usize, Keypair)> {
-        if input_pubkeys.is_empty() {
-            return None;
-        }
-        let a_sum = sum_pubkeys(input_pubkeys)?;
-        let outpoints: Vec<OutPoint> = tx.input.iter().map(|input| input.previous_output).collect();
-        let input_hash = input_hash(&outpoints, &a_sum)?;
-        let shared = a_sum
-            .mul_tweak(secp, &scalar(self.b_scan.mul_tweak(&input_hash).ok()?.secret_bytes()).ok()?)
-            .ok()?;
-        let (expected, tweaked) = self.derive_spend(secp, &shared)?;
-        let script = ScriptBuf::new_p2tr_tweaked(expected.dangerous_assume_tweaked());
-        tx.output
-            .iter()
-            .position(|output| output.script_pubkey == script)
-            .map(|vout| (vout, tweaked))
+        let tweak = tweak_from_tx(secp, tx, input_pubkeys)?;
+        let outputs = taproot_output_keys(tx);
+        let keys: Vec<XOnlyPublicKey> = outputs.iter().map(|(_, key)| *key).collect();
+        let (index, keypair) = self.scan_with_tweak(secp, &tweak, &keys)?;
+        Some((outputs[index].0, keypair))
+    }
+
+    /// The receiver half of the scan: ECDH the tweak against the scan
+    /// key, derive the expected output key, and look for it among
+    /// `output_keys`. Returns the position of the paying key in
+    /// `output_keys` and the keypair that spends it.
+    pub fn scan_with_tweak(
+        &self,
+        secp: &Secp256k1<All>,
+        tweak: &PublicKey,
+        output_keys: &[XOnlyPublicKey],
+    ) -> Option<(usize, Keypair)> {
+        let shared = tweak.mul_tweak(secp, &scalar(self.b_scan.secret_bytes()).ok()?).ok()?;
+        let (expected, keypair) = self.derive_spend(secp, &shared)?;
+        output_keys.iter().position(|key| *key == expected).map(|index| (index, keypair))
     }
 
     /// ECDH of an ephemeral public key against the scan key, used by
@@ -90,6 +100,42 @@ impl SpKeys {
         let keypair = Keypair::from_secret_key(secp, &spend_sk);
         Some((keypair.x_only_public_key().0, keypair))
     }
+}
+
+/// The scan tweak of one transaction: `input_hash · A_sum`, the public
+/// part of the BIP 352 shared secret. It needs no receiver keys, so a
+/// third party can compute it for every transaction in a block and
+/// serve the 33-byte results as an index; a receiver completes the
+/// scan from those alone via [`SpKeys::scan_with_tweak`].
+pub fn tweak_from_tx(
+    secp: &Secp256k1<All>,
+    tx: &Transaction,
+    input_pubkeys: &[PublicKey],
+) -> Option<PublicKey> {
+    if input_pubkeys.is_empty() {
+        return None;
+    }
+    let a_sum = sum_pubkeys(input_pubkeys)?;
+    let outpoints: Vec<OutPoint> = tx.input.iter().map(|input| input.previous_output).collect();
+    let input_hash = input_hash(&outpoints, &a_sum)?;
+    a_sum.mul_tweak(secp, &input_hash).ok()
+}
+
+/// The x-only keys of a transaction's taproot outputs, each with its
+/// output index.
+pub fn taproot_output_keys(tx: &Transaction) -> Vec<(usize, XOnlyPublicKey)> {
+    tx.output
+        .iter()
+        .enumerate()
+        .filter_map(|(vout, output)| {
+            if !output.script_pubkey.is_p2tr() {
+                return None;
+            }
+            XOnlyPublicKey::from_slice(&output.script_pubkey.as_bytes()[2..])
+                .ok()
+                .map(|key| (vout, key))
+        })
+        .collect()
 }
 
 /// Sender-side derivation: from the sender's own input keys and
@@ -208,22 +254,19 @@ mod tests {
         OutPoint { txid: bitcoin::Txid::from_byte_array([n; 32]), vout: u32::from(n) }
     }
 
-    #[test]
-    fn receiver_finds_and_can_spend_what_sender_derives() {
-        let secp = Secp256k1::new();
-        let receiver = SpKeys::from_seed(b"demo seed");
-        let address = receiver.address(&secp);
-
+    /// A transaction paying the receiver's derived output, with
+    /// P2WPKH-shaped witnesses carrying the sender input keys.
+    fn crafted_payment(
+        secp: &Secp256k1<All>,
+        address: &SpAddress,
+    ) -> (Transaction, XOnlyPublicKey) {
         let input_keys = vec![
             SecretKey::from_slice(&[3u8; 32]).unwrap(),
             SecretKey::from_slice(&[5u8; 32]).unwrap(),
         ];
         let outpoints = vec![fake_outpoint(1), fake_outpoint(2)];
         let output_key =
-            sender_derive_output(&secp, &input_keys, &outpoints, &address).expect("derivation");
-
-        // A transaction spending those outpoints and paying the derived
-        // script, with P2WPKH-shaped witnesses carrying the input keys.
+            sender_derive_output(secp, &input_keys, &outpoints, address).expect("derivation");
         let tx = Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
@@ -233,7 +276,7 @@ mod tests {
                 .map(|(outpoint, key)| {
                     let mut witness = Witness::new();
                     witness.push([0u8; 71]);
-                    witness.push(key.public_key(&secp).serialize());
+                    witness.push(key.public_key(secp).serialize());
                     TxIn {
                         previous_output: *outpoint,
                         script_sig: ScriptBuf::new(),
@@ -247,12 +290,48 @@ mod tests {
                 script_pubkey: output_script(output_key),
             }],
         };
+        (tx, output_key)
+    }
+
+    #[test]
+    fn receiver_finds_and_can_spend_what_sender_derives() {
+        let secp = Secp256k1::new();
+        let receiver = SpKeys::from_seed(b"demo seed");
+        let address = receiver.address(&secp);
+        let (tx, output_key) = crafted_payment(&secp, &address);
 
         let pubkeys = input_pubkeys_from_witnesses(&tx);
         assert_eq!(pubkeys.len(), 2);
         let (vout, keypair) = receiver.scan_tx(&secp, &tx, &pubkeys).expect("scan finds payment");
         assert_eq!(vout, 0);
         assert_eq!(keypair.x_only_public_key().0, output_key);
+    }
+
+    #[test]
+    fn scan_decomposes_into_tweak_then_key_match() {
+        let secp = Secp256k1::new();
+        let receiver = SpKeys::from_seed(b"demo seed");
+        let address = receiver.address(&secp);
+        let (tx, _) = crafted_payment(&secp, &address);
+        let pubkeys = input_pubkeys_from_witnesses(&tx);
+
+        // The tweak and the taproot output keys are all the scan needs
+        // from the transaction: composing the two halves over them must
+        // equal scanning the transaction directly.
+        let tweak = tweak_from_tx(&secp, &tx, &pubkeys).expect("tweak");
+        assert_eq!(tweak.serialize().len(), 33);
+        let outputs = taproot_output_keys(&tx);
+        let keys: Vec<XOnlyPublicKey> = outputs.iter().map(|(_, key)| *key).collect();
+        let (index, keypair) =
+            receiver.scan_with_tweak(&secp, &tweak, &keys).expect("tweak scan finds payment");
+        let (vout, direct) = receiver.scan_tx(&secp, &tx, &pubkeys).expect("direct scan");
+        assert_eq!(outputs[index].0, vout);
+        assert_eq!(keypair.x_only_public_key().0, direct.x_only_public_key().0);
+
+        // Keys that pay someone else never match.
+        let stranger = SecretKey::from_slice(&[9u8; 32]).unwrap();
+        let stranger_key = stranger.x_only_public_key(&secp).0;
+        assert!(receiver.scan_with_tweak(&secp, &tweak, &[stranger_key]).is_none());
     }
 
     #[test]
