@@ -13,6 +13,7 @@
 //! is split into a lib and a thin bin so scenes and helpers stay
 //! individually testable.
 
+pub mod index;
 pub mod narrate;
 pub mod net;
 pub mod persist;
