@@ -7,6 +7,7 @@ pub mod s2_async_board;
 pub mod s3_floor;
 pub mod s4_token_upgrade;
 pub mod s5_spam_gauntlet;
+pub mod s6_fallback_notice;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -257,6 +258,9 @@ pub fn uri_with_address(static_uri: &str, address: &Address) -> Result<String, B
 pub struct InFlightPayment {
     pub sender_name: &'static str,
     pub sp_script: ScriptBuf,
+    /// The fully signed original, kept so the sender can post it again
+    /// as a fallback notice when its patience expires.
+    pub original_psbt: Psbt,
     pub log: JsonlPersister<SenderStaticEvent>,
 }
 
@@ -318,7 +322,7 @@ async fn send_message_a_impl(
         wallet.name,
         demo.next_payment_id()
     )));
-    let mut builder = StaticSenderBuilder::new(psbt, uri);
+    let mut builder = StaticSenderBuilder::new(psbt.clone(), uri);
     if let Some(patience) = patience {
         builder = builder.with_patience(patience);
     }
@@ -334,7 +338,7 @@ async fn send_message_a_impl(
         .save(&log)
         .map_err(|e| format!("posting original failed: {e:?}"))?;
 
-    Ok(InFlightPayment { sender_name: wallet.name, sp_script, log })
+    Ok(InFlightPayment { sender_name: wallet.name, sp_script, original_psbt: psbt, log })
 }
 
 /// The sender's side of finishing: poll the reply mailbox, sign the
