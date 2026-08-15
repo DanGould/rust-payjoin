@@ -72,8 +72,8 @@ maps onto aut-ct's key image.
 
 ### Upstream caveats (read before forking)
 
-- **No LICENSE file** on `aut-ct` or `curve-trees` (readme-only MIT). Contact
-  AdamISZ before any public fork or redistribution.
+- **MIT licensed** as of August 2026 (`aut-ct` carries a LICENSE file at its
+  tip). Check `curve-trees` licensing separately before redistributing it.
 - **Experimental, benchmark-grade** code. Fine for a demo, not production.
 - **Constant-J tag is unfixed upstream** (`src/utils.rs`, `J = H2C("J" ||
 context_label)`). Related-key linkage applies: an adversary who knows the
@@ -129,7 +129,8 @@ trait that yields a public dedupe tag.
 ### Scene to record
 
 1. A poster with a qualifying regtest taproot UTXO proves membership; the board
-   accepts. Show the proof size (~3-4 KB) and verify time (~40-60 ms).
+   accepts. Show the proof size (about 2.8 KB) and server-side verify time
+   (tens of milliseconds); proving takes a second or two.
 2. The same coin proves again in the same epoch: same key image, rejected.
 3. Roll the epoch (`context_label` changes): the same coin proves again and is
    accepted, demonstrating per-epoch allowance renewal, including a post that
