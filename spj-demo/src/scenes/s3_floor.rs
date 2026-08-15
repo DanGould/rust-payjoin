@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use bitcoin::{Address, Amount, Network};
 
-use super::{fall_back, scan_chain_for_sp, send_message_a, BoxError, Demo};
+use super::{
+    fall_back, is_unspent, scan_chain_for_sp, send_message_a, sweep_to_wallet, BoxError, Demo,
+};
 use crate::wallet::DemoWallet;
 
 pub async fn run(demo: &mut Demo) -> Result<(), BoxError> {
@@ -38,16 +40,41 @@ pub async fn run(demo: &mut Demo) -> Result<(), BoxError> {
 
     demo.narrator.step("later, the receiver scans the chain with its scan key");
     let found = scan_chain_for_sp(demo)?;
-    let recovered: Amount = found.iter().map(|(_, txout, _)| txout.value).sum();
     demo.narrator.result("silent payments found", &found.len().to_string());
-    demo.narrator.result("recovered", &recovered.to_string());
+
+    // The scan key sees every silent payment ever received, including
+    // coins the wallet already claimed; only what is still unspent
+    // needs sweeping.
+    demo.narrator.step("the receiver sweeps what is still unclaimed into its wallet");
+    let mut unclaimed = Vec::new();
+    for entry in &found {
+        if is_unspent(demo, &entry.0)? {
+            unclaimed.push(entry);
+        }
+    }
+    let recovered: Amount = unclaimed.iter().map(|(_, txout, _)| txout.value).sum();
+    demo.narrator.result("unclaimed", &format!("{} payment(s), {recovered}", unclaimed.len()));
+    let mut sweep_ok = true;
+    for (outpoint, prevout, keypair) in &unclaimed {
+        match sweep_to_wallet(demo, *outpoint, prevout, keypair) {
+            Ok(txid) => demo.narrator.result("sweep txid", &txid.to_string()),
+            Err(e) => {
+                sweep_ok = false;
+                demo.narrator.result("sweep failed", &e.to_string());
+            }
+        }
+    }
 
     let paid_derived = tx.output.iter().any(|out| out.script_pubkey == sp_script);
-    let pass = paid_derived && found.iter().any(|(op, _, _)| op.txid == tx.compute_txid());
+    let pass = paid_derived
+        && unclaimed.len() == 1
+        && unclaimed.iter().any(|(op, _, _)| op.txid == tx.compute_txid())
+        && sweep_ok;
     demo.narrator.verdict(
         pass,
         "no failure path loses a payment. The receiver went dark and the \
-         worst case was a vanilla silent payment the receiver still owns.",
+         worst case was a vanilla silent payment, now swept into its \
+         wallet.",
     );
     if !pass {
         return Err("scene 3 assertions failed".into());

@@ -466,6 +466,62 @@ pub fn respond_with_original_broadcast(
     Ok(Some(original))
 }
 
+/// The fully signed original transaction carried by a queued proposal.
+///
+/// Seeds the proposal's sub-session log and extracts the transaction
+/// without the broadcast-suitability check: callers judge these
+/// candidates by chain state instead. A fallback already confirmed on
+/// chain would fail mempool acceptance, yet is exactly the settled
+/// payment the receiver wants to verify.
+pub fn original_tx_from_proposal(
+    demo: &Demo,
+    proposal: InboundProposal,
+    label: &str,
+) -> Result<Transaction, BoxError> {
+    let log = JsonlPersister::<ReceiverSessionEvent>::new(
+        demo.state_dir.join(format!("receiver-candidate-{label}.jsonl")),
+    );
+    let receiver = proposal.save(&log)?;
+    let receiver = receiver
+        .assume_interactive_receiver()
+        .save(&log)
+        .map_err(|e| format!("seed candidate: {e:?}"))?;
+    Ok(receiver.extract_tx_to_schedule_broadcast())
+}
+
+/// Whether an outpoint is unspent, per the node's UTXO set.
+pub fn is_unspent(demo: &Demo, outpoint: &OutPoint) -> Result<bool, BoxError> {
+    let res: serde_json::Value = demo.miner.call(
+        "gettxout",
+        &[serde_json::json!(outpoint.txid.to_string()), serde_json::json!(outpoint.vout)],
+    )?;
+    Ok(!res.is_null())
+}
+
+/// Sweep one derived silent payment output into a fresh receiver
+/// wallet address and confirm it.
+pub fn sweep_to_wallet(
+    demo: &Demo,
+    outpoint: OutPoint,
+    prevout: &TxOut,
+    keypair: &bitcoin::key::Keypair,
+) -> Result<bitcoin::Txid, BoxError> {
+    let destination = demo.fresh_receiver_address()?;
+    let fee = Amount::from_sat(200);
+    let sweep = sp::sweep_keyspend(
+        &demo.secp,
+        outpoint,
+        prevout,
+        keypair,
+        destination.script_pubkey(),
+        fee,
+    )
+    .ok_or("sweep construction failed")?;
+    let txid = demo.broadcast(&sweep)?;
+    demo.mine(1)?;
+    Ok(txid)
+}
+
 fn check_broadcastable(
     demo: &Demo,
     receiver: Receiver<UncheckedOriginalPayload>,

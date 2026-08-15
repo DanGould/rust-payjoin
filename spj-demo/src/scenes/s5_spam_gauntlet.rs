@@ -10,13 +10,14 @@
 use std::time::Instant;
 
 use bitcoin::secp256k1::rand::RngCore;
-use bitcoin::Amount;
+use bitcoin::{Amount, OutPoint};
 
 use super::{
-    respond_with_original_broadcast, seal_notification, send_message_a, BoxError, Demo,
-    QUEUE_FRAME_BYTES,
+    respond_with_original_broadcast, seal_notification, send_message_a, sweep_to_wallet, BoxError,
+    Demo, QUEUE_FRAME_BYTES,
 };
 use crate::net::BLOB_BYTES;
+use crate::sp;
 use crate::wallet::DemoWallet;
 
 pub async fn run(demo: &mut Demo) -> Result<(), BoxError> {
@@ -186,15 +187,25 @@ async fn class_c_decoy_probe(demo: &mut Demo) -> Result<(), BoxError> {
     let probe_script = probe1.sp_script.clone();
     let [proposal]: [_; 1] =
         demo.receiver_poll().await?.try_into().map_err(|_| "expected one probe")?;
-    let broadcast_value = match respond_with_original_broadcast(demo, proposal, "probe-1")? {
-        Some(original) => original
-            .output
-            .iter()
-            .find(|o| o.script_pubkey == probe_script)
-            .map(|o| o.value)
-            .unwrap_or(Amount::ZERO),
+    let original = match respond_with_original_broadcast(demo, proposal, "probe-1")? {
+        Some(original) => original,
         None => return Err("class (c): first probe should have been broadcast".into()),
     };
+    let broadcast_value = original
+        .output
+        .iter()
+        .find(|o| o.script_pubkey == probe_script)
+        .map(|o| o.value)
+        .unwrap_or(Amount::ZERO);
+
+    // The broadcast pays the receiver's derived output; bank it like
+    // any other silent payment so the revenue lands in the wallet.
+    let (vout, keypair) = demo
+        .sp_keys
+        .scan_tx(&demo.secp, &original, &sp::input_pubkeys_from_witnesses(&original))
+        .ok_or("class (c): the probe's own transaction must pay the receiver")?;
+    let revenue_outpoint = OutPoint { txid: original.compute_txid(), vout: vout as u32 };
+    let revenue_sweep = sweep_to_wallet(demo, revenue_outpoint, &original.output[vout], &keypair)?;
 
     // Re-probe with the same coin. The receiver has recorded the
     // outpoint, so the abort policy drops it without a broadcast.
@@ -213,6 +224,7 @@ async fn class_c_decoy_probe(demo: &mut Demo) -> Result<(), BoxError> {
         &[
             ("attacker: probe cost (spent to receiver)".into(), broadcast_value.to_string()),
             ("receiver: on-chain revenue".into(), broadcast_value.to_string()),
+            ("receiver: revenue swept to wallet".into(), revenue_sweep.to_string()),
             ("attacker: re-probes of the same coin".into(), "1".into()),
             ("receiver: re-probes dropped by dedupe".into(), deduped.to_string()),
         ],
@@ -230,7 +242,9 @@ async fn class_c_decoy_probe(demo: &mut Demo) -> Result<(), BoxError> {
 
 /// (f) Sustained flood to the board cap: an honest first-contact sender
 /// cannot post a notification, times out, and completes as vanilla
-/// silent payment. No payment fails.
+/// silent payment. The flood never touches the queue, so the receiver
+/// still recovers the payment from the sender's frame. No payment
+/// fails.
 async fn class_f_board_flood(demo: &mut Demo) -> Result<(), BoxError> {
     demo.narrator.step("class (f): flood the board to its cap");
 
@@ -276,6 +290,25 @@ async fn class_f_board_flood(demo: &mut Demo) -> Result<(), BoxError> {
     let tx = super::fall_back(demo, &mut heidi, payment).await?;
     let downgraded_ok = tx.output.iter().any(|o| o.script_pubkey == sp_script);
 
+    // The flood only silenced the board, the wake-up channel. Heidi's
+    // payment frame reached the queue before her patience ran out, so
+    // the receiver's next drain still hands it the settled payment.
+    demo.narrator
+        .step("the receiver's next drain finds Heidi's frame; the flood only cost the upgrade");
+    let [proposal]: [_; 1] = demo
+        .receiver_poll()
+        .await?
+        .try_into()
+        .map_err(|_| "class (f): expected Heidi's frame in the queue")?;
+    let queued_tx = super::original_tx_from_proposal(demo, proposal, "flood-heidi")?;
+    let recovered_ok = queued_tx.compute_txid() == tx.compute_txid();
+    let (vout, keypair) = demo
+        .sp_keys
+        .scan_tx(&demo.secp, &queued_tx, &sp::input_pubkeys_from_witnesses(&queued_tx))
+        .ok_or("class (f): Heidi's transaction must pay the receiver")?;
+    let heidi_outpoint = OutPoint { txid: queued_tx.compute_txid(), vout: vout as u32 };
+    let heidi_sweep = sweep_to_wallet(demo, heidi_outpoint, &queued_tx.output[vout], &keypair)?;
+
     demo.narrator.ledger(
         "(f) board-cap flood",
         &[
@@ -284,6 +317,7 @@ async fn class_f_board_flood(demo: &mut Demo) -> Result<(), BoxError> {
             ("attacker: regtest coin cost".into(), "0 (free on regtest)".into()),
             ("honest sender: board post status".into(), honest_status.to_string()),
             ("honest sender: payment outcome".into(), "completed as vanilla silent payment".into()),
+            ("receiver: payment recovered from its queue".into(), heidi_sweep.to_string()),
             ("payments failed".into(), "0".into()),
         ],
     );
@@ -293,7 +327,7 @@ async fn class_f_board_flood(demo: &mut Demo) -> Result<(), BoxError> {
          attacker here spent free regtest coins to downgrade exactly one \
          stranger's upgrade; nobody lost a payment",
     );
-    if !(hit_cap && honest_status == 503 && downgraded_ok) {
+    if !(hit_cap && honest_status == 503 && downgraded_ok && recovered_ok) {
         return Err("class (f) assertions failed".into());
     }
     Ok(())
