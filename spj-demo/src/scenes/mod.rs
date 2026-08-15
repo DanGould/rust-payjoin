@@ -8,6 +8,7 @@ pub mod s3_floor;
 pub mod s4_token_upgrade;
 pub mod s5_spam_gauntlet;
 pub mod s6_fallback_notice;
+pub mod s7_lazy_audit;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ use payjoin::send::v2::static_session::{
 use payjoin::{ImplementationError, OhttpKeys, Uri};
 use payjoin_test_utils::corepc_node::{self, AddressType, Client};
 
+use crate::index;
 use crate::narrate::Narrator;
 use crate::net::{Mailroom, MailroomOpts, BLOB_BYTES};
 use crate::persist::JsonlPersister;
@@ -683,6 +685,51 @@ pub fn scan_chain_for_sp(
         }
     }
     Ok(found)
+}
+
+/// A pass of the toy tweak indexer over the demo chain.
+pub struct TweakIndexBuild {
+    pub records: Vec<index::TweakRecord>,
+    /// Serialized size of every block in the indexed range: what a
+    /// scanning wallet would download without the index.
+    pub chain_bytes: u64,
+    pub blocks: u64,
+    /// Eligible transactions dropped because every taproot output is
+    /// already spent (cut-through).
+    pub cut: usize,
+}
+
+/// Walk the chain from the demo's start height and build tweak index
+/// records for every eligible transaction, dropping entries with no
+/// unspent taproot output left, as deployed tweak servers do.
+pub fn build_tweak_index(demo: &Demo) -> Result<TweakIndexBuild, BoxError> {
+    let tip = block_count(&demo.bitcoind.client)?;
+    let mut build = TweakIndexBuild { records: Vec::new(), chain_bytes: 0, blocks: 0, cut: 0 };
+    for height in demo.scan_from_height..=tip {
+        let hash = demo.bitcoind.client.get_block_hash(height)?.into_model()?.0;
+        let block = demo.bitcoind.client.get_block(hash)?;
+        build.chain_bytes += bitcoin::consensus::serialize(&block).len() as u64;
+        build.blocks += 1;
+        for tx in &block.txdata {
+            let Some(record) = index::record_from_tx(&demo.secp, u32::try_from(height)?, tx) else {
+                continue;
+            };
+            let txid = tx.compute_txid();
+            let mut any_unspent = false;
+            for (vout, _) in sp::taproot_output_keys(tx) {
+                if is_unspent(demo, &OutPoint { txid, vout: vout as u32 })? {
+                    any_unspent = true;
+                    break;
+                }
+            }
+            if any_unspent {
+                build.records.push(record);
+            } else {
+                build.cut += 1;
+            }
+        }
+    }
+    Ok(build)
 }
 
 /// Demo notification sealing for board blobs. Payjoin messages are
