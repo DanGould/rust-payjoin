@@ -550,6 +550,128 @@ impl WithReplyKey {
     }
 }
 
+/// Builder for a BIP 78 (v1) payjoin request.
+///
+/// Use this when [`PjUri::pj_version`] is [`crate::PjVersion::V1`]. The request
+/// goes straight to the receiver's endpoint over HTTPS with no OHTTP relay in
+/// between, so the receiver learns the sender's network address unless the
+/// request is routed over Tor or a similar transport.
+///
+/// Unlike the BIP 77 [`SenderBuilder`], this flow is a single request and
+/// response with no session to persist. Call [`V1Sender::create_v1_post_request`],
+/// POST the request, then pass the response to [`V1Context::process_response`].
+#[derive(Clone, uniffi::Object)]
+pub struct V1SenderBuilder(payjoin::send::v1::SenderBuilder);
+
+#[uniffi::export]
+impl V1SenderBuilder {
+    /// Prepare a v1 request builder from the Original PSBT and the payjoin URI.
+    ///
+    /// Output substitution follows the URI's `pjos` parameter.
+    #[uniffi::constructor]
+    pub fn new(psbt: String, uri: Arc<PjUri>) -> Result<Self, SenderInputError> {
+        let psbt = payjoin::bitcoin::psbt::Psbt::from_str(psbt.as_str())
+            .map_err(PsbtParseError::from)
+            .map_err(SenderInputError::Psbt)?;
+        let uri: payjoin::PjUri = Arc::unwrap_or_clone(uri).into();
+        Ok(Self(payjoin::send::v1::SenderBuilder::new(psbt, uri)))
+    }
+
+    /// Disable output substitution even if the receiver didn't.
+    ///
+    /// This forbids receiver switching output or decreasing amount.
+    /// It is generally **not** recommended to set this as it may prevent the receiver from
+    /// doing advanced operations such as opening LN channels and it also guarantees the
+    /// receiver will **not** reward the sender with a discount.
+    pub fn always_disable_output_substitution(&self) -> Self {
+        Self(self.0.clone().always_disable_output_substitution())
+    }
+
+    /// Calculate the recommended fee contribution for an Original PSBT.
+    ///
+    /// BIP 78 recommends contributing `originalPSBTFeeRate * vsize(sender_input_type)`.
+    /// The minfeerate parameter is set if the contribution is available in change.
+    ///
+    /// This method fails if no recommendation can be made or if the PSBT is malformed.
+    pub fn build_recommended(
+        &self,
+        min_fee_rate_sat_per_kwu: u64,
+    ) -> Result<V1Sender, SenderInputError> {
+        let fee_rate = validate_fee_rate_sat_per_kwu(min_fee_rate_sat_per_kwu)?;
+        self.0
+            .clone()
+            .build_recommended(fee_rate)
+            .map(V1Sender)
+            .map_err(|e| SenderInputError::Build(Arc::new(e.into())))
+    }
+
+    /// Offer the receiver contribution to pay for his input.
+    ///
+    /// These parameters will allow the receiver to take `max_fee_contribution_sats` from given change
+    /// output to pay for additional inputs. The recommended fee is `size_of_one_input * fee_rate`.
+    ///
+    /// `change_index` specifies which output can be used to pay fee. If `None` is provided, then
+    /// the output is auto-detected unless the supplied transaction has more than two outputs.
+    ///
+    /// `clamp_fee_contribution` decreases fee contribution instead of erroring.
+    ///
+    /// If this option is true and a transaction with change amount lower than fee
+    /// contribution is provided then instead of returning error the fee contribution will
+    /// be just lowered in the request to match the change amount.
+    pub fn build_with_additional_fee(
+        &self,
+        max_fee_contribution_sats: u64,
+        change_index: Option<u8>,
+        min_fee_rate_sat_per_kwu: u64,
+        clamp_fee_contribution: bool,
+    ) -> Result<V1Sender, SenderInputError> {
+        let max_fee_contribution = validate_amount_sat(max_fee_contribution_sats)?;
+        let fee_rate = validate_fee_rate_sat_per_kwu(min_fee_rate_sat_per_kwu)?;
+        self.0
+            .clone()
+            .build_with_additional_fee(
+                max_fee_contribution,
+                change_index.map(|x| x as usize),
+                fee_rate,
+                clamp_fee_contribution,
+            )
+            .map(V1Sender)
+            .map_err(|e| SenderInputError::Build(Arc::new(e.into())))
+    }
+
+    /// Perform Payjoin without incentivizing the payee to cooperate.
+    ///
+    /// While it's generally better to offer some contribution some users may wish not to.
+    /// This function disables contribution.
+    pub fn build_non_incentivizing(
+        &self,
+        min_fee_rate_sat_per_kwu: u64,
+    ) -> Result<V1Sender, SenderInputError> {
+        let fee_rate = validate_fee_rate_sat_per_kwu(min_fee_rate_sat_per_kwu)?;
+        self.0
+            .clone()
+            .build_non_incentivizing(fee_rate)
+            .map(V1Sender)
+            .map_err(|e| SenderInputError::Build(Arc::new(e.into())))
+    }
+}
+
+/// A built BIP 78 (v1) sender. Produces the single POST request of the flow.
+#[derive(Clone, uniffi::Object)]
+pub struct V1Sender(payjoin::send::v1::Sender);
+
+#[uniffi::export]
+impl V1Sender {
+    /// Construct the BIP 78 POST request and the context that validates its response.
+    pub fn create_v1_post_request(&self) -> RequestV1Context {
+        let (request, context) = self.0.create_v1_post_request();
+        RequestV1Context { request: request.into(), context: Arc::new(context.into()) }
+    }
+
+    /// The endpoint in the Payjoin URI
+    pub fn endpoint(&self) -> String { self.0.endpoint() }
+}
+
 #[derive(uniffi::Record)]
 pub struct RequestV1Context {
     pub request: Request,
@@ -851,7 +973,7 @@ impl payjoin::persist::AsyncSessionPersister for AsyncCallbackPersisterAdapter {
 
 #[cfg(test)]
 mod tests {
-    use payjoin_test_utils::ORIGINAL_PSBT;
+    use payjoin_test_utils::{ORIGINAL_PSBT, PAYJOIN_PROPOSAL};
 
     use super::*;
     use crate::uri::Uri;
@@ -879,5 +1001,44 @@ mod tests {
     fn v2_uri_is_accepted() {
         SenderBuilder::new(ORIGINAL_PSBT.to_string(), pj_uri(V2_PJ_URI))
             .expect("v2 URI must be accepted");
+    }
+
+    #[test]
+    fn pj_version_reports_endpoint_protocol() {
+        assert_eq!(pj_uri(V1_PJ_URI).pj_version(), crate::PjVersion::V1);
+        assert_eq!(pj_uri(V2_PJ_URI).pj_version(), crate::PjVersion::V2);
+    }
+
+    #[test]
+    fn v1_sender_builds_bip78_request_and_validates_proposal() {
+        let uri = pj_uri(
+            "bitcoin:2N47mmrWXsNBvQR6k78hWJoTji57zXwNcU7?amount=0.02&pj=https://example.com/",
+        );
+        let sender = V1SenderBuilder::new(ORIGINAL_PSBT.to_string(), uri)
+            .expect("valid PSBT")
+            .build_with_additional_fee(182, Some(0), 0, false)
+            .expect("test vector builds");
+        assert_eq!(sender.endpoint(), "https://example.com/");
+
+        let RequestV1Context { request, context } = sender.create_v1_post_request();
+        assert!(request.url.starts_with("https://example.com/?v=1"), "{}", request.url);
+        assert_eq!(request.content_type, "text/plain");
+        payjoin::bitcoin::psbt::Psbt::from_str(
+            std::str::from_utf8(&request.body).expect("body is base64 text"),
+        )
+        .expect("body is the Original PSBT");
+
+        let proposal = context
+            .process_response(PAYJOIN_PROPOSAL.as_bytes())
+            .expect("BIP 78 proposal vector validates");
+        payjoin::bitcoin::psbt::Psbt::from_str(&proposal).expect("proposal is a PSBT");
+    }
+
+    #[test]
+    fn v1_sender_rejects_malformed_psbt() {
+        let err = V1SenderBuilder::new("not-a-psbt".to_string(), pj_uri(V1_PJ_URI))
+            .err()
+            .expect("malformed PSBT must be rejected");
+        assert!(matches!(err, SenderInputError::Psbt(_)), "got {err:?}");
     }
 }

@@ -375,6 +375,42 @@ function runUnitTests(name: string, payjoin: typeof nodejsPayjoin) {
             });
         });
     });
+
+    describe(`[${name}] V1 sender`, () => {
+        const V1_URI =
+            "bitcoin:2N47mmrWXsNBvQR6k78hWJoTji57zXwNcU7?amount=0.02&pj=https://example.com/";
+
+        test("pj version reports the endpoint protocol", () => {
+            const v1 = payjoin.Uri.parse(V1_URI).checkPjSupported();
+            assert.strictEqual(v1.pjVersion(), payjoin.PjVersion.V1);
+            const v2 = payjoin.Uri.parse(
+                "bitcoin:2N47mmrWXsNBvQR6k78hWJoTji57zXwNcU7?pjos=0&pj=HTTPS://PAYJO.IN/TXJCGKTKXLUUZ%23EX1WKV8CEC-OH1QYPM59NK2LXXS4890SUAXXYT25Z2VAPHP0X7YEYCJXGWAG6UG9ZU6NQ-RK1Q0DJS3VVDXWQQTLQ8022QGXSX7ML9PHZ6EDSF6AKEWQG758JPS2EV",
+            ).checkPjSupported();
+            assert.strictEqual(v2.pjVersion(), payjoin.PjVersion.V2);
+        });
+
+        test("v1 sender builds a BIP 78 request", () => {
+            const uri = payjoin.Uri.parse(V1_URI).checkPjSupported();
+            const sender = new payjoin.V1SenderBuilder(
+                ORIGINAL_PSBT,
+                uri,
+            ).buildRecommended(BigInt(1000));
+            assert.strictEqual(sender.endpoint(), "https://example.com/");
+
+            const { request } = sender.createV1PostRequest();
+            assert.ok(request.url.startsWith("https://example.com/?v=1"));
+            assert.strictEqual(request.contentType, "text/plain");
+        });
+
+        test("v1 sender builder rejects bad psbt", () => {
+            assert.throws(() => {
+                new payjoin.V1SenderBuilder(
+                    "not-a-psbt",
+                    payjoin.Uri.parse(V1_URI).checkPjSupported(),
+                );
+            });
+        });
+    });
 }
 
 before(async () => {

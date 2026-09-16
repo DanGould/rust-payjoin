@@ -301,5 +301,36 @@ class TestValidation(unittest.TestCase):
             payjoin.SenderBuilder("not-a-psbt", uri)
 
 
+class TestV1Sender(unittest.TestCase):
+    V1_URI = "bitcoin:2N47mmrWXsNBvQR6k78hWJoTji57zXwNcU7?amount=0.02&pj=https://example.com/"
+
+    def test_pj_version(self):
+        v1 = payjoin.Uri.parse(self.V1_URI).check_pj_supported()
+        self.assertEqual(v1.pj_version(), payjoin.PjVersion.V1)
+        v2 = payjoin.Uri.parse(
+            "bitcoin:2N47mmrWXsNBvQR6k78hWJoTji57zXwNcU7?pjos=0&pj=HTTPS://PAYJO.IN/TXJCGKTKXLUUZ%23EX1WKV8CEC-OH1QYPM59NK2LXXS4890SUAXXYT25Z2VAPHP0X7YEYCJXGWAG6UG9ZU6NQ-RK1Q0DJS3VVDXWQQTLQ8022QGXSX7ML9PHZ6EDSF6AKEWQG758JPS2EV"
+        ).check_pj_supported()
+        self.assertEqual(v2.pj_version(), payjoin.PjVersion.V2)
+
+    def test_v1_request_and_response(self):
+        uri = payjoin.Uri.parse(self.V1_URI).check_pj_supported()
+        sender = payjoin.V1SenderBuilder(
+            payjoin.original_psbt(), uri
+        ).build_with_additional_fee(182, 0, 0, False)
+        self.assertEqual(sender.endpoint(), "https://example.com/")
+
+        req_ctx = sender.create_v1_post_request()
+        self.assertTrue(req_ctx.request.url.startswith("https://example.com/?v=1"))
+        self.assertEqual(req_ctx.request.content_type, "text/plain")
+
+        proposal = req_ctx.context.process_response(payjoin.payjoin_proposal().encode())
+        self.assertTrue(proposal.startswith("cHNidP8"))
+
+    def test_v1_sender_builder_rejects_bad_psbt(self):
+        uri = payjoin.Uri.parse(self.V1_URI).check_pj_supported()
+        with self.assertRaises(cast(type[Exception], payjoin.SenderInputError)):
+            payjoin.V1SenderBuilder("not-a-psbt", uri)
+
+
 if __name__ == "__main__":
     unittest.main()

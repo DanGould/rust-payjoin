@@ -20,5 +20,5 @@ pub use crate::request::Request;
 pub use crate::send::*;
 #[cfg(feature = "_test-utils")]
 pub use crate::test_utils::*;
-pub use crate::uri::{PjUri, Uri, Url};
+pub use crate::uri::{PjUri, PjVersion, Uri, Url};
 uniffi::setup_scaffolding!("payjoin");

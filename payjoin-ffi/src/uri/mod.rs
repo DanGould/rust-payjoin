@@ -49,12 +49,36 @@ impl From<PjUri> for payjoin::PjUri {
     fn from(value: PjUri) -> Self { value.0 }
 }
 
+/// The payjoin protocol a URI's `pj` endpoint speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PjVersion {
+    /// BIP 78. The sender posts directly to the receiver's endpoint, so use
+    /// [`crate::V1SenderBuilder`].
+    V1,
+    /// BIP 77 Async Payjoin over an OHTTP relay and directory. Use
+    /// [`crate::SenderBuilder`].
+    V2,
+}
+
 #[derive(Clone, uniffi::Object)]
 pub struct PjUri(pub payjoin::PjUri);
 
 #[uniffi::export]
 impl PjUri {
     pub fn address(&self) -> String { self.0.address().to_string() }
+
+    /// Which sender flow this URI needs. See [`PjVersion`].
+    pub fn pj_version(&self) -> PjVersion {
+        match self.0.extras().pj_param() {
+            payjoin::PjParam::V1(_) => PjVersion::V1,
+            payjoin::PjParam::V2(_) => PjVersion::V2,
+            // `PjParam` is `#[non_exhaustive]`, but these bindings pin the payjoin
+            // crate and enable both protocol features, so every variant of the pinned
+            // version is matched above. A new variant arrives only with a crate bump,
+            // which must extend this match and `PjVersion` together.
+            _ => unreachable!("PjVersion must cover every PjParam variant of the pinned payjoin"),
+        }
+    }
     /// Number of sats requested as payment
     pub fn amount_sats(&self) -> Option<u64> { self.0.amount().map(|e| e.to_sat()) }
 
