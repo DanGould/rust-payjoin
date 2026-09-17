@@ -5,6 +5,7 @@
 
 pub extern crate bitcoin;
 
+pub mod cisa;
 pub mod error;
 pub use error::ImplementationError;
 pub mod version;

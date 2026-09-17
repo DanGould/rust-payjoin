@@ -7,6 +7,17 @@ use bitcoin::address::FromScriptError;
 use bitcoin::psbt::Psbt;
 use bitcoin::transaction::InputWeightPrediction;
 use bitcoin::{bip32, psbt, Address, AddressType, Network, TxIn, TxOut, Weight};
+
+use crate::cisa;
+
+/// How an input is spent, as far as weight estimation is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputKind {
+    /// An output type [`bitcoin::Address`] can name.
+    Address(AddressType),
+    /// A witness version 2 key path spend, BIP 460.
+    WitnessV2,
+}
 /// Shared non-witness weight for txid (32), index (4), and sequence (4) fields.
 /// We only need to add the weight of the txid: 32, index: 4 and sequence: 4 as rust_bitcoin
 /// already accounts for the scriptsig length when calculating InputWeightPrediction
@@ -188,9 +199,43 @@ impl InternalInputPair<'_> {
             .ok_or(AddressTypeError::UnknownAddressType)
     }
 
+    /// Returns the kind of output this input spends, for grouping inputs by
+    /// how they are spent. Witness version 2 has no [`AddressType`] of its own.
+    pub fn input_kind(&self) -> Result<InputKind, AddressTypeError> {
+        let txo = self.previous_txout()?;
+        if cisa::is_witness_v2_keypath(&txo.script_pubkey) {
+            return Ok(InputKind::WitnessV2);
+        }
+        self.address_type().map(InputKind::Address)
+    }
+
+    /// The witness this input spends with, if it is already known: either from
+    /// the transaction input or from the finalized PSBT input.
+    fn known_witness(&self) -> Option<&bitcoin::Witness> {
+        if !self.txin.witness.is_empty() {
+            Some(&self.txin.witness)
+        } else {
+            self.psbtin.final_script_witness.as_ref().filter(|w| !w.is_empty())
+        }
+    }
+
     /// Returns the expected weight of this input based on the address type of the UTXO it is pointing to.
     pub fn expected_input_weight(&self) -> Result<Weight, InputWeightError> {
         use bitcoin::AddressType::*;
+
+        if self.input_kind()? == InputKind::WitnessV2 {
+            // A witness v2 key path spend is a single witness element. Without
+            // the witness, the input's BIP 460 mode fixes its size: a member of
+            // the full-aggregation group carries an empty element, because the
+            // group's signature sits on the group's last input only.
+            let iwp = match self.known_witness() {
+                Some(w) =>
+                    InputWeightPrediction::new(0, w.iter().map(|el| el.len()).collect::<Vec<_>>()),
+                None if cisa::is_fullagg(self.psbtin) => InputWeightPrediction::new(0, [0]),
+                None => return Err(InputWeightError::NotSupported),
+            };
+            return Ok(iwp.weight() + NON_WITNESS_INPUT_WEIGHT);
+        }
 
         // Get the input weight prediction corresponding to spending an output of this address type
         let iwp = match self.address_type()? {
@@ -235,20 +280,13 @@ impl InternalInputPair<'_> {
                         .ok_or(InputWeightError::NotSupported)?;
                     Ok(iwp)
                 },
-            P2tr => {
-                let witness = if !self.txin.witness.is_empty() {
-                    Some(&self.txin.witness)
-                } else {
-                    self.psbtin.final_script_witness.as_ref().filter(|w| !w.is_empty())
-                };
-                match witness {
-                    Some(w) => Ok(InputWeightPrediction::new(
-                        0,
-                        w.iter().map(|el| el.len()).collect::<Vec<_>>(),
-                    )),
-                    None => Err(InputWeightError::NotSupported),
-                }
-            }
+            P2tr => match self.known_witness() {
+                Some(w) => Ok(InputWeightPrediction::new(
+                    0,
+                    w.iter().map(|el| el.len()).collect::<Vec<_>>(),
+                )),
+                None => Err(InputWeightError::NotSupported),
+            },
             _ => Err(AddressTypeError::UnknownAddressType.into()),
         }?;
         // Lengths of txid, index and sequence: (32, 4, 4).
@@ -430,10 +468,13 @@ impl From<AddressTypeError> for InputWeightError {
 
 #[cfg(test)]
 mod test {
-    use bitcoin::{Psbt, ScriptBuf, Transaction, TxOut};
+    use bitcoin::{Psbt, ScriptBuf, Transaction, TxOut, Weight};
     use payjoin_test_utils::PARSED_ORIGINAL_PSBT;
 
-    use crate::psbt::{InputWeightError, InternalInputPair, InternalPsbtInputError, PsbtExt};
+    use crate::psbt::{
+        AddressTypeError, InputKind, InputWeightError, InternalInputPair, InternalPsbtInputError,
+        PsbtExt,
+    };
 
     #[test]
     fn validate_input_utxos() {
@@ -574,5 +615,46 @@ mod test {
         let pair: InternalInputPair = InternalInputPair { txin, psbtin: &psbtin };
         let weight = pair.expected_input_weight();
         assert_eq!(weight.unwrap_err(), InputWeightError::NoRedeemScript)
+    }
+
+    /// Witness v2 key path inputs, from the draft CISA PSBT test vectors.
+    /// Input 0 is opted out, input 1 a full-aggregation member, input 2 the
+    /// group's final input.
+    #[test]
+    fn expected_input_weight_witness_v2() {
+        use std::str::FromStr;
+
+        use crate::cisa;
+        use crate::cisa::tests::{FULLAGG_ALL_PARTIAL_SIGS, FULLAGG_FINALIZED};
+
+        let signed = Psbt::from_str(FULLAGG_ALL_PARTIAL_SIGS).unwrap();
+        let finalized = Psbt::from_str(FULLAGG_FINALIZED).unwrap();
+        let weight = |psbt: &Psbt, i: usize| {
+            InternalInputPair { txin: &psbt.unsigned_tx.input[i], psbtin: &psbt.inputs[i] }
+                .expected_input_weight()
+        };
+        // 41 bytes of outpoint, script length and sequence, then the witness:
+        // the item count and one length-prefixed element.
+        let base = 41 * 4;
+        assert_eq!(weight(&finalized, 0).unwrap(), Weight::from_wu(base + 1 + 1 + 64));
+        assert_eq!(weight(&finalized, 1).unwrap(), Weight::from_wu(base + 1 + 1));
+        // The vector's final input signs with SIGHASH_ALL, so its element is
+        // one byte longer than the SIGHASH_DEFAULT form.
+        assert_eq!(
+            weight(&finalized, 2).unwrap(),
+            Weight::from_wu(base + 1 + 1 + cisa::FULLAGG_FINAL_WITNESS_LEN as u64 + 1)
+        );
+
+        // Before finalization, membership in the group fixes a member's size,
+        // and nothing else about an unsigned witness v2 input does.
+        assert_eq!(weight(&signed, 1).unwrap(), Weight::from_wu(base + 1 + 1));
+        assert_eq!(weight(&signed, 0).unwrap_err(), InputWeightError::NotSupported);
+
+        for i in 0..3 {
+            let pair =
+                InternalInputPair { txin: &signed.unsigned_tx.input[i], psbtin: &signed.inputs[i] };
+            assert_eq!(pair.input_kind().unwrap(), InputKind::WitnessV2);
+            assert_eq!(pair.address_type().unwrap_err(), AddressTypeError::UnknownAddressType);
+        }
     }
 }
