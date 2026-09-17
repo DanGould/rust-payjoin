@@ -29,7 +29,7 @@ use crate::psbt::{
     InputWeightError, InternalInputPair, InternalPsbtInputError, PrevTxOutError, PsbtExt,
     NON_WITNESS_INPUT_WEIGHT,
 };
-use crate::{ImplementationError, Version};
+use crate::{cisa, ImplementationError, Version};
 
 /// Input weight for a P2TR key-spend with default sighash (64-byte signature) and no annex.
 const DEFAULT_SIGHASH_KEY_SPEND_INPUT_WEIGHT: Weight = Weight::from_wu(
@@ -287,6 +287,10 @@ impl PsbtContext {
                 non_witness_utxo: input.non_witness_utxo.clone(),
                 final_script_sig: input.final_script_sig.clone(),
                 final_script_witness: input.final_script_witness.clone(),
+                // Aggregated inputs are signed as a group, so the sender
+                // needs our nonces and partial signatures, and its own nonce
+                // back, to finish the signature.
+                unknown: cisa::fields(input),
                 ..Default::default()
             });
         }
@@ -492,7 +496,7 @@ pub(crate) mod tests {
     };
     use payjoin_test_utils::{
         DUMMY20, DUMMY32, MAX_ADDITIONAL_FEE_CONTRIBUTION, PARSED_ORIGINAL_PSBT,
-        PARSED_PAYJOIN_PROPOSAL, QUERY_PARAMS,
+        PARSED_PAYJOIN_PROPOSAL, PARSED_PAYJOIN_PROPOSAL_WITH_SENDER_INFO, QUERY_PARAMS,
     };
 
     use super::*;
@@ -1199,5 +1203,23 @@ pub(crate) mod tests {
             ..Default::default()
         };
         assert!(psbt_input_is_signed(&input));
+    }
+
+    #[test]
+    fn prepare_psbt_keeps_aggregation_fields_only() {
+        use bitcoin::psbt::raw;
+
+        let mut processed: Psbt = PARSED_PAYJOIN_PROPOSAL.clone();
+        cisa::set_fullagg(&mut processed.inputs[0], [1; cisa::PUB_NONCE_LEN]);
+        processed.inputs[0].unknown.insert(raw::Key { type_value: 0xfc, key: vec![1] }, vec![2]);
+        processed.inputs[0].bip32_derivation =
+            PARSED_PAYJOIN_PROPOSAL_WITH_SENDER_INFO.inputs[0].bip32_derivation.clone();
+        let expected = cisa::fields(&processed.inputs[0]);
+        assert_eq!(expected.len(), 2);
+
+        let prepared = psbt_context_from_test_vector().prepare_psbt(processed);
+        assert_eq!(prepared.inputs[0].unknown, expected);
+        assert!(prepared.inputs[0].bip32_derivation.is_empty());
+        assert!(prepared.inputs[1].unknown.is_empty());
     }
 }
