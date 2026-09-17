@@ -26,7 +26,7 @@ pub use crate::core::error_codes::ErrorCode;
 use crate::core::Url;
 use crate::output_substitution::OutputSubstitution;
 use crate::psbt::{AddressTypeError, PsbtExt, NON_WITNESS_INPUT_WEIGHT};
-use crate::Version;
+use crate::{cisa, Version};
 
 // See usize casts
 #[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))]
@@ -116,7 +116,7 @@ impl PsbtContextBuilder {
                 .map_err(InternalBuildSenderError::InputWeight)?;
             for input_pair in input_pairs {
                 // use cheapest default if mixed input types
-                if input_pair.address_type()? != first_input_pair.address_type()? {
+                if input_pair.input_kind()? != first_input_pair.input_kind()? {
                     input_weight =
                         bitcoin::transaction::InputWeightPrediction::P2TR_KEY_NON_DEFAULT_SIGHASH
                             .weight()
@@ -396,6 +396,14 @@ impl PsbtContext {
                         proposed.psbtin.final_script_witness.is_none(),
                         InternalProposalError::SenderTxinContainsFinalScriptWitness,
                     )?;
+                    // The aggregation mode and public nonce we declared are
+                    // part of what our wallet signs over. A receiver that
+                    // alters them could move our input between groups or
+                    // make us sign against a nonce we never reserved.
+                    ensure(
+                        cisa::fields(proposed.psbtin) == cisa::fields(original.psbtin),
+                        InternalProposalError::SenderTxinCisaFieldsChanged,
+                    )?;
                     // Refuse to sign our own inputs with any sighash type that
                     // does not commit to every input and output.
                     if let Some(sighash_type) = proposed.psbtin.sighash_type {
@@ -414,10 +422,15 @@ impl PsbtContext {
                         .next()
                         .ok_or(InternalProposalError::NoInputs)?;
                     if ensure_receiver_input_finalized {
-                        // Verify the PSBT input is finalized
+                        // A receiver input in the full-aggregation group cannot
+                        // be finalized yet: its final witness needs our partial
+                        // signature too. Its partial signature is the receiver's
+                        // commitment instead, and our wallet verifies it before
+                        // aggregating.
                         ensure(
                             proposed.psbtin.final_script_sig.is_some()
-                                || proposed.psbtin.final_script_witness.is_some(),
+                                || proposed.psbtin.final_script_witness.is_some()
+                                || cisa::is_complete_fullagg(proposed.psbtin),
                             InternalProposalError::ReceiverTxinNotFinalized,
                         )?;
                     }
@@ -592,7 +605,9 @@ fn clear_unneeded_fields(psbt: &mut Psbt) {
         input.tap_merkle_root = None;
         input.tap_script_sigs.clear();
         input.proprietary.clear();
-        input.unknown.clear();
+        // The aggregation mode and public nonce are the one thing the receiver
+        // needs from us that it cannot derive from the transaction itself.
+        input.unknown.retain(|key, _| cisa::is_cisa_key(key));
     }
     for output in psbt.outputs_mut() {
         output.bip32_derivation.clear();
@@ -1772,6 +1787,148 @@ mod test {
                 InternalProposalError::FeeRateBelowMinimum.to_string()
             );
 
+            Ok(())
+        }
+    }
+
+    /// A two-party full-aggregation payjoin on witness v2 inputs.
+    mod cisa_carriage {
+        use bitcoin::hashes::Hash;
+        use bitcoin::psbt::raw;
+        use bitcoin::{
+            absolute, transaction, Amount, OutPoint, Psbt, ScriptBuf, TxIn, TxOut, Txid,
+            WPubkeyHash, Witness, WitnessProgram, WitnessVersion,
+        };
+        use payjoin_test_utils::{BoxError, DUMMY20, DUMMY32};
+
+        use super::*;
+        use crate::cisa;
+
+        fn v2_script(program: u8) -> ScriptBuf {
+            ScriptBuf::new_witness_program(
+                &WitnessProgram::new(WitnessVersion::V2, &[program; 32]).unwrap(),
+            )
+        }
+
+        fn payee() -> ScriptBuf { ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array(DUMMY20)) }
+
+        fn tx(inputs: &[u32], outputs: &[(ScriptBuf, u64)]) -> bitcoin::Transaction {
+            bitcoin::Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: inputs
+                    .iter()
+                    .map(|vout| TxIn {
+                        previous_output: OutPoint {
+                            txid: Txid::from_byte_array(DUMMY32),
+                            vout: *vout,
+                        },
+                        ..Default::default()
+                    })
+                    .collect(),
+                output: outputs
+                    .iter()
+                    .map(|(script_pubkey, value)| TxOut {
+                        script_pubkey: script_pubkey.clone(),
+                        value: Amount::from_sat(*value),
+                    })
+                    .collect(),
+            }
+        }
+
+        /// The sender's original PSBT: one witness v2 input, signed as an
+        /// opted-out fallback and declared for the full-aggregation group.
+        fn original() -> Psbt {
+            let mut psbt =
+                Psbt::from_unsigned_tx(tx(&[0], &[(payee(), 50_000), (v2_script(3), 49_000)]))
+                    .unwrap();
+            psbt.inputs[0].witness_utxo =
+                Some(TxOut { value: Amount::from_sat(100_000), script_pubkey: v2_script(1) });
+            psbt.inputs[0].final_script_witness = Some(Witness::from_slice(&[[0u8; 64]]));
+            cisa::set_fullagg(&mut psbt.inputs[0], [1; cisa::PUB_NONCE_LEN]);
+            psbt
+        }
+
+        /// The receiver's proposal: the sender's input with its fallback
+        /// signature removed, and one receiver input that has signed.
+        fn proposal() -> Psbt {
+            let mut psbt =
+                Psbt::from_unsigned_tx(tx(&[0, 1], &[(payee(), 80_000), (v2_script(3), 49_000)]))
+                    .unwrap();
+            psbt.inputs[0].witness_utxo =
+                Some(TxOut { value: Amount::from_sat(100_000), script_pubkey: v2_script(1) });
+            cisa::set_fullagg(&mut psbt.inputs[0], [1; cisa::PUB_NONCE_LEN]);
+            psbt.inputs[1].witness_utxo =
+                Some(TxOut { value: Amount::from_sat(30_000), script_pubkey: v2_script(2) });
+            cisa::set_fullagg(&mut psbt.inputs[1], [2; cisa::PUB_NONCE_LEN]);
+            psbt.inputs[1].unknown.insert(
+                raw::Key { type_value: cisa::PSBT_IN_CISA_FULLAGG_PARTIAL_SIG, key: vec![] },
+                vec![3; cisa::PARTIAL_SIG_LEN],
+            );
+            psbt
+        }
+
+        fn context() -> Result<PsbtContext, BoxError> {
+            Ok(PsbtContextBuilder::new(original(), payee(), Some(Amount::from_sat(50_000)))
+                .build_non_incentivizing(FeeRate::ZERO, OutputSubstitution::Enabled)?)
+        }
+
+        #[test]
+        fn sender_keeps_its_aggregation_fields_when_sanitizing() {
+            let mut psbt = original();
+            psbt.inputs[0].unknown.insert(raw::Key { type_value: 0xfc, key: vec![1] }, vec![2]);
+            clear_unneeded_fields(&mut psbt);
+            assert_eq!(psbt.inputs[0].unknown, cisa::fields(&original().inputs[0]));
+            assert_eq!(psbt.inputs[0].unknown.len(), 2);
+        }
+
+        #[test]
+        fn recommended_fee_covers_a_witness_v2_input() -> Result<(), BoxError> {
+            let ctx = PsbtContextBuilder::new(original(), payee(), None)
+                .build_recommended(FeeRate::from_sat_per_vb_u32(2), OutputSubstitution::Enabled)?;
+            // The fallback witness is a 64-byte signature, so the recommendation
+            // is for a 230 weight unit input at 2 sat/vB, rounded up.
+            assert_eq!(ctx.fee_contribution.map(|c| c.max_amount), Some(Amount::from_sat(115)));
+            Ok(())
+        }
+
+        #[test]
+        fn complete_receiver_input_passes_for_finalized() -> Result<(), BoxError> {
+            let checked = context()?.process_proposal(proposal())?;
+            assert!(cisa::is_complete_fullagg(&checked.inputs[1]));
+            assert_eq!(cisa::fields(&checked.inputs[0]), cisa::fields(&original().inputs[0]));
+            Ok(())
+        }
+
+        #[test]
+        fn unsigned_receiver_input_is_not_finalized() -> Result<(), BoxError> {
+            let mut proposal = proposal();
+            proposal.inputs[1].unknown.remove(&raw::Key {
+                type_value: cisa::PSBT_IN_CISA_FULLAGG_PARTIAL_SIG,
+                key: vec![],
+            });
+            assert_eq!(
+                context()?.process_proposal(proposal).unwrap_err().to_string(),
+                InternalProposalError::ReceiverTxinNotFinalized.to_string()
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn altered_sender_nonce_is_rejected() -> Result<(), BoxError> {
+            let mut proposal = proposal();
+            cisa::set_fullagg(&mut proposal.inputs[0], [9; cisa::PUB_NONCE_LEN]);
+            assert_eq!(
+                context()?.process_proposal(proposal).unwrap_err().to_string(),
+                InternalProposalError::SenderTxinCisaFieldsChanged.to_string()
+            );
+
+            let mut proposal = self::proposal();
+            proposal.inputs[0].unknown.clear();
+            assert_eq!(
+                context()?.process_proposal(proposal).unwrap_err().to_string(),
+                InternalProposalError::SenderTxinCisaFieldsChanged.to_string()
+            );
             Ok(())
         }
     }
