@@ -858,39 +858,16 @@ impl UncheckedOriginalPayload {
     }
 }
 
-trait FfiMarkedChecklistItem<V> {
-    fn result(&self) -> bool;
-    fn value(&self) -> V;
-}
-
-fn to_marked_checklist<K, R, Vffi>(
-    checklist: impl Iterator<Item = payjoin::receive::ChecklistItem<K>>,
+/// Unwrap foreign marked checklist items into the core items they wrap, preserving the
+/// order the caller submitted them in so core validation checks the caller's list.
+fn to_marked_checklist<K, R>(
     ffi_marked_checklist: Vec<Arc<R>>,
-) -> Result<
-    impl Iterator<Item = payjoin::receive::MarkedChecklistItem<K>>,
-    payjoin::error::ImplementationError,
->
+) -> impl Iterator<Item = payjoin::receive::MarkedChecklistItem<K>>
 where
     K: payjoin::receive::ChecklistKind,
-    R: FfiMarkedChecklistItem<Vffi>,
-    Vffi: From<K::Value> + PartialEq,
+    R: AsRef<payjoin::receive::MarkedChecklistItem<K>>,
 {
-    payjoin::receive::mark_checklist(checklist, &mut move |item: &K::Value| {
-        let found_result = ffi_marked_checklist.iter().find_map(|marked_item| {
-            if Vffi::from(item.clone()) == marked_item.value() {
-                Some(marked_item.result())
-            } else {
-                None
-            }
-        });
-        match found_result {
-            Some(result) => Ok(result),
-            None => {
-                let msg = format!("Checklist item {item:?} has not been marked with a result");
-                Err(payjoin::ImplementationError::from(msg.as_str()))
-            }
-        }
-    })
+    ffi_marked_checklist.into_iter().map(|item| R::as_ref(&item).clone())
 }
 
 #[derive(Debug, uniffi::Object)]
@@ -902,19 +879,21 @@ pub struct InputOwnedChecklistItem(
 impl InputOwnedChecklistItem {
     pub fn value(&self) -> OutPoint { (*self.0.value()).into() }
     pub fn mark(&self, result: bool) -> Arc<MarkedInputOwnedChecklistItem> {
-        Arc::new(MarkedInputOwnedChecklistItem { value: self.value(), result })
+        Arc::new(MarkedInputOwnedChecklistItem(self.0.clone().mark(result)))
     }
 }
 
 #[derive(Debug, Clone, uniffi::Object)]
-pub struct MarkedInputOwnedChecklistItem {
-    value: OutPoint,
-    result: bool,
-}
+pub struct MarkedInputOwnedChecklistItem(
+    payjoin::receive::MarkedChecklistItem<payjoin::receive::InputOwnership>,
+);
 
-impl FfiMarkedChecklistItem<OutPoint> for MarkedInputOwnedChecklistItem {
-    fn result(&self) -> bool { self.result }
-    fn value(&self) -> OutPoint { self.value.clone() }
+impl AsRef<payjoin::receive::MarkedChecklistItem<payjoin::receive::InputOwnership>>
+    for MarkedInputOwnedChecklistItem
+{
+    fn as_ref(&self) -> &payjoin::receive::MarkedChecklistItem<payjoin::receive::InputOwnership> {
+        &self.0
+    }
 }
 
 #[derive(Clone, uniffi::Object)]
@@ -1015,11 +994,8 @@ impl MaybeInputsOwned {
         &self,
         marked_checklist: Vec<Arc<MarkedInputOwnedChecklistItem>>,
     ) -> Result<MaybeInputsOwnedTransition, ReceiverError> {
-        let checklist = self.0.clone().inputs_owned_checklist();
-        let marked_checklist = to_marked_checklist(checklist, marked_checklist)
-            .map_err(|e| ReceiverError::Implementation(Arc::new(ImplementationError::from(e))))?;
         Ok(MaybeInputsOwnedTransition(Arc::new(RwLock::new(Some(
-            self.0.clone().apply_inputs_owned_checklist(marked_checklist),
+            self.0.clone().apply_inputs_owned_checklist(to_marked_checklist(marked_checklist)),
         )))))
     }
 }
@@ -1033,19 +1009,21 @@ pub struct InputSeenChecklistItem(
 impl InputSeenChecklistItem {
     pub fn value(&self) -> OutPoint { (*self.0.value()).into() }
     pub fn mark(&self, result: bool) -> Arc<MarkedInputSeenChecklistItem> {
-        Arc::new(MarkedInputSeenChecklistItem { value: self.value(), result })
+        Arc::new(MarkedInputSeenChecklistItem(self.0.clone().mark(result)))
     }
 }
 
 #[derive(Debug, Clone, uniffi::Object)]
-pub struct MarkedInputSeenChecklistItem {
-    value: OutPoint,
-    result: bool,
-}
+pub struct MarkedInputSeenChecklistItem(
+    payjoin::receive::MarkedChecklistItem<payjoin::receive::InputSeenBefore>,
+);
 
-impl FfiMarkedChecklistItem<OutPoint> for MarkedInputSeenChecklistItem {
-    fn result(&self) -> bool { self.result }
-    fn value(&self) -> OutPoint { self.value.clone() }
+impl AsRef<payjoin::receive::MarkedChecklistItem<payjoin::receive::InputSeenBefore>>
+    for MarkedInputSeenChecklistItem
+{
+    fn as_ref(&self) -> &payjoin::receive::MarkedChecklistItem<payjoin::receive::InputSeenBefore> {
+        &self.0
+    }
 }
 
 #[derive(Clone, uniffi::Object)]
@@ -1129,11 +1107,8 @@ impl MaybeInputsSeen {
         &self,
         marked_checklist: Vec<Arc<MarkedInputSeenChecklistItem>>,
     ) -> Result<MaybeInputsSeenTransition, ReceiverError> {
-        let checklist = self.0.clone().inputs_seen_checklist();
-        let marked_checklist = to_marked_checklist(checklist, marked_checklist)
-            .map_err(|e| ReceiverError::Implementation(Arc::new(ImplementationError::from(e))))?;
         Ok(MaybeInputsSeenTransition(Arc::new(RwLock::new(Some(
-            self.0.clone().apply_inputs_seen_checklist(marked_checklist),
+            self.0.clone().apply_inputs_seen_checklist(to_marked_checklist(marked_checklist)),
         )))))
     }
 }
@@ -1147,19 +1122,21 @@ pub struct OutputOwnedChecklistItem(
 impl OutputOwnedChecklistItem {
     pub fn value(&self) -> Vec<u8> { self.0.value().to_bytes() }
     pub fn mark(&self, result: bool) -> Arc<MarkedOutputOwnedChecklistItem> {
-        Arc::new(MarkedOutputOwnedChecklistItem { value: self.value(), result })
+        Arc::new(MarkedOutputOwnedChecklistItem(self.0.clone().mark(result)))
     }
 }
 
 #[derive(Debug, Clone, uniffi::Object)]
-pub struct MarkedOutputOwnedChecklistItem {
-    value: Vec<u8>,
-    result: bool,
-}
+pub struct MarkedOutputOwnedChecklistItem(
+    payjoin::receive::MarkedChecklistItem<payjoin::receive::OutputOwnership>,
+);
 
-impl FfiMarkedChecklistItem<Vec<u8>> for MarkedOutputOwnedChecklistItem {
-    fn result(&self) -> bool { self.result }
-    fn value(&self) -> Vec<u8> { self.value.clone() }
+impl AsRef<payjoin::receive::MarkedChecklistItem<payjoin::receive::OutputOwnership>>
+    for MarkedOutputOwnedChecklistItem
+{
+    fn as_ref(&self) -> &payjoin::receive::MarkedChecklistItem<payjoin::receive::OutputOwnership> {
+        &self.0
+    }
 }
 
 /// The receiver has not yet identified which outputs belong to the receiver.
@@ -1239,11 +1216,8 @@ impl OutputsUnknown {
         &self,
         marked_checklist: Vec<Arc<MarkedOutputOwnedChecklistItem>>,
     ) -> Result<OutputsUnknownTransition, ReceiverError> {
-        let checklist = self.0.clone().outputs_owned_checklist();
-        let marked_checklist = to_marked_checklist(checklist, marked_checklist)
-            .map_err(|e| ReceiverError::Implementation(Arc::new(ImplementationError::from(e))))?;
         Ok(OutputsUnknownTransition(Arc::new(RwLock::new(Some(
-            self.0.clone().apply_outputs_owned_checklist(marked_checklist),
+            self.0.clone().apply_outputs_owned_checklist(to_marked_checklist(marked_checklist)),
         )))))
     }
 }
