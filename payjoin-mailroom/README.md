@@ -18,6 +18,14 @@ The relay and directory serve different purposes in BIP 77's privacy design:
 
 OHTTP keeps these two views separate. Neither role alone has enough information to link a user's network identity to their payjoin session.
 
+### What an operator can see
+
+The operator holds no keys and sees no Bitcoin addresses. Every payload is encrypted end to end between sender and receiver, so the directory stores ciphertext it cannot open. The directory sees encrypted mailboxes but no client IPs. The relay sees client IPs but no content. Neither role can tell which sender is paying which receiver. Running both roles on one host does not change this, because the relay only forwards to other operators' directories.
+
+### Retention
+
+A mailbox and its payload stay on disk until the mailbox expires. The default is 7 days, set by `mailbox_ttl` in seconds. Reading a payload does not delete it. Expired mailboxes are pruned as soon as they expire so that stale mailboxes cannot be enumerated. V1 (BIP 78) requests are never written to disk and are held in memory only while the sender's request is open.
+
 ### Running both roles in one process
 
 Running a single `payjoin-mailroom` binary is the simplest deployment. The binary bundles both roles and includes a built-in **sentinel tag** that prevents the relay from looping requests back to its own directory. This means a single-process deployment still enforces the privacy separation: the relay component forwards to _other_ directories, not to itself.
@@ -25,6 +33,10 @@ Running a single `payjoin-mailroom` binary is the simplest deployment. The binar
 ### Connecting to other operators
 
 In production, each `payjoin-mailroom` instance connects to directories and relays run by other operators. BIP 77's `allowed_purposes` mechanism lets any relay forward to any directory that advertises BIP 77 support, so operators do not need to coordinate pairings. The more independent operators participate, the harder it is for any single party to correlate users with their transactions.
+
+### Operators who also ship a wallet
+
+An operator that also ships a wallet must not default that wallet to its own directory when the wallet syncs through the operator's own Electrum, Esplora or mempool backend. The backend already sees the wallet's IP address and which transactions it asks about. If the same operator's directory then holds the wallet's mailbox, that operator can join the two views. Backend IP plus own mailbox is exactly the correlation the relay and directory split exists to prevent. Point the wallet at other operators' directories and use your own only as one option among many.
 
 ### V1 backwards compatibility
 
