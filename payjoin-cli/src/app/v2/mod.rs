@@ -10,8 +10,9 @@ use payjoin::receive::v2::{
     replay_event_log as replay_receiver_event_log, HasReplyableError, Initialized,
     MaybeInputsOwned, MaybeInputsSeen, Monitor, OutputsUnknown, PayjoinProposal,
     PendingFallback as ReceiverPendingFallback, ProvisionalProposal, ReceiveSession, Receiver,
-    ReceiverBuilder, SessionOutcome as ReceiverSessionOutcome, UncheckedOriginalPayload,
-    WantsFeeRange, WantsInputs, WantsOutputs,
+    ReceiverBuilder, SessionEvent as ReceiverSessionEvent,
+    SessionOutcome as ReceiverSessionOutcome, UncheckedOriginalPayload, WantsFeeRange, WantsInputs,
+    WantsOutputs,
 };
 use payjoin::send::v2::{
     replay_event_log as replay_sender_event_log, PendingFallback as SenderPendingFallback,
@@ -119,6 +120,40 @@ impl StatusText for ReceiveSession {
             },
         }
     }
+}
+
+/// Run the seen-inputs check and record the proposal's inputs once the
+/// transition is persisted.
+///
+/// The check only reads the record. A record written inside the check
+/// outlives a transition that fails to persist, and the resumed session would
+/// find its own sender's inputs recorded and reject them as a replay.
+///
+/// Recording after persisting leaves a window in which another session can
+/// pass the same check. The record reports that, and the session that lost
+/// the claim is cancelled before it reveals any receiver input.
+fn check_no_inputs_seen_before<P>(
+    db: &Database,
+    proposal: Receiver<MaybeInputsSeen>,
+    persister: &P,
+) -> Result<Receiver<OutputsUnknown>>
+where
+    P: SessionPersister<SessionEvent = ReceiverSessionEvent>,
+    P::InternalStorageError: std::error::Error + Send + Sync + 'static,
+{
+    let inputs: Vec<_> = proposal.inputs_seen_checklist().map(|item| *item.value()).collect();
+    let checklist = proposal.inputs_seen_checklist();
+    let marked_checklist = mark_checklist(checklist, &mut |input| Ok(db.is_input_seen(*input)?))?;
+    let proposal = proposal.apply_inputs_seen_checklist(marked_checklist).save(persister)?;
+
+    let claimed_elsewhere = db.record_inputs_seen(inputs)?;
+    if let Some(input) = claimed_elsewhere.first() {
+        proposal.cancel().save(persister)?;
+        return Err(anyhow!(
+            "Input {input} was claimed by another session during this check. Session cancelled."
+        ));
+    }
+    Ok(proposal)
 }
 
 fn print_header() {
@@ -1056,11 +1091,7 @@ impl App {
         proposal: Receiver<MaybeInputsSeen>,
         persister: &ReceiverPersister,
     ) -> Result<ReceiveSession> {
-        let checklist = proposal.inputs_seen_checklist();
-        let marked_checklist = mark_checklist(checklist, &mut |input| {
-            Ok(self.db.insert_input_seen_before(*input)?)
-        })?;
-        let proposal = proposal.apply_inputs_seen_checklist(marked_checklist).save(persister)?;
+        let proposal = check_no_inputs_seen_before(&self.db, proposal, persister)?;
         Ok(ReceiveSession::OutputsUnknown(proposal))
     }
 
@@ -1304,6 +1335,179 @@ impl App {
                     self.mailroom_manager.add_failed_relay(relay);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use payjoin::bitcoin::{Address, OutPoint, Psbt};
+    use payjoin::OhttpKeys;
+    use payjoin_test_utils::{ohttp_key_config_bytes, EXAMPLE_URL, ORIGINAL_PSBT};
+
+    use super::*;
+    use crate::db::error::Error as DbError;
+
+    /// Persist the events that take a fresh session to the seen-inputs check,
+    /// standing in for the directory round trip and the two checks before it.
+    fn receiver_at_seen_inputs_check(persister: &ReceiverPersister) -> Receiver<MaybeInputsSeen> {
+        let address = Address::from_str("tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4")
+            .expect("valid address")
+            .assume_checked();
+        let ohttp_keys = OhttpKeys::decode(&ohttp_key_config_bytes()).expect("valid ohttp keys");
+        ReceiverBuilder::new(address, EXAMPLE_URL, ohttp_keys)
+            .expect("valid directory url")
+            .build()
+            .save(persister)
+            .expect("save should succeed");
+
+        let psbt = Psbt::from_str(ORIGINAL_PSBT).expect("valid psbt");
+        let retrieved: ReceiverSessionEvent = serde_json::from_value(serde_json::json!({
+            "RetrievedOriginalPayload": {
+                "original": {
+                    "psbt": psbt,
+                    "params": {
+                        "v": 1,
+                        "output_substitution": "Enabled",
+                        "additional_fee_contribution": [182, 0],
+                        "min_fee_rate": 250,
+                    },
+                },
+                "reply_key": null,
+            }
+        }))
+        .expect("event shape matches the persisted format");
+        persister.save_event(retrieved).expect("save should succeed");
+        persister
+            .save_event(ReceiverSessionEvent::CheckedBroadcastSuitability())
+            .expect("save should succeed");
+        persister
+            .save_event(ReceiverSessionEvent::CheckedInputsNotOwned())
+            .expect("save should succeed");
+        replay_to_seen_inputs_check(persister)
+    }
+
+    fn replay_to_seen_inputs_check(persister: &ReceiverPersister) -> Receiver<MaybeInputsSeen> {
+        match replay_receiver_event_log(persister).expect("replay should succeed").0 {
+            ReceiveSession::MaybeInputsSeen(receiver) => receiver,
+            other => panic!("expected MaybeInputsSeen, got {}", other.status_text()),
+        }
+    }
+
+    fn sender_input(proposal: &Receiver<MaybeInputsSeen>) -> OutPoint {
+        *proposal.inputs_seen_checklist().next().expect("original has an input").value()
+    }
+
+    fn storage_failure() -> DbError {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+            Some("simulated storage failure".to_string()),
+        )
+        .into()
+    }
+
+    /// Fails every save, standing in for a storage error or a crash between
+    /// the seen-inputs check and its persisted transition.
+    struct FailingPersister(ReceiverPersister);
+
+    impl SessionPersister for FailingPersister {
+        type SessionEvent = ReceiverSessionEvent;
+        type InternalStorageError = DbError;
+
+        fn save_event(&self, _event: ReceiverSessionEvent) -> std::result::Result<(), DbError> {
+            Err(storage_failure())
+        }
+
+        fn load(
+            &self,
+        ) -> std::result::Result<Box<dyn Iterator<Item = ReceiverSessionEvent>>, DbError> {
+            self.0.load()
+        }
+
+        fn close(&self) -> std::result::Result<(), DbError> { self.0.close() }
+    }
+
+    /// Records `input` as seen while saving, standing in for a concurrent
+    /// session that claimed the same input between this session's check and
+    /// its own record.
+    struct ClaimingPersister {
+        inner: ReceiverPersister,
+        db: Arc<Database>,
+        input: OutPoint,
+    }
+
+    impl SessionPersister for ClaimingPersister {
+        type SessionEvent = ReceiverSessionEvent;
+        type InternalStorageError = DbError;
+
+        fn save_event(&self, event: ReceiverSessionEvent) -> std::result::Result<(), DbError> {
+            self.db.record_inputs_seen([self.input])?;
+            self.inner.save_event(event)
+        }
+
+        fn load(
+            &self,
+        ) -> std::result::Result<Box<dyn Iterator<Item = ReceiverSessionEvent>>, DbError> {
+            self.inner.load()
+        }
+
+        fn close(&self) -> std::result::Result<(), DbError> { self.inner.close() }
+    }
+
+    #[test]
+    fn seen_inputs_check_can_be_rerun_after_failed_save() {
+        let db = Database::in_memory();
+        let persister = ReceiverPersister::new(db.clone()).expect("new session");
+        let proposal = receiver_at_seen_inputs_check(&persister);
+        let input = sender_input(&proposal);
+
+        check_no_inputs_seen_before(&db, proposal, &FailingPersister(persister.clone()))
+            .expect_err("a failed save must surface");
+        assert!(
+            !db.is_input_seen(input).expect("db read"),
+            "inputs must not be recorded before the transition is persisted"
+        );
+
+        // The receiver restarts and replays the log back to this check.
+        let proposal = replay_to_seen_inputs_check(&persister);
+        check_no_inputs_seen_before(&db, proposal, &persister)
+            .expect("a session's own inputs are not a replay");
+        assert!(db.is_input_seen(input).expect("db read"));
+    }
+
+    #[test]
+    fn seen_inputs_check_rejects_a_recorded_input() {
+        let db = Database::in_memory();
+        let persister = ReceiverPersister::new(db.clone()).expect("new session");
+        let proposal = receiver_at_seen_inputs_check(&persister);
+        db.record_inputs_seen([sender_input(&proposal)]).expect("db write");
+
+        check_no_inputs_seen_before(&db, proposal, &persister)
+            .expect_err("an input seen in an earlier session is a replay");
+        match replay_receiver_event_log(&persister).expect("replay should succeed").0 {
+            ReceiveSession::HasReplyableError(_) => {}
+            other => panic!("expected HasReplyableError, got {}", other.status_text()),
+        }
+    }
+
+    #[test]
+    fn seen_inputs_check_cancels_session_claimed_concurrently() {
+        let db = Database::in_memory();
+        let persister = ReceiverPersister::new(db.clone()).expect("new session");
+        let proposal = receiver_at_seen_inputs_check(&persister);
+        let claiming = ClaimingPersister {
+            inner: persister.clone(),
+            db: db.clone(),
+            input: sender_input(&proposal),
+        };
+
+        check_no_inputs_seen_before(&db, proposal, &claiming)
+            .expect_err("losing the claim must stop the session");
+        match replay_receiver_event_log(&persister).expect("replay should succeed").0 {
+            ReceiveSession::PendingFallback(_) => {}
+            other => panic!("expected PendingFallback, got {}", other.status_text()),
         }
     }
 }

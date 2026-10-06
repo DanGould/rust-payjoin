@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Record a sender's inputs as seen only after the receive session has persisted the check, so a session that fails to save and is resumed no longer rejects its own sender's inputs as a replay
+
 ## 1.0.0
 
 The first stable payjoin-cli release, tracking payjoin 1.2.0. The CLI adopts

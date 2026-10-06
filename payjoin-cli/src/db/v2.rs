@@ -324,28 +324,16 @@ impl Database {
 
 #[cfg(all(test, feature = "v2"))]
 mod tests {
-    use std::sync::Arc;
-
     use payjoin::HpkeKeyPair;
 
     use super::*;
-
-    fn create_test_db() -> Arc<Database> {
-        // Use an in-memory database for tests
-        let manager = r2d2_sqlite::SqliteConnectionManager::memory()
-            .with_init(|conn| conn.execute_batch("PRAGMA locking_mode = EXCLUSIVE;"));
-        let pool = r2d2::Pool::new(manager).expect("pool creation should succeed");
-        let conn = pool.get().expect("connection should succeed");
-        Database::init_schema(&conn).expect("schema init should succeed");
-        Arc::new(Database(pool))
-    }
 
     fn make_receiver_pubkey() -> payjoin::HpkePublicKey { HpkeKeyPair::gen_keypair().1 }
 
     // Second call with the same URI (same active session) should return DuplicateSendSession(Uri).
     #[test]
     fn test_duplicate_uri_returns_error() {
-        let db = create_test_db();
+        let db = Database::in_memory();
         let rk1 = make_receiver_pubkey();
         let rk2 = make_receiver_pubkey();
         let uri = "bitcoin:addr1?pj=https://example.com/BBBBBBBB";
@@ -362,7 +350,7 @@ mod tests {
     // Same receiver pubkey under a different URI should return DuplicateSendSession(ReceiverPubkey).
     #[test]
     fn test_duplicate_rk_returns_error() {
-        let db = create_test_db();
+        let db = Database::in_memory();
         let rk = make_receiver_pubkey();
         let uri1 = "bitcoin:addr1?pj=https://example.com/CCCCCCCC";
         let uri2 = "bitcoin:addr1?pj=https://example.com/DDDDDDDD";
@@ -380,7 +368,7 @@ mod tests {
     // to prevent address reuse, HPKE receiver-key reuse
     #[test]
     fn test_completed_session_blocks_reuse() {
-        let db = create_test_db();
+        let db = Database::in_memory();
         let rk1 = make_receiver_pubkey();
         let rk2 = make_receiver_pubkey();
         let uri = "bitcoin:addr1?pj=https://example.com/EEEEEEEE";

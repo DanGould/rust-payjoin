@@ -370,9 +370,11 @@ impl App {
         tracing::trace!("check2");
 
         // Receive Check 3: have we seen this input before? More of a check for non-interactive i.e. payment processor receivers.
+        let original_inputs: Vec<_> =
+            proposal.inputs_seen_checklist().map(|item| *item.value()).collect();
         let checklist = proposal.inputs_seen_checklist();
         let marked_checklist =
-            mark_checklist(checklist, &mut |input| Ok(self.db.insert_input_seen_before(*input)?))
+            mark_checklist(checklist, &mut |input| Ok(self.db.is_input_seen(*input)?))
                 .map_err(Error::Implementation)?;
         let payjoin = proposal.apply_inputs_seen_checklist(marked_checklist)?;
         tracing::trace!("check3");
@@ -411,6 +413,20 @@ impl App {
             .map_err(|e| ImplementationError::from(e.into_boxed_dyn_error()))
             .map_err(Error::Implementation)?;
         let payjoin_proposal = provisional_payjoin.finalize_signed_proposal(&signed_psbt)?;
+
+        // Record the inputs only now that there is a proposal to answer with,
+        // so a request that fails part way does not leave them recorded. A
+        // concurrent request spending the same inputs can pass the check above
+        // too, and only the first to record may reveal receiver inputs.
+        let claimed_elsewhere = self
+            .db
+            .record_inputs_seen(original_inputs)
+            .map_err(|e| Error::Implementation(e.into()))?;
+        if let Some(input) = claimed_elsewhere.first() {
+            let reason: Box<dyn std::error::Error + Send + Sync> =
+                format!("Input {input} was claimed by a concurrent request").into();
+            return Err(Error::Implementation(ImplementationError::from(reason)));
+        }
         Ok(payjoin_proposal)
     }
 }
