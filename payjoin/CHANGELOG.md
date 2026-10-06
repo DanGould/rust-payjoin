@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document that `check_no_inputs_seen_before` and `apply_inputs_seen_checklist` callers must record inputs as seen only after the transition is persisted, since a record written inside the callback makes a resumed session reject its own sender's inputs
+
 ## 1.2.0
 
 This release adds a non-blocking interface to the receiver state machine.

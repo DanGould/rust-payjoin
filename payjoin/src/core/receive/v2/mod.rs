@@ -1036,6 +1036,13 @@ impl Receiver<MaybeInputsSeen> {
     /// probing and replay attacks (where inputs have been used in a previous
     /// payjoin attempt).
     ///
+    /// `is_known` must only read the receiver's record of inputs it has
+    /// answered before. Record this proposal's inputs after the returned
+    /// transition has been persisted, not inside `is_known`. A record written
+    /// inside the callback outlives a transition that then fails to persist,
+    /// so the resumed session runs this check again, finds its own sender's
+    /// inputs recorded, and rejects the payjoin it was in the middle of.
+    ///
     /// Returns a [`MaybeFatalTransition`] that, once successfully persisted, yields a
     /// [`Receiver<OutputsUnknown>`] to continue validation.
     pub fn check_no_inputs_seen_before(
@@ -1060,7 +1067,10 @@ impl Receiver<MaybeInputsSeen> {
     ///
     /// Each [`ChecklistItem`] must be marked with its result to obtain a
     /// [`MarkedChecklistItem`], which can then be collected and submitted to
-    /// [`Receiver<MaybeInputsSeen>::apply_inputs_seen_checklist`].
+    /// [`Receiver<MaybeInputsSeen>::apply_inputs_seen_checklist`]. Marking only
+    /// reads the receiver's record; see
+    /// [`Receiver<MaybeInputsSeen>::check_no_inputs_seen_before`] for when to
+    /// record the inputs.
     pub fn inputs_seen_checklist(
         &self,
     ) -> impl Iterator<Item = ChecklistItem<InputSeenBefore>> + use<> {
@@ -1070,7 +1080,9 @@ impl Receiver<MaybeInputsSeen> {
     /// Apply the inputs-seen checklist results to advance the state machine.
     ///
     /// Use [`Receiver<MaybeInputsSeen>::inputs_seen_checklist`] to obtain the items
-    /// that need to be checked.
+    /// that need to be checked. Record the inputs as seen only after the returned
+    /// transition has been persisted; see
+    /// [`Receiver<MaybeInputsSeen>::check_no_inputs_seen_before`].
     ///
     /// Returns a [`MaybeFatalTransition`] that, once successfully persisted, yields a
     /// [`Receiver<OutputsUnknown>`] to continue validation.

@@ -232,6 +232,13 @@ impl MaybeInputsSeen {
     /// probing and replay attacks (where inputs have been used in a previous
     /// payjoin attempt).
     ///
+    /// `is_known` must only read the receiver's record of inputs it has
+    /// answered before. Record this proposal's inputs once the receiver has a
+    /// proposal to respond with, or has persisted the step after this one,
+    /// not inside `is_known`. A record written inside the callback outlives
+    /// an attempt that fails on a later step, so the sender's retry, or the
+    /// receiver's own resumed session, is rejected as a replay.
+    ///
     /// Returns an [`OutputsUnknown`] to continue validation.
     pub fn check_no_inputs_seen_before(
         self,
@@ -248,6 +255,8 @@ impl MaybeInputsSeen {
     ///
     /// Each [`ChecklistItem`] must be marked with its result to obtain a [`MarkedChecklistItem`],
     /// which can then be collected and submitted to [`Self::apply_inputs_seen_checklist`].
+    /// Marking only reads the receiver's record; see [`Self::check_no_inputs_seen_before`]
+    /// for when to record the inputs.
     pub fn inputs_seen_checklist(
         &self,
     ) -> impl Iterator<Item = ChecklistItem<InputSeenBefore>> + use<> {
@@ -257,6 +266,8 @@ impl MaybeInputsSeen {
     /// Apply the inputs-seen checklist results to advance the state machine.
     ///
     /// Use [`Self::inputs_seen_checklist`] to obtain the items that need to be checked.
+    /// Record the inputs as seen only once the receiver has committed to its response;
+    /// see [`Self::check_no_inputs_seen_before`].
     ///
     /// Returns an [`OutputsUnknown`] to continue validation.
     pub fn apply_inputs_seen_checklist(
