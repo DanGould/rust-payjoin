@@ -1,5 +1,12 @@
 //! Send BIP 77 Payjoin v2
 //!
+//! # Typestate ownership
+//!
+//! Builder and context types consume `self` on state transitions.
+//! [`Clone`] is derived so state can be persisted across the async session
+//! boundary — callers **must not** clone to circumvent a state transition.
+//! See `AGENTS.md` § *Typestate Conventions*.
+//!
 //! This module contains types and methods used to implement sending via [BIP77
 //! Payjoin](https://github.com/bitcoin/bips/blob/master/bip-0077.md).
 //!

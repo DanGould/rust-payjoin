@@ -1,6 +1,15 @@
 //! Common typestates and methods for both BIP 77 v2 and BIP 78 v1.
 //! This module isn't meant to be exposed publicly, but for v1 and v2
 //! APIs to expose as relevant typestates.
+//!
+//! # Typestate ownership
+//!
+//! Typestate transitions consume `self` so each state can only be used once.
+//! All typestate structs derive [`Clone`] because the v2 async protocol must
+//! serialize and deserialize state across session boundaries. Callers **must
+//! not** clone a value to reuse a prior state — doing so would bypass the
+//! intended state-machine ordering. See `AGENTS.md` § *Typestate Conventions*
+//! for the full policy.
 
 use std::cmp::{max, min};
 use std::collections::HashSet;

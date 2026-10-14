@@ -1,5 +1,13 @@
 //! Receive BIP 77 Payjoin v2
 //!
+//! # Typestate ownership
+//!
+//! Each check method consumes `self` to enforce the transition order at
+//! compile time. [`Clone`] is derived so state can be persisted across the
+//! async session boundary — callers **must not** clone to circumvent a
+//! state transition.
+//! See the `common` receive module and `AGENTS.md` § *Typestate Conventions*.
+//!
 //! This module contains the typestates and helper methods to perform a Payjoin v2 receive.
 //!
 //! Receiving Payjoin transactions securely and privately requires the receiver to run safety
