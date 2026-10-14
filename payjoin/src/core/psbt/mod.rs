@@ -388,6 +388,16 @@ impl fmt::Display for PsbtInputsError {
     }
 }
 
+impl PsbtInputsError {
+    /// Returns the index of the PSBT input that failed validation.
+    pub fn index(&self) -> usize { self.index }
+
+    #[cfg(test)]
+    pub(crate) fn new_test(index: usize, error: InternalPsbtInputError) -> Self {
+        Self { index, error }
+    }
+}
+
 impl std::error::Error for PsbtInputsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(&self.error) }
 }
@@ -465,7 +475,10 @@ mod test {
     use bitcoin::{Psbt, ScriptBuf, Transaction, TxOut};
     use payjoin_test_utils::PARSED_ORIGINAL_PSBT;
 
-    use crate::psbt::{InputWeightError, InternalInputPair, InternalPsbtInputError, PsbtExt};
+    use crate::psbt::{
+        InputWeightError, InternalInputPair, InternalPsbtInputError, PrevTxOutError, PsbtExt,
+        PsbtInputsError,
+    };
 
     #[test]
     fn validate_input_utxos() {
@@ -606,5 +619,15 @@ mod test {
         let pair: InternalInputPair = InternalInputPair { txin, psbtin: &psbtin };
         let weight = pair.expected_input_weight();
         assert_eq!(weight.unwrap_err(), InputWeightError::NoRedeemScript)
+    }
+
+    #[test]
+    fn psbt_inputs_error_exposes_index() {
+        let error = PsbtInputsError {
+            index: 7,
+            error: InternalPsbtInputError::PrevTxOut(PrevTxOutError::MissingUtxoInformation),
+        };
+        assert_eq!(error.index(), 7);
+        assert!(error.to_string().contains("#7"));
     }
 }
