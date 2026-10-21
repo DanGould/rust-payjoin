@@ -339,6 +339,127 @@ function runUnitTests(name: string, payjoin: typeof nodejsPayjoin) {
         });
     });
 
+    describe(`[${name}] RequestHandler tests`, () => {
+        const relays = [
+            "https://relay-a.example",
+            "https://relay-b.example",
+            "https://relay-c.example",
+        ];
+        const directoryUrl = "https://directory.example";
+
+        function firstRelayDownFetcher(): nodejsPayjoin.OhttpKeysFetcher & {
+            relaysTried: string[];
+        } {
+            const relaysTried: string[] = [];
+            return {
+                relaysTried,
+                async fetch(relay) {
+                    relaysTried.push(relay.asString());
+                    if (relaysTried.length === 1) {
+                        throw new payjoin.DirectoryFetchError.Transient({
+                            detail: "relay down",
+                        });
+                    }
+                    return payjoin.OhttpKeys.decode(OHTTP_KEYS);
+                },
+            };
+        }
+
+        test("pinned OHTTP keys return their directory", async () => {
+            const directory = payjoin.Url.parse(directoryUrl);
+            const handler = new payjoin.RequestHandler(relays, [
+                "https://other.example",
+            ]);
+            handler.setOhttpKeys(
+                directory,
+                payjoin.OhttpKeys.decode(OHTTP_KEYS),
+            );
+            const fetcher = firstRelayDownFetcher();
+
+            const fetched = await handler.fetchOhttpKeys(fetcher);
+
+            assert.strictEqual(
+                fetched.directory.asString(),
+                directory.asString(),
+            );
+            assert.deepStrictEqual(fetcher.relaysTried, []);
+        });
+
+        test("fetch OHTTP keys fails over to another relay", async () => {
+            const directory = payjoin.Url.parse(directoryUrl);
+            const handler = new payjoin.RequestHandler(relays, [
+                directory.asString(),
+            ]);
+            const fetcher = firstRelayDownFetcher();
+
+            const fetched = await handler.fetchOhttpKeys(fetcher);
+
+            assert.strictEqual(
+                fetched.directory.asString(),
+                directory.asString(),
+            );
+            assert.strictEqual(fetcher.relaysTried.length, 2);
+            assert.notStrictEqual(
+                fetcher.relaysTried[0],
+                fetcher.relaysTried[1],
+            );
+        });
+
+        test("fetch OHTTP keys without relays throws", async () => {
+            const handler = new payjoin.RequestHandler([], [directoryUrl]);
+
+            await assert.rejects(() =>
+                handler.fetchOhttpKeys(firstRelayDownFetcher()),
+            );
+        });
+
+        test("post via relay fails over and skips the directory", async () => {
+            const directory = payjoin.Url.parse(directoryUrl);
+            const receiver = new payjoin.ReceiverBuilder(
+                "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
+                directory.asString(),
+                payjoin.OhttpKeys.decode(OHTTP_KEYS),
+            )
+                .build()
+                .save(new InMemoryReceiverPersister());
+            // The directory is also listed as a relay; it must never be used
+            // to reach itself.
+            const handler = new payjoin.RequestHandler(
+                [...relays, directory.asString()],
+                [directory.asString()],
+            );
+            const relaysTried: string[] = [];
+            const transport: nodejsPayjoin.RelayTransport = {
+                build(relay) {
+                    relaysTried.push(relay.asString());
+                    const poll = receiver.createPollRequest(relay.asString());
+                    return payjoin.BuiltRequest.create({
+                        request: poll.request,
+                        ohttpContext: poll.clientResponse,
+                    });
+                },
+                async post() {
+                    if (relaysTried.length === 1) {
+                        throw new payjoin.RelayTransportError.Transient({
+                            detail: "relay down",
+                        });
+                    }
+                    return new TextEncoder().encode("response").buffer;
+                },
+            };
+
+            const response = await handler.postViaRelay(directory, transport);
+
+            assert.strictEqual(
+                new TextDecoder().decode(response.body),
+                "response",
+            );
+            assert.strictEqual(relaysTried.length, 2);
+            assert.notStrictEqual(relaysTried[0], relaysTried[1]);
+            assert.ok(!relaysTried.includes(directory.asString()));
+        });
+    });
+
     describe(`[${name}] Validation`, () => {
         test("receiver builder rejects bad address", () => {
             assert.throws(() => {

@@ -328,4 +328,119 @@ void main() {
       );
     });
   });
+  group("Test RequestHandler", () {
+    final relays = [
+      "https://relay-a.example",
+      "https://relay-b.example",
+      "https://relay-c.example",
+    ];
+    final directory = payjoin.Url.parse(input: "https://directory.example");
+
+    test("Pinned OHTTP keys return their directory", () async {
+      final handler = payjoin.RequestHandler(
+        relays: relays,
+        directories: ["https://other.example"],
+      );
+      handler.setOhttpKeys(directory: directory, ohttpKeys: testOhttpKeys());
+      final fetcher = FirstRelayDownFetcher();
+      final fetched = await handler.fetchOhttpKeys(fetcher: fetcher);
+      expect(fetched.directory.asString(), directory.asString());
+      expect(fetcher.relays, isEmpty);
+    });
+
+    test("Fetch OHTTP keys fails over to another relay", () async {
+      final handler = payjoin.RequestHandler(
+        relays: relays,
+        directories: [directory.asString()],
+      );
+      final fetcher = FirstRelayDownFetcher();
+      final fetched = await handler.fetchOhttpKeys(fetcher: fetcher);
+      expect(fetched.directory.asString(), directory.asString());
+      expect(fetcher.relays.length, 2);
+      expect(fetcher.relays[0], isNot(fetcher.relays[1]));
+    });
+
+    test("Fetch OHTTP keys without relays throws", () async {
+      final handler = payjoin.RequestHandler(
+        relays: [],
+        directories: [directory.asString()],
+      );
+      await expectLater(
+        handler.fetchOhttpKeys(fetcher: FirstRelayDownFetcher()),
+        throwsA(isA<payjoin.RequestHandlerException>()),
+      );
+    });
+
+    test("Post via relay fails over and skips the directory", () async {
+      final receiver = payjoin.ReceiverBuilder(
+        address: "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
+        directory: directory.asString(),
+        ohttpKeys: testOhttpKeys(),
+      ).build().save(persister: InMemoryReceiverPersister());
+      // The directory is also listed as a relay; it must never be used to
+      // reach itself.
+      final handler = payjoin.RequestHandler(
+        relays: [...relays, directory.asString()],
+        directories: [directory.asString()],
+      );
+      final transport = FirstRelayDownTransport(receiver);
+      final response = await handler.postViaRelay(
+        exclude: directory,
+        transport: transport,
+      );
+      expect(String.fromCharCodes(response.body), "response");
+      expect(transport.relays.length, 2);
+      expect(transport.relays[0], isNot(transport.relays[1]));
+      expect(transport.relays, isNot(contains(directory.asString())));
+    });
+  });
+}
+
+payjoin.OhttpKeys testOhttpKeys() => payjoin.OhttpKeys.decode(
+  bytes: Uint8List.fromList(
+    hex.decode(
+      "01001604ba48c49c3d4a92a3ad00ecc63a024da10ced02180c73ec12d8a7ad2cc91bb483824fe2bee8d28bfe2eb2fc6453bc4d31cd851e8a6540e86c5382af588d370957000400010003",
+    ),
+  ),
+);
+
+class FirstRelayDownFetcher implements payjoin.OhttpKeysFetcher {
+  final List<String> relays = [];
+
+  @override
+  Future<payjoin.OhttpKeys> fetch(
+    payjoin.Url relay,
+    payjoin.Url directory,
+  ) async {
+    relays.add(relay.asString());
+    if (relays.length == 1) {
+      throw payjoin.TransientDirectoryFetchException("relay down");
+    }
+    return testOhttpKeys();
+  }
+}
+
+class FirstRelayDownTransport implements payjoin.RelayTransport {
+  final payjoin.Initialized receiver;
+  final List<String> relays = [];
+
+  FirstRelayDownTransport(this.receiver);
+
+  @override
+  payjoin.BuiltRequest build(payjoin.Url relay) {
+    relays.add(relay.asString());
+    final poll = receiver.createPollRequest(ohttpRelay: relay.asString());
+    return payjoin.BuiltRequest(
+      request: poll.request,
+      ohttpContext: poll.clientResponse,
+    );
+  }
+
+  @override
+  Future<Uint8List> post(payjoin.Request request) async {
+    if (relays.length == 1) {
+      throw payjoin.TransientRelayTransportException("relay down");
+    }
+    return Uint8List.fromList("response".codeUnits);
+  }
 }

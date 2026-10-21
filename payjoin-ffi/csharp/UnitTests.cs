@@ -402,3 +402,131 @@ public class ValidationTests
         Assert.IsType<FfiValidationException.FeeRateOutOfRange>(ex.v1);
     }
 }
+
+public class RequestHandlerTests
+{
+    private static readonly byte[] OhttpKeysData = new byte[]
+    {
+        0x01, 0x00, 0x16, 0x04, 0xba, 0x48, 0xc4, 0x9c, 0x3d, 0x4a,
+        0x92, 0xa3, 0xad, 0x00, 0xec, 0xc6, 0x3a, 0x02, 0x4d, 0xa1,
+        0x0c, 0xed, 0x02, 0x18, 0x0c, 0x73, 0xec, 0x12, 0xd8, 0xa7,
+        0xad, 0x2c, 0xc9, 0x1b, 0xb4, 0x83, 0x82, 0x4f, 0xe2, 0xbe,
+        0xe8, 0xd2, 0x8b, 0xfe, 0x2e, 0xb2, 0xfc, 0x64, 0x53, 0xbc,
+        0x4d, 0x31, 0xcd, 0x85, 0x1e, 0x8a, 0x65, 0x40, 0xe8, 0x6c,
+        0x53, 0x82, 0xaf, 0x58, 0x8d, 0x37, 0x09, 0x57, 0x00, 0x04,
+        0x00, 0x01, 0x00, 0x03,
+    };
+
+    private static readonly string[] Relays =
+    {
+        "https://relay-a.example",
+        "https://relay-b.example",
+        "https://relay-c.example",
+    };
+
+    private const string DirectoryUrl = "https://directory.example";
+
+    private sealed class FirstRelayDownFetcher : OhttpKeysFetcher
+    {
+        public List<string> RelaysTried { get; } = new();
+
+        public Task<OhttpKeys> Fetch(Url relay, Url directory)
+        {
+            RelaysTried.Add(relay.AsString());
+            if (RelaysTried.Count == 1)
+            {
+                throw new DirectoryFetchException.Transient("relay down");
+            }
+            return Task.FromResult(OhttpKeys.Decode(OhttpKeysData));
+        }
+    }
+
+    private sealed class FirstRelayDownTransport : RelayTransport
+    {
+        private readonly Initialized _receiver;
+
+        public FirstRelayDownTransport(Initialized receiver)
+        {
+            _receiver = receiver;
+        }
+
+        public List<string> RelaysTried { get; } = new();
+
+        public BuiltRequest Build(Url relay)
+        {
+            RelaysTried.Add(relay.AsString());
+            var poll = _receiver.CreatePollRequest(relay.AsString());
+            return new BuiltRequest(poll.Request, poll.ClientResponse);
+        }
+
+        public Task<byte[]> Post(Request request)
+        {
+            if (RelaysTried.Count == 1)
+            {
+                throw new RelayTransportException.Transient("relay down");
+            }
+            return Task.FromResult(System.Text.Encoding.UTF8.GetBytes("response"));
+        }
+    }
+
+    [Fact]
+    public async Task PinnedOhttpKeysReturnTheirDirectory()
+    {
+        using var directory = Url.Parse(DirectoryUrl);
+        using var handler = new RequestHandler(Relays, new[] { "https://other.example" });
+        handler.SetOhttpKeys(directory, OhttpKeys.Decode(OhttpKeysData));
+        var fetcher = new FirstRelayDownFetcher();
+
+        var fetched = await handler.FetchOhttpKeys(fetcher);
+
+        Assert.Equal(directory.AsString(), fetched.Directory.AsString());
+        Assert.Empty(fetcher.RelaysTried);
+    }
+
+    [Fact]
+    public async Task FetchOhttpKeysFailsOverToAnotherRelay()
+    {
+        using var directory = Url.Parse(DirectoryUrl);
+        using var handler = new RequestHandler(Relays, new[] { directory.AsString() });
+        var fetcher = new FirstRelayDownFetcher();
+
+        var fetched = await handler.FetchOhttpKeys(fetcher);
+
+        Assert.Equal(directory.AsString(), fetched.Directory.AsString());
+        Assert.Equal(2, fetcher.RelaysTried.Count);
+        Assert.NotEqual(fetcher.RelaysTried[0], fetcher.RelaysTried[1]);
+    }
+
+    [Fact]
+    public async Task FetchOhttpKeysWithoutRelaysThrows()
+    {
+        using var handler = new RequestHandler(Array.Empty<string>(), new[] { DirectoryUrl });
+
+        await Assert.ThrowsAsync<RequestHandlerException>(
+            () => handler.FetchOhttpKeys(new FirstRelayDownFetcher()));
+    }
+
+    [Fact]
+    public async Task PostViaRelayFailsOverAndSkipsTheDirectory()
+    {
+        using var directory = Url.Parse(DirectoryUrl);
+        var builder = new ReceiverBuilder(
+            "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
+            directory.AsString(),
+            OhttpKeys.Decode(OhttpKeysData));
+        var receiver = builder.Build().Save(new InMemoryReceiverPersister());
+        // The directory is also listed as a relay; it must never be used to
+        // reach itself.
+        using var handler = new RequestHandler(
+            Relays.Append(directory.AsString()).ToArray(),
+            new[] { directory.AsString() });
+        var transport = new FirstRelayDownTransport(receiver);
+
+        var response = await handler.PostViaRelay(directory, transport);
+
+        Assert.Equal("response", System.Text.Encoding.UTF8.GetString(response.Body));
+        Assert.Equal(2, transport.RelaysTried.Count);
+        Assert.NotEqual(transport.RelaysTried[0], transport.RelaysTried[1]);
+        Assert.DoesNotContain(directory.AsString(), transport.RelaysTried);
+    }
+}

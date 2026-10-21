@@ -306,5 +306,114 @@ class TestValidation(unittest.TestCase):
             payjoin.SenderBuilder("not-a-psbt", uri)
 
 
+def _test_ohttp_keys() -> payjoin.OhttpKeys:
+    return payjoin.OhttpKeys.decode(
+        bytes.fromhex(
+            "01001604ba48c49c3d4a92a3ad00ecc63a024da10ced02180c73ec12d8a7ad2cc91bb483824fe2bee8d28bfe2eb2fc6453bc4d31cd851e8a6540e86c5382af588d370957000400010003"
+        )
+    )
+
+
+class _FirstRelayDownFetcher(payjoin.OhttpKeysFetcher):
+    def __init__(self):
+        self.relays = []
+
+    async def fetch(self, relay, directory):
+        self.relays.append(relay.as_string())
+        if len(self.relays) == 1:
+            raise payjoin.DirectoryFetchError.Transient("relay down")
+        return _test_ohttp_keys()
+
+
+class _FirstRelayDownTransport(payjoin.RelayTransport):
+    def __init__(self, receiver):
+        self.receiver = receiver
+        self.relays = []
+
+    def build(self, relay):
+        self.relays.append(relay.as_string())
+        poll = self.receiver.create_poll_request(relay.as_string())
+        return payjoin.BuiltRequest(
+            request=poll.request, ohttp_context=poll.client_response
+        )
+
+    async def post(self, request):
+        if len(self.relays) == 1:
+            raise payjoin.RelayTransportError.Transient("relay down")
+        return b"response"
+
+
+class TestRequestHandler(unittest.TestCase):
+    relays = [
+        "https://relay-a.example",
+        "https://relay-b.example",
+        "https://relay-c.example",
+    ]
+    directory = payjoin.Url.parse("https://directory.example")
+
+    def test_pinned_ohttp_keys_return_their_directory(self):
+        import asyncio
+
+        async def run_test():
+            handler = payjoin.RequestHandler(self.relays, ["https://other.example"])
+            handler.set_ohttp_keys(self.directory, _test_ohttp_keys())
+            fetcher = _FirstRelayDownFetcher()
+            fetched = await handler.fetch_ohttp_keys(fetcher)
+            self.assertEqual(fetched.directory.as_string(), self.directory.as_string())
+            self.assertEqual(fetcher.relays, [])
+
+        asyncio.run(run_test())
+
+    def test_fetch_ohttp_keys_fails_over_to_another_relay(self):
+        import asyncio
+
+        async def run_test():
+            handler = payjoin.RequestHandler(self.relays, [self.directory.as_string()])
+            fetcher = _FirstRelayDownFetcher()
+            fetched = await handler.fetch_ohttp_keys(fetcher)
+            self.assertEqual(fetched.directory.as_string(), self.directory.as_string())
+            self.assertEqual(len(fetcher.relays), 2)
+            self.assertNotEqual(fetcher.relays[0], fetcher.relays[1])
+
+        asyncio.run(run_test())
+
+    def test_fetch_ohttp_keys_without_relays_raises(self):
+        import asyncio
+
+        async def run_test():
+            handler = payjoin.RequestHandler([], [self.directory.as_string()])
+            with self.assertRaises(cast(type[Exception], payjoin.RequestHandlerError)):
+                await handler.fetch_ohttp_keys(_FirstRelayDownFetcher())
+
+        asyncio.run(run_test())
+
+    def test_post_via_relay_fails_over_and_skips_the_directory(self):
+        import asyncio
+
+        async def run_test():
+            receiver = (
+                payjoin.ReceiverBuilder(
+                    "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
+                    self.directory.as_string(),
+                    _test_ohttp_keys(),
+                )
+                .build()
+                .save(InMemoryReceiverPersister())
+            )
+            # The directory is also listed as a relay; it must never be used
+            # to reach itself.
+            handler = payjoin.RequestHandler(
+                self.relays + [self.directory.as_string()], [self.directory.as_string()]
+            )
+            transport = _FirstRelayDownTransport(receiver)
+            response = await handler.post_via_relay(self.directory, transport)
+            self.assertEqual(response.body, b"response")
+            self.assertEqual(len(transport.relays), 2)
+            self.assertNotEqual(transport.relays[0], transport.relays[1])
+            self.assertNotIn(self.directory.as_string(), transport.relays)
+
+        asyncio.run(run_test())
+
+
 if __name__ == "__main__":
     unittest.main()
