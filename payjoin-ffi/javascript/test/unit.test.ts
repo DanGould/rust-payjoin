@@ -365,26 +365,6 @@ function runUnitTests(name: string, payjoin: typeof nodejsPayjoin) {
             };
         }
 
-        test("pinned OHTTP keys return their directory", async () => {
-            const directory = payjoin.Url.parse(directoryUrl);
-            const handler = new payjoin.RequestHandler(relays, [
-                "https://other.example",
-            ]);
-            handler.setOhttpKeys(
-                directory,
-                payjoin.OhttpKeys.decode(OHTTP_KEYS),
-            );
-            const fetcher = firstRelayDownFetcher();
-
-            const fetched = await handler.fetchOhttpKeys(fetcher);
-
-            assert.strictEqual(
-                fetched.directory.asString(),
-                directory.asString(),
-            );
-            assert.deepStrictEqual(fetcher.relaysTried, []);
-        });
-
         test("fetch OHTTP keys fails over to another relay", async () => {
             const directory = payjoin.Url.parse(directoryUrl);
             const handler = new payjoin.RequestHandler(relays, [

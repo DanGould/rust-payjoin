@@ -3,13 +3,14 @@
 //! [`RequestHandler`] owns the selection policy for OHTTP relays and payjoin
 //! directories and drives failover. [`RequestHandler::fetch_ohttp_keys_with`]
 //! fetches OHTTP keys over a caller-supplied transport, trying each directory
-//! over every relay before moving on to the next directory. With the `io`
-//! feature, [`RequestHandler::fetch_ohttp_keys`] does the same over this
-//! crate's HTTP client.
+//! over every relay before moving on to the next directory.
 //!
 //! [`RequestHandler::relay_order`] gives the relays to try for one request, in
 //! order. The caller builds and posts the request with its own HTTP client and
 //! moves to the next relay on failure.
+//!
+//! The handler makes no requests of its own and holds no HTTP client. With the
+//! `io` feature, callers can pass `payjoin::io::fetch_ohttp_keys` as the fetch.
 //!
 //! A directory chosen for a session must not change: it is embedded in the
 //! BIP21 URI at session creation and recovered from the session event log
@@ -21,8 +22,6 @@
 //!
 //! A relay equal to the directory it is reaching is never tried: a server
 //! serving as both rejects the self-loop request.
-use std::sync::{Mutex, MutexGuard, PoisonError};
-
 use bitcoin::secp256k1::rand::seq::SliceRandom;
 use bitcoin::secp256k1::rand::Rng;
 
@@ -30,50 +29,22 @@ use crate::Url;
 
 /// Selects OHTTP relays and payjoin directories and fails over between them.
 ///
-/// Methods take `&self` and no lock is held across an `.await`, so a
-/// `RequestHandler` can be shared across tasks (for example via `Arc`).
-#[derive(Debug)]
+/// Holds only the configured relays and directories, so it is cheap to clone
+/// and safe to share across tasks.
+#[derive(Debug, Clone)]
 pub struct RequestHandler {
     relays: Vec<Url>,
     directories: Vec<Url>,
-    pinned_ohttp_keys: Mutex<Option<(Url, crate::OhttpKeys)>>,
-    #[cfg(feature = "_manual-tls")]
-    cert_der: Mutex<Option<Vec<u8>>>,
 }
 
 impl RequestHandler {
     /// Deduplicates `relays` and `directories` (preserving order) so uniform
     /// selection isn't skewed by an endpoint listed more than once.
     pub fn new(relays: Vec<Url>, directories: Vec<Url>) -> Self {
-        Self {
-            relays: dedup(relays),
-            directories: dedup(directories),
-            pinned_ohttp_keys: Mutex::new(None),
-            #[cfg(feature = "_manual-tls")]
-            cert_der: Mutex::new(None),
-        }
+        Self { relays: dedup(relays), directories: dedup(directories) }
     }
 
-    /// Pin user-supplied OHTTP keys for `directory`, so
-    /// [`RequestHandler::fetch_ohttp_keys_with`] and
-    /// [`RequestHandler::fetch_ohttp_keys`] return this pair without
-    /// contacting a directory.
-    ///
-    /// OHTTP keys belong to one directory: a session that names another
-    /// directory with these keys cannot be reached. `directory` need not be
-    /// one of the configured directories.
-    pub fn set_ohttp_keys(&self, directory: Url, ohttp_keys: crate::OhttpKeys) {
-        *lock(&self.pinned_ohttp_keys) = Some((directory, ohttp_keys));
-    }
-
-    /// Use a DER-encoded certificate for local HTTPS connections when
-    /// fetching OHTTP keys.
-    #[cfg(feature = "_manual-tls")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "_manual-tls")))]
-    pub fn set_cert_der(&self, cert_der: Vec<u8>) { *lock(&self.cert_der) = Some(cert_der); }
-
-    /// Return the pinned OHTTP keys, or fetch them through `fetch`, with
-    /// automatic failover.
+    /// Fetch OHTTP keys through `fetch`, with automatic failover.
     ///
     /// `fetch` performs a single attempt against a `(relay, directory)` pair.
     /// A failed attempt retries the same directory over another relay, and a
@@ -84,8 +55,9 @@ impl RequestHandler {
     /// URI, so one relay's failure does not rule a directory out.
     ///
     /// Returns the directory alongside the keys: a receiver pins the directory
-    /// in the BIP21 URI at session creation. With pinned keys, the directory
-    /// is the one they were pinned for.
+    /// in the BIP21 URI at session creation. A caller with OHTTP keys
+    /// configured ahead of time skips this and uses the directory those keys
+    /// belong to.
     pub async fn fetch_ohttp_keys_with<R, F, Fut, E>(
         &self,
         rng: &mut R,
@@ -97,9 +69,6 @@ impl RequestHandler {
         Fut: std::future::Future<Output = Result<crate::OhttpKeys, E>>,
         E: std::fmt::Display,
     {
-        if let Some(pinned) = lock(&self.pinned_ohttp_keys).clone() {
-            return Ok(pinned);
-        }
         if self.relays.is_empty() {
             return Err(Error(InternalError::NoRelaysAvailable));
         }
@@ -117,34 +86,6 @@ impl RequestHandler {
         }
         Err(Error(InternalError::NoDirectoriesAvailable { last_error }))
     }
-
-    /// Return the pinned OHTTP keys, or fetch them over the network with
-    /// automatic failover.
-    ///
-    /// [`RequestHandler::fetch_ohttp_keys_with`] over this crate's HTTP
-    /// client.
-    #[cfg(feature = "io")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "io")))]
-    pub async fn fetch_ohttp_keys<R: Rng>(
-        &self,
-        rng: &mut R,
-    ) -> Result<(Url, crate::OhttpKeys), Error> {
-        #[cfg(feature = "_manual-tls")]
-        let cert_der = lock(&self.cert_der).clone();
-        #[cfg(not(feature = "_manual-tls"))]
-        let cert_der: Option<Vec<u8>> = None;
-        self.fetch_ohttp_keys_with(rng, move |relay, directory| {
-            let cert_der = cert_der.clone();
-            async move { fetch_via_relay(cert_der.as_deref(), &relay, &directory).await }
-        })
-        .await
-    }
-}
-
-/// Lock configuration, recovering from a poisoned lock rather than panicking:
-/// a panic in another thread leaves the stored value intact.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn dedup(urls: Vec<Url>) -> Vec<Url> {
@@ -167,22 +108,6 @@ fn candidate_order<R: Rng>(urls: &[Url], exclude: Option<&Url>, rng: &mut R) -> 
     let mut order: Vec<Url> = urls.iter().filter(|url| Some(*url) != exclude).cloned().collect();
     order.shuffle(rng);
     order
-}
-
-#[cfg(feature = "io")]
-async fn fetch_via_relay(
-    cert_der: Option<&[u8]>,
-    relay: &Url,
-    directory: &Url,
-) -> Result<crate::OhttpKeys, crate::io::Error> {
-    #[cfg(feature = "_manual-tls")]
-    if let Some(cert_der) = cert_der {
-        return crate::io::fetch_ohttp_keys_with_cert(relay.as_str(), directory.as_str(), cert_der)
-            .await;
-    }
-    #[cfg(not(feature = "_manual-tls"))]
-    let _ = cert_der;
-    crate::io::fetch_ohttp_keys(relay.as_str(), directory.as_str()).await
 }
 
 /// Error returned by [`RequestHandler`] key fetching.
@@ -307,28 +232,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinned_ohttp_keys_return_their_own_directory() {
-        let pinned = Url::parse("https://pinned.example").unwrap();
-        // The pinned directory is reported even when other directories are
-        // configured, and even when it is not one of them.
-        let handler = RequestHandler::new(urls(), urls());
-        handler.set_ohttp_keys(pinned.clone(), keys());
-        let fetched = std::cell::Cell::new(false);
-        for seed in 0..20 {
-            let mut rng = StdRng::seed_from_u64(seed);
-            let (directory, _) = handler
-                .fetch_ohttp_keys_with(&mut rng, |_relay, _directory| {
-                    fetched.set(true);
-                    async { Ok::<_, TestFetchError>(keys()) }
-                })
-                .await
-                .unwrap();
-            assert_eq!(directory, pinned);
-        }
-        assert!(!fetched.get(), "pinned keys must not be fetched");
-    }
-
-    #[tokio::test]
     async fn fetch_without_relays_fails() {
         let handler = RequestHandler::new(Vec::new(), urls());
         let mut rng = StdRng::seed_from_u64(3);
@@ -427,17 +330,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(vec![directory], only);
-    }
-
-    #[cfg(feature = "_manual-tls")]
-    #[test]
-    fn set_cert_der_replaces_certificate() {
-        let handler = RequestHandler::new(urls(), Vec::new());
-        assert!(lock(&handler.cert_der).is_none());
-        handler.set_cert_der(b"first".to_vec());
-        assert_eq!(lock(&handler.cert_der).as_deref(), Some(b"first".as_slice()));
-        handler.set_cert_der(b"second".to_vec());
-        assert_eq!(lock(&handler.cert_der).as_deref(), Some(b"second".as_slice()));
     }
 
     #[test]

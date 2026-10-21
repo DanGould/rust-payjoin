@@ -4,7 +4,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
-import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
 
 private val relays = listOf(
@@ -26,19 +25,6 @@ private class FirstRelayDownFetcher : OhttpKeysFetcher {
 }
 
 class RequestHandlerTests {
-    @Test
-    fun pinnedOhttpKeysReturnTheirDirectory() = runTest {
-        val directory = Url.parse(DIRECTORY)
-        val handler = RequestHandler(relays, listOf("https://other.example"))
-        handler.setOhttpKeys(directory, OhttpKeys.decode(ohttpKeysData))
-        val fetcher = FirstRelayDownFetcher()
-
-        val fetched = handler.fetchOhttpKeys(fetcher)
-
-        assertEquals(directory.asString(), fetched.directory.asString())
-        assertTrue(fetcher.relaysTried.isEmpty())
-    }
-
     @Test
     fun fetchOhttpKeysFailsOverToAnotherRelay() = runTest {
         val directory = Url.parse(DIRECTORY)

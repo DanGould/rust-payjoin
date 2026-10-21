@@ -1,15 +1,14 @@
 //! OHTTP relay and payjoin directory selection / key bootstrapping for the payjoin-cli.
 //!
-//! Thin wrapper around [`payjoin::request_handler::RequestHandler`], shared by
-//! every session behind an `Arc`. The handler holds no failure state across
-//! calls, so sessions can post concurrently without affecting each other's
-//! failover.
+//! Wraps [`payjoin::request_handler::RequestHandler`], which chooses relays and
+//! directories, and supplies the HTTP client, the configured OHTTP keys and the
+//! optional test certificate that the handler leaves to its caller. Every
+//! session shares one copy, and since the handler holds no failure state,
+//! sessions can post concurrently without affecting each other's failover.
 //!
 //! Once a directory is chosen for a session it must not change: the
 //! directory is embedded in the BIP21 URI at session creation and recovered
 //! from the session event log on resume.
-use std::sync::Arc;
-
 use anyhow::{anyhow, Result};
 use payjoin::bitcoin::secp256k1::rand::rngs::OsRng;
 use payjoin::request_handler::RequestHandler;
@@ -18,37 +17,79 @@ use payjoin::Url;
 use super::Config;
 
 #[derive(Debug, Clone)]
-pub struct MailroomManager(Arc<RequestHandler>);
+pub struct MailroomManager {
+    handler: RequestHandler,
+    /// Configured OHTTP keys and the directory they belong to.
+    ohttp_keys: Option<(Url, payjoin::OhttpKeys)>,
+    #[cfg(feature = "_manual-tls")]
+    cert_der: Option<Vec<u8>>,
+}
 
 impl MailroomManager {
     pub fn new(config: Config) -> Result<Self> {
         let v2 = config.v2()?;
-        let mailroom = RequestHandler::new(v2.ohttp_relays.clone(), v2.pj_directories.clone());
+        let handler = RequestHandler::new(v2.ohttp_relays.clone(), v2.pj_directories.clone());
         // Configured OHTTP keys belong to one directory, taken to be the
         // first configured one, so sessions never pair them with another.
-        if let Some(ohttp_keys) = v2.ohttp_keys.clone() {
-            let directory = v2
-                .pj_directories
-                .first()
-                .ok_or_else(|| anyhow!("ohttp_keys requires a pj_directories entry"))?;
-            mailroom.set_ohttp_keys(directory.clone(), ohttp_keys);
-        }
-        #[cfg(feature = "_manual-tls")]
-        if let Some(cert_path) = config.root_certificate.as_ref() {
-            mailroom.set_cert_der(std::fs::read(cert_path)?);
-        }
-        Ok(Self(Arc::new(mailroom)))
+        let ohttp_keys = match v2.ohttp_keys.clone() {
+            Some(keys) => {
+                let directory = v2
+                    .pj_directories
+                    .first()
+                    .ok_or_else(|| anyhow!("ohttp_keys requires a pj_directories entry"))?;
+                Some((directory.clone(), keys))
+            }
+            None => None,
+        };
+        Ok(Self {
+            handler,
+            ohttp_keys,
+            #[cfg(feature = "_manual-tls")]
+            cert_der: config.root_certificate.as_ref().map(std::fs::read).transpose()?,
+        })
     }
 
     pub async fn fetch_ohttp_keys(&self) -> Result<(Url, payjoin::OhttpKeys)> {
+        if let Some(configured) = &self.ohttp_keys {
+            return Ok(configured.clone());
+        }
+        #[cfg(feature = "_manual-tls")]
+        let cert_der = self.cert_der.clone();
+        #[cfg(not(feature = "_manual-tls"))]
+        let cert_der: Option<Vec<u8>> = None;
         // OsRng rather than thread_rng: ThreadRng is !Send and must not be
         // held across the fetch's await points.
-        self.0.fetch_ohttp_keys(&mut OsRng).await.map_err(Into::into)
+        self.handler
+            .fetch_ohttp_keys_with(&mut OsRng, move |relay, directory| {
+                let cert_der = cert_der.clone();
+                async move { fetch_via_relay(cert_der.as_deref(), &relay, &directory).await }
+            })
+            .await
+            .map_err(Into::into)
     }
 
     pub fn relay_order(&self, directory: &Url) -> Vec<Url> {
-        self.0.relay_order(directory, &mut OsRng)
+        self.handler.relay_order(directory, &mut OsRng)
     }
+}
+
+async fn fetch_via_relay(
+    cert_der: Option<&[u8]>,
+    relay: &Url,
+    directory: &Url,
+) -> Result<payjoin::OhttpKeys, payjoin::io::Error> {
+    #[cfg(feature = "_manual-tls")]
+    if let Some(cert_der) = cert_der {
+        return payjoin::io::fetch_ohttp_keys_with_cert(
+            relay.as_str(),
+            directory.as_str(),
+            cert_der,
+        )
+        .await;
+    }
+    #[cfg(not(feature = "_manual-tls"))]
+    let _ = cert_der;
+    payjoin::io::fetch_ohttp_keys(relay.as_str(), directory.as_str()).await
 }
 
 #[cfg(test)]

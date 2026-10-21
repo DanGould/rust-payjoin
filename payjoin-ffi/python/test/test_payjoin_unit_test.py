@@ -333,19 +333,6 @@ class TestRequestHandler(unittest.TestCase):
     ]
     directory = payjoin.Url.parse("https://directory.example")
 
-    def test_pinned_ohttp_keys_return_their_directory(self):
-        import asyncio
-
-        async def run_test():
-            handler = payjoin.RequestHandler(self.relays, ["https://other.example"])
-            handler.set_ohttp_keys(self.directory, _test_ohttp_keys())
-            fetcher = _FirstRelayDownFetcher()
-            fetched = await handler.fetch_ohttp_keys(fetcher)
-            self.assertEqual(fetched.directory.as_string(), self.directory.as_string())
-            self.assertEqual(fetcher.relays, [])
-
-        asyncio.run(run_test())
-
     def test_fetch_ohttp_keys_fails_over_to_another_relay(self):
         import asyncio
 

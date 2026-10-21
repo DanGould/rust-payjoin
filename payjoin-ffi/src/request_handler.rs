@@ -92,26 +92,16 @@ impl RequestHandler {
         })
     }
 
-    /// Pin user-supplied OHTTP keys for `directory`, so a key fetch returns
-    /// this pair without contacting a directory.
-    ///
-    /// OHTTP keys belong to one directory: a session that names another
-    /// directory with these keys cannot be reached.
-    pub fn set_ohttp_keys(&self, directory: Arc<Url>, ohttp_keys: Arc<OhttpKeys>) {
-        let directory: payjoin::Url = Arc::unwrap_or_clone(directory).into();
-        let keys: payjoin::OhttpKeys = Arc::unwrap_or_clone(ohttp_keys).into();
-        self.inner.set_ohttp_keys(directory, keys);
-    }
-
-    /// Return the pinned OHTTP keys, or fetch them with automatic failover.
+    /// Fetch OHTTP keys with automatic failover.
     ///
     /// A failed attempt retries the same directory over another relay. A
     /// directory is given up only once it has failed over every relay, and
     /// then the next directory is tried.
     ///
     /// Returns the directory alongside the keys: a receiver pins the directory
-    /// in the BIP21 URI at session creation. With pinned keys, the directory
-    /// is the one they were pinned for.
+    /// in the BIP21 URI at session creation. A caller with OHTTP keys
+    /// configured ahead of time skips this and uses the directory those keys
+    /// belong to.
     pub async fn fetch_ohttp_keys(
         &self,
         fetcher: Arc<dyn OhttpKeysFetcher>,
@@ -148,14 +138,6 @@ impl RequestHandler {
             .map(|relay| Arc::new(relay.into()))
             .collect()
     }
-}
-
-#[cfg(feature = "_manual-tls")]
-#[uniffi::export]
-impl RequestHandler {
-    /// Use a DER-encoded certificate for local HTTPS connections when
-    /// fetching OHTTP keys.
-    pub fn set_cert_der(&self, cert_der: Vec<u8>) { self.inner.set_cert_der(cert_der); }
 }
 
 #[cfg(test)]
@@ -286,19 +268,8 @@ mod tests {
                 _directory: Arc<Url>,
             ) -> Result<Arc<OhttpKeys>, DirectoryFetchError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                unreachable!("pinned keys must not be fetched")
+                unreachable!("no relay may be tried")
             }
-        }
-
-        #[tokio::test]
-        async fn pinned_ohttp_keys_short_circuit_fetch() {
-            let mailroom = RequestHandler::new(urls(), urls()).unwrap();
-            let pinned = Arc::new(Url::parse("https://pinned.example".to_string()).unwrap());
-            mailroom.set_ohttp_keys(pinned.clone(), test_keys());
-            let fetcher = Arc::new(NeverCalled { calls: AtomicUsize::new(0) });
-            let result = mailroom.fetch_ohttp_keys(fetcher.clone()).await.unwrap();
-            assert_eq!(result.directory.as_string(), pinned.as_string());
-            assert_eq!(fetcher.calls.load(Ordering::SeqCst), 0);
         }
 
         #[tokio::test]

@@ -336,18 +336,6 @@ void main() {
     ];
     final directory = payjoin.Url.parse(input: "https://directory.example");
 
-    test("Pinned OHTTP keys return their directory", () async {
-      final handler = payjoin.RequestHandler(
-        relays: relays,
-        directories: ["https://other.example"],
-      );
-      handler.setOhttpKeys(directory: directory, ohttpKeys: testOhttpKeys());
-      final fetcher = FirstRelayDownFetcher();
-      final fetched = await handler.fetchOhttpKeys(fetcher: fetcher);
-      expect(fetched.directory.asString(), directory.asString());
-      expect(fetcher.relays, isEmpty);
-    });
-
     test("Fetch OHTTP keys fails over to another relay", () async {
       final handler = payjoin.RequestHandler(
         relays: relays,

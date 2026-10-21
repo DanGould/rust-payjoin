@@ -442,20 +442,6 @@ public class RequestHandlerTests
     }
 
     [Fact]
-    public async Task PinnedOhttpKeysReturnTheirDirectory()
-    {
-        using var directory = Url.Parse(DirectoryUrl);
-        using var handler = new RequestHandler(Relays, new[] { "https://other.example" });
-        handler.SetOhttpKeys(directory, OhttpKeys.Decode(OhttpKeysData));
-        var fetcher = new FirstRelayDownFetcher();
-
-        var fetched = await handler.FetchOhttpKeys(fetcher);
-
-        Assert.Equal(directory.AsString(), fetched.Directory.AsString());
-        Assert.Empty(fetcher.RelaysTried);
-    }
-
-    [Fact]
     public async Task FetchOhttpKeysFailsOverToAnotherRelay()
     {
         using var directory = Url.Parse(DirectoryUrl);

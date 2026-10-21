@@ -8,11 +8,9 @@
   payjoin directories and fails over between them
 - Add `RequestHandler::fetch_ohttp_keys_with`, which fetches OHTTP keys
   over a caller-supplied transport and tries each directory over every
-  relay before moving on to the next. With the `io` feature,
-  `RequestHandler::fetch_ohttp_keys` does the same over the built-in
-  HTTP client
-- Add `RequestHandler::set_ohttp_keys` to pin OHTTP keys together with
-  the directory they belong to
+  relay before moving on to the next. The handler holds no HTTP client;
+  with the `io` feature, `payjoin::io::fetch_ohttp_keys` can serve as the
+  fetch
 - Add `RequestHandler::relay_order`, which returns the relays to try for
   one request in a fresh random order. The caller posts with its own HTTP
   client and moves to the next relay on failure. It needs `v2`, not `io`

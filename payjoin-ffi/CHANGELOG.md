@@ -18,8 +18,6 @@
 - Add `RequestHandler::fetch_ohttp_keys`, which fetches a directory's
   OHTTP keys over a binding-supplied `OhttpKeysFetcher` with relay and
   directory failover
-- Add `RequestHandler::set_ohttp_keys` to pin OHTTP keys together with
-  the directory they belong to, and `set_cert_der` for local HTTPS
 
 ## [0.25.0]
 
