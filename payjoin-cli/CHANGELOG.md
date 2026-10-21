@@ -5,6 +5,12 @@
 - Fix panic when spending taproot UTXOs. They are now contributed as key-path
   spends with an assumed default input weight.
 - Any unsupported coin is simply skipped instead of crashing the cli.
+- Use `payjoin::request_handler::RequestHandler` for relay and directory failover. A relay
+  that fails is skipped for the rest of that request only, instead of for
+  as long as the cli runs.
+- Configured `ohttp_keys` are used with the first `pj_directories` entry.
+  A receiver with several directories could previously pair the keys with
+  a different directory and publish a URI no sender could use.
 
 ## 1.0.0
 

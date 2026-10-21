@@ -68,7 +68,7 @@ pub struct Cli {
     pub ohttp_relays: Option<Vec<Url>>,
 
     #[cfg(feature = "v2")]
-    #[arg(long = "ohttp-keys", help = "The ohttp key config file path", value_parser = value_parser!(PathBuf))]
+    #[arg(long = "ohttp-keys", help = "The ohttp key config file path, for the first of --pj-directories", value_parser = value_parser!(PathBuf))]
     pub ohttp_keys: Option<PathBuf>,
 
     #[cfg(feature = "v2")]
@@ -122,7 +122,7 @@ pub enum Commands {
         pj_directories: Option<Vec<Url>>,
 
         #[cfg(feature = "v2")]
-        /// The path to the ohttp keys file
+        /// The path to the ohttp keys file, for the first of --pj-directories
         #[arg(long = "ohttp-keys", value_parser = value_parser!(PathBuf))]
         ohttp_keys: Option<PathBuf>,
 

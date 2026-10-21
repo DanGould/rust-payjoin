@@ -1,147 +1,118 @@
 //! OHTTP relay and payjoin directory selection / key bootstrapping for the payjoin-cli.
 //!
-//! [`MailroomManager`] tracks relays and directories that have failed,
-//! excluding them from future selections for the lifetime of the [`MailroomManager`].
+//! Thin wrapper around [`payjoin::request_handler::RequestHandler`], shared by
+//! every session behind an `Arc`. The handler holds no failure state across
+//! calls, so sessions can post concurrently without affecting each other's
+//! failover.
 //!
-//! `unwrap_ohttp_keys_or_else_fetch_from_directory` returns user-supplied keys
-//! when present, otherwise selects a relay at random from the configured list
-//! (excluding failed relays) to fetch OHTTP keys from the given directory.
-//!
-//! `fetch_ohttp_keys_from_directory` retries on relay failures (e.g. connection
-//! errors) by selecting another relay. Once a directory is chosen for a session
-//! it must not change — the directory is embedded in the BIP21 URI at session
-//! creation and recovered from the session event log on resume.
-use std::sync::{Arc, Mutex};
+//! Once a directory is chosen for a session it must not change: the
+//! directory is embedded in the BIP21 URI at session creation and recovered
+//! from the session event log on resume.
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use payjoin::bitcoin::secp256k1::rand::rngs::OsRng;
+use payjoin::request_handler::RequestHandler;
 use payjoin::Url;
 
 use super::Config;
 
 #[derive(Debug, Clone)]
-pub struct MailroomManager {
-    config: Config,
-    failed_relays: Arc<Mutex<Vec<Url>>>,
-    failed_directories: Arc<Mutex<Vec<Url>>>,
-}
+pub struct MailroomManager(Arc<RequestHandler>);
 
 impl MailroomManager {
-    pub fn new(config: Config) -> Self {
-        MailroomManager {
-            config,
-            failed_relays: Arc::new(Mutex::new(Vec::new())),
-            failed_directories: Arc::new(Mutex::new(Vec::new())),
+    pub fn new(config: Config) -> Result<Self> {
+        let v2 = config.v2()?;
+        let mailroom = RequestHandler::new(v2.ohttp_relays.clone(), v2.pj_directories.clone());
+        // Configured OHTTP keys belong to one directory, taken to be the
+        // first configured one, so sessions never pair them with another.
+        if let Some(ohttp_keys) = v2.ohttp_keys.clone() {
+            let directory = v2
+                .pj_directories
+                .first()
+                .ok_or_else(|| anyhow!("ohttp_keys requires a pj_directories entry"))?;
+            mailroom.set_ohttp_keys(directory.clone(), ohttp_keys);
         }
-    }
-
-    pub fn add_failed_relay(&self, relay: Url) {
-        self.failed_relays.lock().expect("Lock should not be poisoned").push(relay);
-    }
-
-    pub fn clear_failed_relays(&self) {
-        self.failed_relays.lock().expect("Lock should not be poisoned").clear();
-    }
-
-    pub fn add_failed_directory(&self, directory: Url) {
-        self.failed_directories.lock().expect("Lock should not be poisoned").push(directory);
-    }
-
-    pub fn choose_relay(&self) -> Result<Url> {
-        use payjoin::bitcoin::secp256k1::rand::prelude::SliceRandom;
-        let relays = &self.config.v2()?.ohttp_relays;
-        let failed_relays = self.failed_relays.lock().expect("Lock should not be poisoned");
-        let remaining_relays: Vec<_> =
-            relays.iter().filter(|r| !failed_relays.contains(r)).cloned().collect();
-
-        if remaining_relays.is_empty() {
-            return Err(anyhow!("No valid relays available"));
+        #[cfg(feature = "_manual-tls")]
+        if let Some(cert_path) = config.root_certificate.as_ref() {
+            mailroom.set_cert_der(std::fs::read(cert_path)?);
         }
-
-        remaining_relays
-            .choose(&mut payjoin::bitcoin::key::rand::thread_rng())
-            .cloned()
-            .ok_or_else(|| anyhow!("Failed to select from remaining relays"))
+        Ok(Self(Arc::new(mailroom)))
     }
 
-    pub fn choose_directory(&self) -> Result<Url> {
-        use payjoin::bitcoin::secp256k1::rand::prelude::SliceRandom;
-        let directories = &self.config.v2()?.pj_directories;
-        let failed_directories =
-            self.failed_directories.lock().expect("Lock should not be poisoned");
-        let remaining_directories: Vec<_> =
-            directories.iter().filter(|d| !failed_directories.contains(d)).cloned().collect();
-
-        if remaining_directories.is_empty() {
-            return Err(anyhow!("No valid directories available"));
-        }
-
-        remaining_directories
-            .choose(&mut payjoin::bitcoin::key::rand::thread_rng())
-            .cloned()
-            .ok_or_else(|| anyhow!("Failed to select from remaining directories"))
+    pub async fn fetch_ohttp_keys(&self) -> Result<(Url, payjoin::OhttpKeys)> {
+        // OsRng rather than thread_rng: ThreadRng is !Send and must not be
+        // held across the fetch's await points.
+        self.0.fetch_ohttp_keys(&mut OsRng).await.map_err(Into::into)
     }
 
-    pub(crate) async fn unwrap_ohttp_keys_or_else_fetch_from_directory(
+    pub async fn post_via_relay<F, T, E, P, TransportError, Fut>(
         &self,
         directory: &Url,
-    ) -> Result<ValidatedOhttpKeys> {
-        if let Some(ohttp_keys) = self.config.v2()?.ohttp_keys.clone() {
-            return Ok(ValidatedOhttpKeys { ohttp_keys });
-        }
-        self.fetch_ohttp_keys_from_directory(directory).await
-    }
-
-    async fn fetch_ohttp_keys_from_directory(&self, directory: &Url) -> Result<ValidatedOhttpKeys> {
-        loop {
-            let selected_relay = self.choose_relay()?;
-
-            let ohttp_keys = {
-                #[cfg(feature = "_manual-tls")]
-                {
-                    if let Some(cert_path) = self.config.root_certificate.as_ref() {
-                        let cert_der = std::fs::read(cert_path)?;
-                        payjoin::io::fetch_ohttp_keys_with_cert(
-                            selected_relay.as_str(),
-                            directory.as_str(),
-                            &cert_der,
-                        )
-                        .await
-                    } else {
-                        payjoin::io::fetch_ohttp_keys(selected_relay.as_str(), directory.as_str())
-                            .await
-                    }
-                }
-                #[cfg(not(feature = "_manual-tls"))]
-                payjoin::io::fetch_ohttp_keys(selected_relay.as_str(), directory.as_str()).await
-            };
-
-            match ohttp_keys {
-                Ok(keys) => return Ok(ValidatedOhttpKeys { ohttp_keys: keys }),
-                Err(payjoin::io::Error::UnexpectedStatusCode(e)) => {
-                    tracing::debug!(
-                        "Directory {directory} returned unexpected status via relay {selected_relay}: {e:?}"
-                    );
-                    self.add_failed_directory(directory.clone());
-                    return Err(anyhow!("Directory {directory} returned unexpected status: {e}"));
-                }
-                Err(payjoin::io::Error::OhttpKeysBodyTooLarge(len)) => {
-                    tracing::debug!(
-                        "Directory {directory} returned an oversized OHTTP keys body via relay {selected_relay}: {len} bytes"
-                    );
-                    self.add_failed_directory(directory.clone());
-                    return Err(anyhow!(
-                        "Directory {directory} returned an oversized OHTTP keys body: {len} bytes"
-                    ));
-                }
-                Err(e) => {
-                    tracing::debug!("Failed to connect to relay: {selected_relay}, {e:?}");
-                    self.add_failed_relay(selected_relay);
-                }
-            }
-        }
+        build: F,
+        post: impl Fn(payjoin::Request) -> Fut,
+    ) -> std::result::Result<
+        payjoin::request_handler::RelayPost<P, T>,
+        payjoin::request_handler::PostError<E>,
+    >
+    where
+        F: FnMut(&payjoin::Url) -> std::result::Result<(payjoin::Request, T), E>,
+        E: payjoin::request_handler::RequestExpiry,
+        TransportError: std::fmt::Display,
+        Fut: std::future::Future<Output = std::result::Result<P, TransportError>>,
+    {
+        let transport = payjoin::request_handler::FnRelayTransport::new(build, post);
+        self.0.post_via_relay(&mut OsRng, directory, transport).await
     }
 }
 
-pub(crate) struct ValidatedOhttpKeys {
-    pub(crate) ohttp_keys: payjoin::OhttpKeys,
+#[cfg(test)]
+mod tests {
+    use payjoin::OhttpKeys;
+
+    use super::*;
+    use crate::app::config::{BitcoindConfig, V2Config, VersionConfig};
+
+    fn config(pj_directories: Vec<Url>) -> Config {
+        let ohttp_keys =
+            OhttpKeys::decode(&payjoin_test_utils::ohttp_key_config_bytes()).expect("valid keys");
+        Config {
+            db_path: "unused".into(),
+            max_fee_rate: None,
+            bitcoind: BitcoindConfig {
+                rpchost: Url::parse("http://localhost:18443").unwrap(),
+                cookie: None,
+                rpcuser: String::new(),
+                rpcpassword: String::new(),
+            },
+            version: Some(VersionConfig::V2(V2Config {
+                ohttp_keys: Some(ohttp_keys),
+                ohttp_relays: Vec::new(),
+                pj_directories,
+            })),
+            #[cfg(feature = "_manual-tls")]
+            root_certificate: None,
+            #[cfg(feature = "_manual-tls")]
+            certificate_key: None,
+            expire_in_secs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_ohttp_keys_belong_to_first_directory() {
+        let directories: Vec<Url> = ["https://first.example", "https://second.example"]
+            .iter()
+            .map(|s| Url::parse(s).unwrap())
+            .collect();
+        let manager = MailroomManager::new(config(directories.clone())).unwrap();
+        for _ in 0..20 {
+            let (directory, _) = manager.fetch_ohttp_keys().await.unwrap();
+            assert_eq!(directory, directories[0]);
+        }
+    }
+
+    #[test]
+    fn configured_ohttp_keys_without_directory_is_an_error() {
+        assert!(MailroomManager::new(config(Vec::new())).is_err());
+    }
 }

@@ -53,4 +53,5 @@ rpcpassword = "password"
 # # Optional: The HPKE keys which need to be fetched ahead of time from the pj_endpoint
 # # for the payjoin packets to be encrypted.
 # # These can now be fetched and no longer need to be configured.
+# # The keys belong to the first entry in pj_directories.
 # ohttp_keys = "./path/to/ohttp_keys"
