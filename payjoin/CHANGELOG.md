@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Relay and directory failover
+
+- Add `request_handler::RequestHandler`, which selects OHTTP relays and
+  payjoin directories and fails over between them
+- Add `RequestHandler::fetch_ohttp_keys_with`, which fetches OHTTP keys
+  over a caller-supplied transport and tries each directory over every
+  relay before moving on to the next. With the `io` feature,
+  `RequestHandler::fetch_ohttp_keys` does the same over the built-in
+  HTTP client
+- Add `RequestHandler::set_ohttp_keys` to pin OHTTP keys together with
+  the directory they belong to
+
 ## 1.2.0
 
 This release adds a non-blocking interface to the receiver state machine.
