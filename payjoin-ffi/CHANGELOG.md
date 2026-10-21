@@ -9,6 +9,19 @@
   and the build hook builds it with `--locked`, so every build compiles
   the dependency versions CI tested.
 
+### RequestHandler
+
+- Export `RequestHandler` for relay and directory selection with
+  failover
+- Add `RequestHandler::post_via_relay`, which posts over a
+  binding-supplied `RelayTransport` (`build`/`post`) and fails over to
+  another relay on transport error
+- Add `RequestHandler::fetch_ohttp_keys`, which fetches a directory's
+  OHTTP keys over a binding-supplied `OhttpKeysFetcher` with relay and
+  directory failover
+- Add `RequestHandler::set_ohttp_keys` to pin OHTTP keys together with
+  the directory they belong to, and `set_cert_der` for local HTTPS
+
 ## [0.25.0]
 
 - Publish the Python, JavaScript, C#, and Dart packages from one signed
