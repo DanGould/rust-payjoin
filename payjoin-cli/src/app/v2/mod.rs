@@ -13,7 +13,6 @@ use payjoin::receive::v2::{
     ReceiverBuilder, SessionOutcome as ReceiverSessionOutcome, UncheckedOriginalPayload,
     WantsFeeRange, WantsInputs, WantsOutputs,
 };
-use payjoin::request_handler::{RelayPost, RequestExpiry};
 use payjoin::send::v2::{
     replay_event_log as replay_sender_event_log, PendingFallback as SenderPendingFallback,
     PollingForProposal, SendSession, Sender, SenderBuilder, SessionOutcome as SenderSessionOutcome,
@@ -40,6 +39,30 @@ const W_STATUS: usize = 15;
 /// Delay before retrying a transiently failed state transition, so a
 /// misbehaving directory or relay is not hammered in a tight loop.
 const TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A request-construction error that can report whether it was caused by
+/// session expiry. Implemented by the sender/receiver request-building error
+/// types so `post_via_relay` can hand expiry back to the caller (which owns the
+/// typestate needed to react) instead of flattening it into `anyhow::Error`.
+trait RequestExpiry {
+    fn expired(&self) -> bool;
+}
+
+impl RequestExpiry for payjoin::send::v2::CreateRequestError {
+    fn expired(&self) -> bool { self.is_expired() }
+}
+
+impl RequestExpiry for payjoin::receive::v2::CreateRequestError {
+    fn expired(&self) -> bool { self.is_expired() }
+}
+
+/// Outcome of building and posting a request via `post_via_relay`. HTTP
+/// failures are retried against other relays inside the helper; only session
+/// expiry and fatal build errors escape to the caller.
+enum RelayPost<T> {
+    Posted(reqwest::Response, T),
+    Expired,
+}
 
 #[derive(Clone)]
 pub(crate) struct App {
@@ -1268,13 +1291,23 @@ impl App {
     async fn post_via_relay<F, T, E>(
         &self,
         directory: &payjoin::Url,
-        build: F,
-    ) -> Result<RelayPost<reqwest::Response, T>>
+        mut build: F,
+    ) -> Result<RelayPost<T>>
     where
         F: FnMut(&payjoin::Url) -> std::result::Result<(payjoin::Request, T), E>,
-        E: RequestExpiry + std::error::Error + Send + Sync + 'static,
+        E: RequestExpiry + Into<anyhow::Error>,
     {
-        let post = |req: payjoin::Request| async move { self.post_request(req).await };
-        Ok(self.mailroom_manager.post_via_relay(directory, build, post).await?)
+        for relay in self.mailroom_manager.relay_order(directory) {
+            let (req, ctx) = match build(&relay) {
+                Ok(r) => r,
+                Err(e) if e.expired() => return Ok(RelayPost::Expired),
+                Err(e) => return Err(e.into()),
+            };
+            match self.post_request(req).await {
+                Ok(resp) => return Ok(RelayPost::Posted(resp, ctx)),
+                Err(e) => tracing::debug!("Request to relay {relay} failed: {e:?}"),
+            }
+        }
+        Err(anyhow!("No valid relays available"))
     }
 }

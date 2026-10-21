@@ -3,7 +3,6 @@ package org.payjoindevkit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.test.runTest
@@ -23,21 +22,6 @@ private class FirstRelayDownFetcher : OhttpKeysFetcher {
         relaysTried.add(relay.asString())
         if (relaysTried.size == 1) throw DirectoryFetchException.Transient("relay down")
         return OhttpKeys.decode(ohttpKeysData)
-    }
-}
-
-private class FirstRelayDownTransport(private val receiver: Initialized) : RelayTransport {
-    val relaysTried = mutableListOf<String>()
-
-    override fun build(relay: Url): BuiltRequest {
-        relaysTried.add(relay.asString())
-        val poll = receiver.createPollRequest(relay.asString())
-        return BuiltRequest(poll.request, poll.clientResponse)
-    }
-
-    override suspend fun post(request: Request): ByteArray {
-        if (relaysTried.size == 1) throw RelayTransportException.Transient("relay down")
-        return "response".toByteArray()
     }
 }
 
@@ -76,23 +60,14 @@ class RequestHandlerTests {
     }
 
     @Test
-    fun postViaRelayFailsOverAndSkipsTheDirectory() = runTest {
+    fun relayOrderSkipsTheDirectory() {
         val directory = Url.parse(DIRECTORY)
-        val receiver = ReceiverBuilder(
-            "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
-            directory.asString(),
-            OhttpKeys.decode(ohttpKeysData),
-        ).build().save(InMemoryReceiverPersister())
         // The directory is also listed as a relay; it must never be used to
         // reach itself.
         val handler = RequestHandler(relays + directory.asString(), listOf(directory.asString()))
-        val transport = FirstRelayDownTransport(receiver)
 
-        val response = handler.postViaRelay(directory, transport)
+        val order = handler.relayOrder(directory).map { it.asString() }.sorted()
 
-        assertEquals("response", response.body.decodeToString())
-        assertEquals(2, transport.relaysTried.size)
-        assertNotEquals(transport.relaysTried[0], transport.relaysTried[1])
-        assertFalse(directory.asString() in transport.relaysTried)
+        assertEquals(relays.map { Url.parse(it).asString() }.sorted(), order)
     }
 }

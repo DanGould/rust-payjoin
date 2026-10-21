@@ -325,24 +325,6 @@ class _FirstRelayDownFetcher(payjoin.OhttpKeysFetcher):
         return _test_ohttp_keys()
 
 
-class _FirstRelayDownTransport(payjoin.RelayTransport):
-    def __init__(self, receiver):
-        self.receiver = receiver
-        self.relays = []
-
-    def build(self, relay):
-        self.relays.append(relay.as_string())
-        poll = self.receiver.create_poll_request(relay.as_string())
-        return payjoin.BuiltRequest(
-            request=poll.request, ohttp_context=poll.client_response
-        )
-
-    async def post(self, request):
-        if len(self.relays) == 1:
-            raise payjoin.RelayTransportError.Transient("relay down")
-        return b"response"
-
-
 class TestRequestHandler(unittest.TestCase):
     relays = [
         "https://relay-a.example",
@@ -387,32 +369,17 @@ class TestRequestHandler(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_post_via_relay_fails_over_and_skips_the_directory(self):
-        import asyncio
-
-        async def run_test():
-            receiver = (
-                payjoin.ReceiverBuilder(
-                    "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
-                    self.directory.as_string(),
-                    _test_ohttp_keys(),
-                )
-                .build()
-                .save(InMemoryReceiverPersister())
-            )
-            # The directory is also listed as a relay; it must never be used
-            # to reach itself.
-            handler = payjoin.RequestHandler(
-                self.relays + [self.directory.as_string()], [self.directory.as_string()]
-            )
-            transport = _FirstRelayDownTransport(receiver)
-            response = await handler.post_via_relay(self.directory, transport)
-            self.assertEqual(response.body, b"response")
-            self.assertEqual(len(transport.relays), 2)
-            self.assertNotEqual(transport.relays[0], transport.relays[1])
-            self.assertNotIn(self.directory.as_string(), transport.relays)
-
-        asyncio.run(run_test())
+    def test_relay_order_skips_the_directory(self):
+        # The directory is also listed as a relay; it must never be used to
+        # reach itself.
+        handler = payjoin.RequestHandler(
+            self.relays + [self.directory.as_string()], [self.directory.as_string()]
+        )
+        order = [relay.as_string() for relay in handler.relay_order(self.directory)]
+        self.assertEqual(
+            sorted(order),
+            sorted(payjoin.Url.parse(relay).as_string() for relay in self.relays),
+        )
 
 
 if __name__ == "__main__":

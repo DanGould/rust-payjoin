@@ -441,34 +441,6 @@ public class RequestHandlerTests
         }
     }
 
-    private sealed class FirstRelayDownTransport : RelayTransport
-    {
-        private readonly Initialized _receiver;
-
-        public FirstRelayDownTransport(Initialized receiver)
-        {
-            _receiver = receiver;
-        }
-
-        public List<string> RelaysTried { get; } = new();
-
-        public BuiltRequest Build(Url relay)
-        {
-            RelaysTried.Add(relay.AsString());
-            var poll = _receiver.CreatePollRequest(relay.AsString());
-            return new BuiltRequest(poll.Request, poll.ClientResponse);
-        }
-
-        public Task<byte[]> Post(Request request)
-        {
-            if (RelaysTried.Count == 1)
-            {
-                throw new RelayTransportException.Transient("relay down");
-            }
-            return Task.FromResult(System.Text.Encoding.UTF8.GetBytes("response"));
-        }
-    }
-
     [Fact]
     public async Task PinnedOhttpKeysReturnTheirDirectory()
     {
@@ -507,26 +479,18 @@ public class RequestHandlerTests
     }
 
     [Fact]
-    public async Task PostViaRelayFailsOverAndSkipsTheDirectory()
+    public void RelayOrderSkipsTheDirectory()
     {
         using var directory = Url.Parse(DirectoryUrl);
-        var builder = new ReceiverBuilder(
-            "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
-            directory.AsString(),
-            OhttpKeys.Decode(OhttpKeysData));
-        var receiver = builder.Build().Save(new InMemoryReceiverPersister());
         // The directory is also listed as a relay; it must never be used to
         // reach itself.
         using var handler = new RequestHandler(
             Relays.Append(directory.AsString()).ToArray(),
             new[] { directory.AsString() });
-        var transport = new FirstRelayDownTransport(receiver);
 
-        var response = await handler.PostViaRelay(directory, transport);
+        var order = handler.RelayOrder(directory).Select(relay => relay.AsString()).OrderBy(r => r);
+        var expected = Relays.Select(relay => Url.Parse(relay).AsString()).OrderBy(r => r);
 
-        Assert.Equal("response", System.Text.Encoding.UTF8.GetString(response.Body));
-        Assert.Equal(2, transport.RelaysTried.Count);
-        Assert.NotEqual(transport.RelaysTried[0], transport.RelaysTried[1]);
-        Assert.DoesNotContain(directory.AsString(), transport.RelaysTried);
+        Assert.Equal(expected, order);
     }
 }

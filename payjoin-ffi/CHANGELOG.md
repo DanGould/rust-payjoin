@@ -13,9 +13,8 @@
 
 - Export `RequestHandler` for relay and directory selection with
   failover
-- Add `RequestHandler::post_via_relay`, which posts over a
-  binding-supplied `RelayTransport` (`build`/`post`) and fails over to
-  another relay on transport error
+- Add `RequestHandler::relay_order`, which returns the relays to try for
+  one request in a fresh random order, leaving out the session directory
 - Add `RequestHandler::fetch_ohttp_keys`, which fetches a directory's
   OHTTP keys over a binding-supplied `OhttpKeysFetcher` with relay and
   directory failover

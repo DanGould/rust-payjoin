@@ -413,50 +413,22 @@ function runUnitTests(name: string, payjoin: typeof nodejsPayjoin) {
             );
         });
 
-        test("post via relay fails over and skips the directory", async () => {
+        test("relay order skips the directory", () => {
             const directory = payjoin.Url.parse(directoryUrl);
-            const receiver = new payjoin.ReceiverBuilder(
-                "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
-                directory.asString(),
-                payjoin.OhttpKeys.decode(OHTTP_KEYS),
-            )
-                .build()
-                .save(new InMemoryReceiverPersister());
             // The directory is also listed as a relay; it must never be used
             // to reach itself.
             const handler = new payjoin.RequestHandler(
                 [...relays, directory.asString()],
                 [directory.asString()],
             );
-            const relaysTried: string[] = [];
-            const transport: nodejsPayjoin.RelayTransport = {
-                build(relay) {
-                    relaysTried.push(relay.asString());
-                    const poll = receiver.createPollRequest(relay.asString());
-                    return payjoin.BuiltRequest.create({
-                        request: poll.request,
-                        ohttpContext: poll.clientResponse,
-                    });
-                },
-                async post() {
-                    if (relaysTried.length === 1) {
-                        throw new payjoin.RelayTransportError.Transient({
-                            detail: "relay down",
-                        });
-                    }
-                    return new TextEncoder().encode("response").buffer;
-                },
-            };
-
-            const response = await handler.postViaRelay(directory, transport);
-
-            assert.strictEqual(
-                new TextDecoder().decode(response.body),
-                "response",
-            );
-            assert.strictEqual(relaysTried.length, 2);
-            assert.notStrictEqual(relaysTried[0], relaysTried[1]);
-            assert.ok(!relaysTried.includes(directory.asString()));
+            const order = handler
+                .relayOrder(directory)
+                .map((relay) => relay.asString())
+                .sort();
+            const expected = relays
+                .map((relay) => payjoin.Url.parse(relay).asString())
+                .sort();
+            assert.deepStrictEqual(order, expected);
         });
     });
 

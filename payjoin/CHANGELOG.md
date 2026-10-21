@@ -13,13 +13,13 @@
   HTTP client
 - Add `RequestHandler::set_ohttp_keys` to pin OHTTP keys together with
   the directory they belong to
-- Add `RequestHandler::post_via_relay`, which posts a request over a
-  caller-supplied `RelayTransport` and fails over to another relay on
-  transport error. It needs `v2`, not `io`
+- Add `RequestHandler::relay_order`, which returns the relays to try for
+  one request in a fresh random order. The caller posts with its own HTTP
+  client and moves to the next relay on failure. It needs `v2`, not `io`
 - Add `Sender::directory`, `Receiver::directory` and
-  `PjParam::directory`. `post_via_relay` takes the session directory so
-  it never posts to a relay that is the directory itself, which such a
-  server rejects as a self-loop
+  `PjParam::directory`. `relay_order` takes the session directory and
+  leaves it out, since a server acting as both relay and directory
+  rejects the self-loop
 
 ## 1.2.0
 

@@ -7,19 +7,17 @@
 //! feature, [`RequestHandler::fetch_ohttp_keys`] does the same over this
 //! crate's HTTP client.
 //!
-//! [`RequestHandler::post_via_relay`] posts a request over a caller-supplied
-//! [`RelayTransport`] (or [`FnRelayTransport`]), retrying transport failures
-//! over another relay.
+//! [`RequestHandler::relay_order`] gives the relays to try for one request, in
+//! order. The caller builds and posts the request with its own HTTP client and
+//! moves to the next relay on failure.
 //!
 //! A directory chosen for a session must not change: it is embedded in the
 //! BIP21 URI at session creation and recovered from the session event log
 //! on resume. [`RequestHandler`] selects a directory only when a new session is
 //! created; resumption does not consult it.
 //!
-//! Every failover loop tries candidates in an order drawn fresh for that call,
-//! and remembers failures only for that call. A handler therefore holds no
-//! failure state, and concurrent calls on a shared handler cannot change each
-//! other's candidates.
+//! Every call draws a fresh candidate order and remembers no failures, so
+//! concurrent calls on a shared handler cannot change each other's candidates.
 //!
 //! A relay equal to the directory it is reaching is never tried: a server
 //! serving as both rejects the self-loop request.
@@ -214,199 +212,20 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Whether a request-construction error was caused by session expiry.
-///
-/// Implemented for the send and receive v2 `CreateRequestError` types so
-/// [`RequestHandler::post_via_relay`] can hand expiry back to the caller, which
-/// owns the typestate needed to react.
-pub trait RequestExpiry {
-    /// Returns `true` when the request failed because the session expired.
-    fn expired(&self) -> bool;
-}
-
-impl RequestExpiry for crate::send::v2::CreateRequestError {
-    fn expired(&self) -> bool { self.is_expired() }
-}
-
-impl RequestExpiry for crate::receive::v2::CreateRequestError {
-    fn expired(&self) -> bool { self.is_expired() }
-}
-
-/// Outcome of [`RequestHandler::post_via_relay`].
-pub enum RelayPost<P, T> {
-    /// The request was posted; carries the transport response and the caller
-    /// context returned by the request builder.
-    Posted(P, T),
-    /// The request could not be built because the session had expired.
-    Expired,
-}
-
-/// Error from [`RequestHandler::post_via_relay`].
-///
-/// When building the request is what failed, the build error is the
-/// [`source`](std::error::Error::source) and is also available from
-/// [`PostError::build_error`].
-#[derive(Debug)]
-pub struct PostError<E>(InternalPostError<E>);
-
-#[derive(Debug)]
-enum InternalPostError<E> {
-    /// Every relay failed or was excluded. Carries the most recent transport
-    /// failure, when there was one.
-    NoRelaysAvailable { last_error: Option<String> },
-    /// The request could not be built for a reason other than expiry.
-    Build(E),
-}
-
-impl<E> PostError<E> {
-    /// The error from building the request, when that is what failed.
-    pub fn build_error(&self) -> Option<&E> {
-        match &self.0 {
-            InternalPostError::Build(e) => Some(e),
-            InternalPostError::NoRelaysAvailable { .. } => None,
-        }
-    }
-}
-
-impl<E: std::fmt::Display> std::fmt::Display for PostError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            InternalPostError::NoRelaysAvailable { last_error: None } =>
-                write!(f, "No valid relays available"),
-            InternalPostError::NoRelaysAvailable { last_error: Some(e) } =>
-                write!(f, "No valid relays available, last error: {e}"),
-            InternalPostError::Build(e) => write!(f, "Could not build request: {e}"),
-        }
-    }
-}
-
-impl<E: std::error::Error + 'static> std::error::Error for PostError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.0 {
-            InternalPostError::Build(e) => Some(e),
-            InternalPostError::NoRelaysAvailable { .. } => None,
-        }
-    }
-}
-
-/// Builds and POSTs a request through a relay, implemented by the caller.
-///
-/// [`RequestHandler::post_via_relay`] chooses the relay and drives failover; a
-/// `RelayTransport` builds a fresh request for that relay and performs the
-/// HTTP request, so callers keep their own HTTP client, proxy, and TLS
-/// configuration.
-pub trait RelayTransport {
-    /// The request to POST to the relay. Generic so a caller whose request is
-    /// not [`crate::Request`] (for example an FFI binding with its own
-    /// request type) passes it through unchanged.
-    type Request;
-    /// Caller context produced by [`RelayTransport::build`] and returned on
-    /// success, so the caller can process the response (for example an OHTTP
-    /// context).
-    type Context;
-    /// The response produced by a successful POST.
-    type Response;
-    /// Why building a request failed. [`RequestExpiry`] lets the loop report
-    /// session expiry as [`RelayPost::Expired`] instead of a build failure.
-    type BuildError: RequestExpiry;
-    /// Why a POST failed. Any POST failure moves on to another relay, so the
-    /// loop only displays it.
-    type Error: std::fmt::Display;
-
-    /// Build a fresh request (and its context) addressed to `relay`.
-    ///
-    /// Build a new request on every call: retransmitting identical
-    /// ciphertext would let a relay observe that a request is being retried.
-    fn build(&mut self, relay: &Url) -> Result<(Self::Request, Self::Context), Self::BuildError>;
-
-    /// POST a request produced by [`RelayTransport::build`].
-    fn post(
-        &mut self,
-        request: Self::Request,
-    ) -> impl std::future::Future<Output = Result<Self::Response, Self::Error>>;
-}
-
-/// [`RelayTransport`] over a pair of closures, for callers that already have
-/// a build closure and a post closure.
-pub struct FnRelayTransport<B, P> {
-    build: B,
-    post: P,
-}
-
-impl<B, P> FnRelayTransport<B, P> {
-    /// Adapt a `build` closure (relay URL to request plus context) and a
-    /// `post` closure (request to response) into a [`RelayTransport`].
-    pub fn new(build: B, post: P) -> Self { Self { build, post } }
-}
-
-impl<B, P, Rq, T, E, Fut, Resp, TransportError> RelayTransport for FnRelayTransport<B, P>
-where
-    B: FnMut(&Url) -> Result<(Rq, T), E>,
-    E: RequestExpiry,
-    P: Fn(Rq) -> Fut,
-    Fut: std::future::Future<Output = Result<Resp, TransportError>>,
-    TransportError: std::fmt::Display,
-{
-    type Request = Rq;
-    type Context = T;
-    type Response = Resp;
-    type BuildError = E;
-    type Error = TransportError;
-
-    fn build(&mut self, relay: &Url) -> Result<(Rq, T), E> { (self.build)(relay) }
-
-    fn post(
-        &mut self,
-        request: Rq,
-    ) -> impl std::future::Future<Output = Result<Resp, TransportError>> {
-        (self.post)(request)
-    }
-}
-
 impl RequestHandler {
-    /// Build and POST a request over a relay, failing over to another relay on
-    /// transport error.
+    /// The relays to try for one request, in a fresh random order, never
+    /// `exclude`.
     ///
-    /// `exclude` names the target the request ultimately reaches. For Payjoin
-    /// v2 that is the session directory, available from the session types
-    /// (for example [`crate::receive::v2::Receiver::directory`]). A relay
-    /// equal to it is never tried: a server serving as both relay and
-    /// directory rejects the resulting self-loop request.
+    /// `exclude` is the target the request ultimately reaches. For Payjoin v2
+    /// that is the session directory, available from the session types (for
+    /// example [`crate::receive::v2::Receiver::directory`]): a server serving
+    /// as both relay and directory rejects the self-loop request.
     ///
-    /// `transport` builds a request per relay and performs the POST (see
-    /// [`RelayTransport`]); the caller context from `build` is returned on
-    /// success. When `build` reports [`RequestExpiry::expired`], the loop
-    /// stops and returns [`RelayPost::Expired`] so the caller can react with
-    /// its own typestate. Each relay is tried at most once per call.
-    ///
-    /// Returns a [`PostError`] once every relay that is not `exclude` has
-    /// failed, naming the last transport failure.
-    pub async fn post_via_relay<R, X>(
-        &self,
-        rng: &mut R,
-        exclude: &Url,
-        mut transport: X,
-    ) -> Result<RelayPost<X::Response, X::Context>, PostError<X::BuildError>>
-    where
-        R: Rng,
-        X: RelayTransport,
-    {
-        let mut last_error = None;
-        for relay in candidate_order(&self.relays, Some(exclude), rng) {
-            let (req, ctx) = match transport.build(&relay) {
-                Ok(r) => r,
-                Err(e) if e.expired() => return Ok(RelayPost::Expired),
-                Err(e) => return Err(PostError(InternalPostError::Build(e))),
-            };
-            match transport.post(req).await {
-                Ok(resp) => return Ok(RelayPost::Posted(resp, ctx)),
-                Err(e) => {
-                    tracing::debug!("Request to relay {relay} failed: {e}");
-                    last_error = Some(e.to_string());
-                }
-            }
-        }
-        Err(PostError(InternalPostError::NoRelaysAvailable { last_error }))
+    /// Try the relays front to back and stop at the first that succeeds.
+    /// Build a fresh request for each relay: retransmitting identical
+    /// ciphertext would let a relay observe that a request is being retried.
+    pub fn relay_order<R: Rng>(&self, exclude: &Url, rng: &mut R) -> Vec<Url> {
+        candidate_order(&self.relays, Some(exclude), rng)
     }
 }
 
@@ -621,288 +440,25 @@ mod tests {
         assert_eq!(lock(&handler.cert_der).as_deref(), Some(b"second".as_slice()));
     }
 
-    #[derive(Debug)]
-    struct TestExpiry(bool);
-
-    impl RequestExpiry for TestExpiry {
-        fn expired(&self) -> bool { self.0 }
-    }
-
-    impl std::fmt::Display for TestExpiry {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "test expiry: {}", self.0)
-        }
-    }
-
-    fn req() -> crate::Request {
-        crate::Request {
-            url: "https://relay.example".to_string(),
-            content_type: "message/ohttp-req",
-            body: Vec::new(),
-        }
-    }
-
-    /// A URL absent from `urls()`, so exclusion does not shrink the relay
-    /// pool in tests that only exercise posting.
-    fn unconfigured() -> Url { Url::parse("https://unconfigured.example").unwrap() }
-
-    #[tokio::test]
-    async fn post_via_relay_returns_response_and_context() {
+    #[test]
+    fn relay_order_lists_every_relay_once_except_the_directory() {
+        let directory = urls()[0].clone();
         let handler = RequestHandler::new(urls(), Vec::new());
-        let mut rng = StdRng::seed_from_u64(11);
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &unconfigured(),
-                FnRelayTransport::new(
-                    |_relay: &Url| Ok::<_, TestExpiry>((req(), 42u8)),
-                    |_req| async { Ok::<_, TestExpiry>("response") },
-                ),
-            )
-            .await;
-        assert!(matches!(result, Ok(RelayPost::Posted("response", 42))));
-    }
-
-    #[tokio::test]
-    async fn post_via_relay_reports_expiry() {
-        let handler = RequestHandler::new(urls(), Vec::new());
-        let mut rng = StdRng::seed_from_u64(12);
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &unconfigured(),
-                FnRelayTransport::new(
-                    |_relay: &Url| Err::<(crate::Request, u8), _>(TestExpiry(true)),
-                    |_req| async { Ok::<_, TestExpiry>("response") },
-                ),
-            )
-            .await;
-        assert!(matches!(result, Ok(RelayPost::Expired)));
-    }
-
-    #[tokio::test]
-    async fn post_via_relay_surfaces_build_error() {
-        let handler = RequestHandler::new(urls(), Vec::new());
-        let mut rng = StdRng::seed_from_u64(13);
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &unconfigured(),
-                FnRelayTransport::new(
-                    |_relay: &Url| Err::<(crate::Request, u8), _>(TestExpiry(false)),
-                    |_req| async { Ok::<_, TestExpiry>("response") },
-                ),
-            )
-            .await;
-        match result {
-            Err(e) => assert!(matches!(e.build_error(), Some(TestExpiry(false)))),
-            Ok(_) => panic!("expected a build error"),
-        }
+        let mut rng = StdRng::seed_from_u64(30);
+        let mut order = handler.relay_order(&directory, &mut rng);
+        order.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(order, urls()[1..].to_vec());
     }
 
     #[test]
-    fn post_error_display_and_source() {
-        let no_relays =
-            PostError::<std::fmt::Error>(InternalPostError::NoRelaysAvailable { last_error: None });
-        assert_eq!(no_relays.to_string(), "No valid relays available");
-        assert!(std::error::Error::source(&no_relays).is_none());
-        assert!(no_relays.build_error().is_none());
-        let last = PostError::<std::fmt::Error>(InternalPostError::NoRelaysAvailable {
-            last_error: Some("down".to_string()),
-        });
-        assert_eq!(last.to_string(), "No valid relays available, last error: down");
-        let build = PostError(InternalPostError::Build(std::fmt::Error));
-        assert_eq!(
-            build.to_string(),
-            "Could not build request: an error occurred when formatting an argument"
-        );
-        assert!(std::error::Error::source(&build).is_some());
-    }
-
-    #[tokio::test]
-    async fn post_via_relay_fails_over_then_succeeds() {
+    fn relay_order_is_drawn_fresh_per_call() {
         let handler = RequestHandler::new(urls(), Vec::new());
-        let mut rng = StdRng::seed_from_u64(14);
-        let relays = RefCell::new(Vec::new());
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &unconfigured(),
-                FnRelayTransport::new(
-                    |relay: &Url| {
-                        relays.borrow_mut().push(relay.clone());
-                        Ok::<_, TestExpiry>((req(), ()))
-                    },
-                    |_req| {
-                        let first = relays.borrow().len() == 1;
-                        async move {
-                            if first {
-                                Err("transport down")
-                            } else {
-                                Ok("response")
-                            }
-                        }
-                    },
-                ),
-            )
-            .await;
-        assert!(matches!(result, Ok(RelayPost::Posted("response", ()))));
-        let relays = relays.borrow();
-        assert_eq!(relays.len(), 2);
-        assert_ne!(relays[0], relays[1], "a failed relay must not be retried");
-    }
-
-    #[tokio::test]
-    async fn post_via_relay_tries_each_relay_once_then_gives_up() {
-        let handler = RequestHandler::new(urls(), Vec::new());
-        let mut rng = StdRng::seed_from_u64(15);
-        let attempts = std::cell::Cell::new(0u32);
-        let post = |_req: crate::Request| {
-            attempts.set(attempts.get() + 1);
-            async { Err::<&str, &str>("transport down") }
-        };
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &unconfigured(),
-                FnRelayTransport::new(|_relay: &Url| Ok::<_, TestExpiry>((req(), ())), post),
-            )
-            .await;
-        assert_eq!(attempts.get(), 3);
-        match result {
-            Err(PostError(InternalPostError::NoRelaysAvailable { last_error })) =>
-                assert_eq!(last_error.as_deref(), Some("transport down")),
-            _ => panic!("expected relays to be exhausted"),
+        let exclude = Url::parse("https://unconfigured.example").unwrap();
+        let mut rng = StdRng::seed_from_u64(31);
+        let mut firsts = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            firsts.insert(handler.relay_order(&exclude, &mut rng)[0].to_string());
         }
-    }
-
-    #[tokio::test]
-    async fn post_via_relay_never_tries_excluded_relay() {
-        let handler = RequestHandler::new(urls(), Vec::new());
-        let excluded = urls()[0].clone();
-        let mut rng = StdRng::seed_from_u64(18);
-        let relays = RefCell::new(Vec::new());
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &excluded,
-                FnRelayTransport::new(
-                    |relay: &Url| {
-                        relays.borrow_mut().push(relay.clone());
-                        Ok::<_, TestExpiry>((req(), ()))
-                    },
-                    |_req| async { Err::<&str, &str>("transport down") },
-                ),
-            )
-            .await;
-        assert!(matches!(result, Err(PostError(InternalPostError::NoRelaysAvailable { .. }))));
-        let relays = relays.borrow();
-        assert_eq!(relays.len(), 2);
-        assert!(!relays.contains(&excluded), "the excluded relay must never be built");
-    }
-
-    #[tokio::test]
-    async fn post_via_relay_with_only_excluded_relay_fails_without_posting() {
-        let handler = RequestHandler::new(vec![urls()[0].clone()], Vec::new());
-        let mut rng = StdRng::seed_from_u64(17);
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &urls()[0],
-                FnRelayTransport::new(
-                    |_relay: &Url| -> Result<(crate::Request, ()), TestExpiry> {
-                        panic!("no relay may be built")
-                    },
-                    |_req| async { Ok::<_, &str>("response") },
-                ),
-            )
-            .await;
-        assert!(matches!(
-            result,
-            Err(PostError(InternalPostError::NoRelaysAvailable { last_error: None }))
-        ));
-    }
-
-    // Another session's call on the same handler, running while this call is
-    // waiting on a relay, must not send this call back to a relay that
-    // already failed it.
-    #[tokio::test]
-    async fn interleaved_call_does_not_reset_failover() {
-        let handler = RequestHandler::new(urls(), Vec::new());
-        let mut rng = StdRng::seed_from_u64(40);
-        let attempts = std::cell::Cell::new(0u32);
-        let post = |_req: crate::Request| {
-            attempts.set(attempts.get() + 1);
-            let handler = &handler;
-            async move {
-                let mut rng = StdRng::seed_from_u64(41);
-                let other = handler
-                    .post_via_relay(
-                        &mut rng,
-                        &unconfigured(),
-                        FnRelayTransport::new(
-                            |_relay: &Url| Ok::<_, TestExpiry>((req(), ())),
-                            |_req| async { Ok::<_, &str>("response") },
-                        ),
-                    )
-                    .await;
-                assert!(matches!(other, Ok(RelayPost::Posted("response", ()))));
-                Err::<&str, &str>("transport down")
-            }
-        };
-        let result = handler
-            .post_via_relay(
-                &mut rng,
-                &unconfigured(),
-                FnRelayTransport::new(|_relay: &Url| Ok::<_, TestExpiry>((req(), ())), post),
-            )
-            .await;
-        assert!(matches!(result, Err(PostError(InternalPostError::NoRelaysAvailable { .. }))));
-        assert_eq!(attempts.get(), 3, "each relay is tried once however other calls interleave");
-    }
-
-    // No lock is held across the transport's await, so posts sharing a handler
-    // run at the same time.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn post_via_relay_does_not_serialize_concurrent_posts() {
-        use std::sync::Arc;
-
-        use tokio::sync::Barrier;
-
-        let handler = Arc::new(RequestHandler::new(urls(), Vec::new()));
-        let barrier = Arc::new(Barrier::new(2));
-        let mut handles = Vec::new();
-        for seed in [31u64, 32u64] {
-            let handler = handler.clone();
-            let barrier = barrier.clone();
-            handles.push(tokio::spawn(async move {
-                let mut rng = StdRng::seed_from_u64(seed);
-                handler
-                    .post_via_relay(
-                        &mut rng,
-                        &unconfigured(),
-                        FnRelayTransport::new(
-                            |_relay: &Url| Ok::<_, TestExpiry>((req(), ())),
-                            |_req| {
-                                let barrier = barrier.clone();
-                                async move {
-                                    // Each post waits for the other, so this
-                                    // completes only if both are in flight.
-                                    barrier.wait().await;
-                                    Ok::<_, &str>("response")
-                                }
-                            },
-                        ),
-                    )
-                    .await
-            }));
-        }
-        for handle in handles {
-            let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-                .await
-                .expect("concurrent posts must not serialize")
-                .unwrap();
-            assert!(matches!(result, Ok(RelayPost::Posted("response", ()))));
-        }
+        assert_eq!(firsts.len(), urls().len(), "every relay must be able to come first");
     }
 }

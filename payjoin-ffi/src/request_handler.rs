@@ -3,7 +3,7 @@ use std::sync::Arc;
 use payjoin::bitcoin::secp256k1::rand::rngs::OsRng;
 use payjoin::request_handler;
 
-use crate::ohttp::{ClientResponse, OhttpKeys};
+use crate::ohttp::OhttpKeys;
 pub use crate::uri::error::UrlParseError;
 use crate::Url;
 
@@ -58,114 +58,11 @@ pub trait OhttpKeysFetcher: Send + Sync {
     ) -> Result<Arc<OhttpKeys>, DirectoryFetchError>;
 }
 
-/// A posted request and the OHTTP context needed to process its response.
-#[derive(uniffi::Record)]
-pub struct RelayedResponse {
-    /// The response body returned through the relay.
-    pub body: Vec<u8>,
-    /// The OHTTP context to pass to the session's `process_response`.
-    pub ohttp_context: Arc<ClientResponse>,
-}
-
-/// A request built for a specific relay, ready to POST.
-#[derive(uniffi::Record)]
-pub struct BuiltRequest {
-    /// The request to POST to the relay.
-    pub request: crate::Request,
-    /// The OHTTP context needed to process the eventual response.
-    pub ohttp_context: Arc<ClientResponse>,
-}
-
-/// Why building a request for a relay failed.
+/// Selects OHTTP relays and payjoin directories.
 ///
-/// [`RequestHandler::post_via_relay`] stops failover on either variant and
-/// surfaces it to the caller: `Expired` as [`RelayPostError::Expired`] and
-/// `Fatal` as [`RelayPostError::Fatal`].
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[non_exhaustive]
-pub enum RelayBuildError {
-    /// The session expired while building the request; stop failover.
-    #[error("session expired")]
-    Expired,
-    /// The request could not be built for another reason; stop failover.
-    #[error("could not build request: {detail}")]
-    Fatal {
-        /// Human-readable detail.
-        detail: String,
-    },
-}
-
-impl request_handler::RequestExpiry for RelayBuildError {
-    fn expired(&self) -> bool { matches!(self, RelayBuildError::Expired) }
-}
-
-/// Why a single attempt to POST a request over a relay failed.
-///
-/// A `Transient` failure makes [`RequestHandler`] retry over another relay.
-/// Build-time failures (expiry, fatal) are reported by
-/// [`RelayTransport::build`], not here.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[non_exhaustive]
-pub enum RelayTransportError {
-    /// The relay could not be reached; retry over another relay.
-    #[error("relay transport failure: {detail}")]
-    Transient {
-        /// Human-readable detail.
-        detail: String,
-    },
-}
-
-/// Errors from [`RequestHandler::post_via_relay`].
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[non_exhaustive]
-pub enum RelayPostError {
-    /// Every configured relay failed or was excluded. The detail names the
-    /// last transport failure, when there was one.
-    #[error("{detail}")]
-    NoRelaysAvailable {
-        /// Human-readable detail.
-        detail: String,
-    },
-    /// The session expired while building the request.
-    #[error("session expired")]
-    Expired,
-    /// The request could not be built for another reason.
-    #[error("could not build request: {detail}")]
-    Fatal {
-        /// Human-readable detail.
-        detail: String,
-    },
-}
-
-/// Builds and posts a request through a relay, implemented by the binding.
-///
-/// [`RequestHandler::post_via_relay`] chooses the relay and drives failover;
-/// the transport builds a fresh request for that relay and performs the HTTP
-/// request.
-#[uniffi::export(with_foreign)]
-#[async_trait::async_trait]
-pub trait RelayTransport: Send + Sync {
-    /// Build a fresh OHTTP request addressed to `relay`.
-    ///
-    /// Build a new request (and OHTTP context) on every call: reusing or
-    /// retransmitting identical ciphertext breaks OHTTP privacy, since a relay
-    /// could observe that a request is being retried. Return
-    /// [`RelayBuildError::Expired`] if the session expired while building.
-    fn build(&self, relay: Arc<Url>) -> Result<BuiltRequest, RelayBuildError>;
-
-    /// POST a request produced by [`RelayTransport::build`], returning the
-    /// response body. Return [`RelayTransportError::Transient`] to retry over
-    /// another relay.
-    async fn post(&self, request: crate::Request) -> Result<Vec<u8>, RelayTransportError>;
-}
-
-/// Selects OHTTP relays and payjoin directories and drives failover over a
-/// caller-supplied transport.
-///
-/// Endpoints are configured as URL strings and deduplicated. Each call tries
-/// endpoints in its own random order and remembers failures only for that
-/// call, so the handler is safe to share across tasks and concurrent calls do
-/// not affect each other.
+/// Endpoints are configured as URL strings and deduplicated. Each call draws
+/// its own random order and remembers no failures, so the handler is safe to
+/// share across tasks and concurrent calls do not affect each other.
 ///
 /// A directory chosen for a session must not change: select one when creating
 /// a new session and keep it for the session's lifetime. Resuming a session
@@ -234,63 +131,22 @@ impl RequestHandler {
         })
     }
 
-    /// Build and POST a request over a relay, failing over to another relay on
-    /// transport error.
+    /// The relays to try for one request, in a fresh random order, never
+    /// `exclude`.
     ///
-    /// `exclude` is the target the request ultimately reaches — for Payjoin v2
-    /// the session directory. A relay equal to it is never selected: a server
-    /// serving as both relay and directory rejects the resulting self-loop
-    /// request.
-    ///
-    /// `transport` builds and POSTs the request, letting callers keep their own
-    /// proxy and TLS client configuration while this method owns relay
-    /// selection and failover. `build` runs once per relay attempt and a
-    /// transport error retries over another relay. Each relay is tried at most
-    /// once per call.
-    ///
-    /// Returns [`RelayPostError::NoRelaysAvailable`] once every relay that is
-    /// not `exclude` has failed.
-    pub async fn post_via_relay(
-        &self,
-        exclude: Arc<Url>,
-        transport: Arc<dyn RelayTransport>,
-    ) -> Result<RelayedResponse, RelayPostError> {
+    /// `exclude` is the target the request ultimately reaches, for Payjoin v2
+    /// the session directory: a server serving as both relay and directory
+    /// rejects the self-loop request. Try the relays front to back with your
+    /// own HTTP client and stop at the first that succeeds. Build a fresh
+    /// request for each relay: retransmitting identical ciphertext would let a
+    /// relay observe that a request is being retried.
+    pub fn relay_order(&self, exclude: Arc<Url>) -> Vec<Arc<Url>> {
         let exclude: payjoin::Url = Arc::unwrap_or_clone(exclude).into();
-        struct CoreRelayTransport {
-            inner: Arc<dyn RelayTransport>,
-        }
-        impl payjoin::request_handler::RelayTransport for CoreRelayTransport {
-            type Request = crate::Request;
-            type Context = Arc<ClientResponse>;
-            type Response = Vec<u8>;
-            type BuildError = RelayBuildError;
-            type Error = RelayTransportError;
-            fn build(
-                &mut self,
-                relay: &payjoin::Url,
-            ) -> Result<(crate::Request, Arc<ClientResponse>), RelayBuildError> {
-                let built = self.inner.build(Arc::new(relay.clone().into()))?;
-                Ok((built.request, built.ohttp_context))
-            }
-            async fn post(
-                &mut self,
-                request: crate::Request,
-            ) -> Result<Vec<u8>, RelayTransportError> {
-                self.inner.post(request).await
-            }
-        }
-        let transport = CoreRelayTransport { inner: transport };
-        match self.inner.post_via_relay(&mut OsRng, &exclude, transport).await {
-            Ok(request_handler::RelayPost::Posted(body, ohttp_context)) =>
-                Ok(RelayedResponse { body, ohttp_context }),
-            Ok(request_handler::RelayPost::Expired) => Err(RelayPostError::Expired),
-            Err(e) => Err(match e.build_error() {
-                Some(RelayBuildError::Expired) => RelayPostError::Expired,
-                Some(RelayBuildError::Fatal { detail }) =>
-                    RelayPostError::Fatal { detail: detail.clone() },
-                None => RelayPostError::NoRelaysAvailable { detail: e.to_string() },
-            }),
-        }
+        self.inner
+            .relay_order(&exclude, &mut OsRng)
+            .into_iter()
+            .map(|relay| Arc::new(relay.into()))
+            .collect()
     }
 }
 
@@ -324,6 +180,16 @@ mod tests {
         assert_eq!(err.to_string(), "invalid scheme");
     }
 
+    #[test]
+    fn relay_order_lists_every_relay_once_except_the_directory() {
+        let handler = RequestHandler::new(urls(), Vec::new()).unwrap();
+        let directory = Arc::new(Url::parse(urls()[0].clone()).unwrap());
+        let mut order: Vec<String> =
+            handler.relay_order(directory).iter().map(|relay| relay.as_string()).collect();
+        order.sort();
+        assert_eq!(order, canonical_urls()[1..].to_vec());
+    }
+
     // Failover loops are async and need a runtime; they run under the
     // `_test-utils` feature, which enables tokio.
     #[cfg(feature = "_test-utils")]
@@ -333,121 +199,8 @@ mod tests {
 
         use super::*;
 
-        fn unconfigured() -> Arc<Url> {
-            Arc::new(Url::parse("https://unconfigured.example".to_string()).unwrap())
-        }
-
         fn test_keys() -> Arc<OhttpKeys> {
             Arc::new(OhttpKeys::decode(payjoin_test_utils::ohttp_key_config_bytes()).unwrap())
-        }
-
-        fn post_request() -> crate::Request {
-            crate::Request {
-                url: "https://relay.example".to_string(),
-                content_type: "message/ohttp-req".to_string(),
-                body: vec![1, 2, 3],
-            }
-        }
-
-        fn built() -> BuiltRequest {
-            BuiltRequest {
-                request: post_request(),
-                ohttp_context: Arc::new(ClientResponse::dangling()),
-            }
-        }
-
-        struct AlwaysTransient {
-            calls: AtomicUsize,
-        }
-
-        #[async_trait::async_trait]
-        impl RelayTransport for AlwaysTransient {
-            fn build(&self, _relay: Arc<Url>) -> Result<BuiltRequest, RelayBuildError> {
-                Ok(built())
-            }
-
-            async fn post(&self, _request: crate::Request) -> Result<Vec<u8>, RelayTransportError> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(RelayTransportError::Transient { detail: "down".to_string() })
-            }
-        }
-
-        #[tokio::test]
-        async fn post_via_relay_tries_each_relay_once_then_gives_up() {
-            let mailroom = RequestHandler::new(urls(), Vec::new()).unwrap();
-            let transport = Arc::new(AlwaysTransient { calls: AtomicUsize::new(0) });
-            let result = mailroom.post_via_relay(unconfigured(), transport.clone()).await;
-            match result {
-                Err(RelayPostError::NoRelaysAvailable { detail }) => assert_eq!(
-                    detail,
-                    "No valid relays available, last error: relay transport failure: down"
-                ),
-                Err(other) => panic!("expected relays to be exhausted, got {other:?}"),
-                Ok(_) => panic!("expected relays to be exhausted, got a response"),
-            }
-            assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
-        }
-
-        struct FixedBuildError {
-            calls: AtomicUsize,
-            error: fn() -> RelayBuildError,
-        }
-
-        #[async_trait::async_trait]
-        impl RelayTransport for FixedBuildError {
-            fn build(&self, _relay: Arc<Url>) -> Result<BuiltRequest, RelayBuildError> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                Err((self.error)())
-            }
-
-            async fn post(&self, _request: crate::Request) -> Result<Vec<u8>, RelayTransportError> {
-                unreachable!("post must not run when build fails")
-            }
-        }
-
-        #[tokio::test]
-        async fn post_via_relay_stops_on_expiry() {
-            let mailroom = RequestHandler::new(urls(), Vec::new()).unwrap();
-            let transport = Arc::new(FixedBuildError {
-                calls: AtomicUsize::new(0),
-                error: || RelayBuildError::Expired,
-            });
-            let result = mailroom.post_via_relay(unconfigured(), transport.clone()).await;
-            assert!(matches!(result, Err(RelayPostError::Expired)));
-            assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
-        }
-
-        #[tokio::test]
-        async fn post_via_relay_stops_on_fatal_build_error() {
-            let mailroom = RequestHandler::new(urls(), Vec::new()).unwrap();
-            let transport = Arc::new(FixedBuildError {
-                calls: AtomicUsize::new(0),
-                error: || RelayBuildError::Fatal { detail: "bad".to_string() },
-            });
-            let result = mailroom.post_via_relay(unconfigured(), transport.clone()).await;
-            match result {
-                Err(RelayPostError::Fatal { detail }) => assert_eq!(detail, "bad"),
-                Err(other) => panic!("expected a fatal build error, got {other:?}"),
-                Ok(_) => panic!("expected a fatal build error, got a response"),
-            }
-            assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
-        }
-
-        #[tokio::test]
-        async fn post_via_relay_never_selects_excluded_relay() {
-            // The only relay is the excluded directory, so no relay is
-            // selectable and the transport must never be called.
-            let mailroom = RequestHandler::new(vec![urls()[0].clone()], Vec::new()).unwrap();
-            let transport = Arc::new(AlwaysTransient { calls: AtomicUsize::new(0) });
-            let exclude = Arc::new(Url::parse(urls()[0].clone()).unwrap());
-            let result = mailroom.post_via_relay(exclude, transport.clone()).await;
-            match result {
-                Err(RelayPostError::NoRelaysAvailable { detail }) =>
-                    assert_eq!(detail, "No valid relays available"),
-                Err(other) => panic!("expected relays to be exhausted, got {other:?}"),
-                Ok(_) => panic!("expected relays to be exhausted, got a response"),
-            }
-            assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
         }
 
         struct TransientThenKeys {

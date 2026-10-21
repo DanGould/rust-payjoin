@@ -371,27 +371,25 @@ void main() {
       );
     });
 
-    test("Post via relay fails over and skips the directory", () async {
-      final receiver = payjoin.ReceiverBuilder(
-        address: "tb1q6d3a2w975yny0asuvd9a67ner4nks58ff0q8g4",
-        directory: directory.asString(),
-        ohttpKeys: testOhttpKeys(),
-      ).build().save(persister: InMemoryReceiverPersister());
+    test("Relay order skips the directory", () {
       // The directory is also listed as a relay; it must never be used to
       // reach itself.
       final handler = payjoin.RequestHandler(
         relays: [...relays, directory.asString()],
         directories: [directory.asString()],
       );
-      final transport = FirstRelayDownTransport(receiver);
-      final response = await handler.postViaRelay(
-        exclude: directory,
-        transport: transport,
-      );
-      expect(String.fromCharCodes(response.body), "response");
-      expect(transport.relays.length, 2);
-      expect(transport.relays[0], isNot(transport.relays[1]));
-      expect(transport.relays, isNot(contains(directory.asString())));
+      final order =
+          handler
+              .relayOrder(exclude: directory)
+              .map((relay) => relay.asString())
+              .toList()
+            ..sort();
+      final expected =
+          relays
+              .map((relay) => payjoin.Url.parse(input: relay).asString())
+              .toList()
+            ..sort();
+      expect(order, expected);
     });
   });
 }
@@ -417,30 +415,5 @@ class FirstRelayDownFetcher implements payjoin.OhttpKeysFetcher {
       throw payjoin.TransientDirectoryFetchException("relay down");
     }
     return testOhttpKeys();
-  }
-}
-
-class FirstRelayDownTransport implements payjoin.RelayTransport {
-  final payjoin.Initialized receiver;
-  final List<String> relays = [];
-
-  FirstRelayDownTransport(this.receiver);
-
-  @override
-  payjoin.BuiltRequest build(payjoin.Url relay) {
-    relays.add(relay.asString());
-    final poll = receiver.createPollRequest(ohttpRelay: relay.asString());
-    return payjoin.BuiltRequest(
-      request: poll.request,
-      ohttpContext: poll.clientResponse,
-    );
-  }
-
-  @override
-  Future<Uint8List> post(payjoin.Request request) async {
-    if (relays.length == 1) {
-      throw payjoin.TransientRelayTransportException("relay down");
-    }
-    return Uint8List.fromList("response".codeUnits);
   }
 }

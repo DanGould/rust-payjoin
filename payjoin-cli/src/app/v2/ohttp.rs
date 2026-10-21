@@ -46,23 +46,8 @@ impl MailroomManager {
         self.0.fetch_ohttp_keys(&mut OsRng).await.map_err(Into::into)
     }
 
-    pub async fn post_via_relay<F, T, E, P, TransportError, Fut>(
-        &self,
-        directory: &Url,
-        build: F,
-        post: impl Fn(payjoin::Request) -> Fut,
-    ) -> std::result::Result<
-        payjoin::request_handler::RelayPost<P, T>,
-        payjoin::request_handler::PostError<E>,
-    >
-    where
-        F: FnMut(&payjoin::Url) -> std::result::Result<(payjoin::Request, T), E>,
-        E: payjoin::request_handler::RequestExpiry,
-        TransportError: std::fmt::Display,
-        Fut: std::future::Future<Output = std::result::Result<P, TransportError>>,
-    {
-        let transport = payjoin::request_handler::FnRelayTransport::new(build, post);
-        self.0.post_via_relay(&mut OsRng, directory, transport).await
+    pub fn relay_order(&self, directory: &Url) -> Vec<Url> {
+        self.0.relay_order(directory, &mut OsRng)
     }
 }
 
