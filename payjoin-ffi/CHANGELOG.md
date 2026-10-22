@@ -11,13 +11,13 @@
 
 ### RequestHandler
 
-- Export `RequestHandler` for relay and directory selection with
-  failover
+- Export `RequestHandler`, which returns the order to try OHTTP relays
+  and payjoin directories in. Requests are made with the binding's own
+  HTTP client
+- Add `RequestHandler::key_fetch_order`, which lists the relay and
+  directory pairs to try when fetching OHTTP keys for a new session
 - Add `RequestHandler::relay_order`, which returns the relays to try for
   one request in a fresh random order, leaving out the session directory
-- Add `RequestHandler::fetch_ohttp_keys`, which fetches a directory's
-  OHTTP keys over a binding-supplied `OhttpKeysFetcher` with relay and
-  directory failover
 
 ## [0.25.0]
 

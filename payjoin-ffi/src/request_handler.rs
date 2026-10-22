@@ -3,62 +3,27 @@ use std::sync::Arc;
 use payjoin::bitcoin::secp256k1::rand::rngs::OsRng;
 use payjoin::request_handler;
 
-use crate::ohttp::OhttpKeys;
 pub use crate::uri::error::UrlParseError;
 use crate::Url;
 
-/// Error returned by [`RequestHandler::fetch_ohttp_keys`].
-#[derive(Debug, thiserror::Error, uniffi::Object)]
-#[uniffi::export(Debug, Display)]
-#[error(transparent)]
-pub struct RequestHandlerError(#[from] request_handler::Error);
-
-/// The result of a successful [`RequestHandler::fetch_ohttp_keys`].
-#[derive(Debug, uniffi::Record)]
-pub struct FetchedOhttpKeys {
-    /// The directory the keys belong to. Pin this in the BIP21 URI when
-    /// creating a session, since a session's directory must not change.
+/// One OHTTP key fetch to attempt: `directory`'s keys, requested through
+/// `relay`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct KeyFetch {
+    pub relay: Arc<Url>,
     pub directory: Arc<Url>,
-    /// The directory's OHTTP keys.
-    pub ohttp_keys: Arc<OhttpKeys>,
 }
 
-/// Why a single attempt to fetch a directory's OHTTP keys failed.
-///
-/// [`RequestHandler`] retries the same directory over another relay, and
-/// gives a directory up only once it has failed over every relay.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[non_exhaustive]
-pub enum DirectoryFetchError {
-    /// The attempt failed; retry the directory over another relay.
-    #[error("OHTTP keys fetch failed: {detail}")]
-    Transient {
-        /// Human-readable detail.
-        detail: String,
-    },
-}
-
-/// Fetches a payjoin directory's OHTTP keys through an OHTTP relay.
-///
-/// Implemented by the binding, which owns the HTTP transport and any proxy or
-/// TLS configuration. [`RequestHandler::fetch_ohttp_keys`] selects the relay
-/// and directory, drives failover, and tracks failures; the fetcher performs a
-/// single HTTP attempt per call.
-#[uniffi::export(with_foreign)]
-#[async_trait::async_trait]
-pub trait OhttpKeysFetcher: Send + Sync {
-    /// Fetch OHTTP keys from `directory` tunnelled through `relay`.
-    ///
-    /// Return [`DirectoryFetchError::Transient`] on any failure, so the
-    /// handler retries over another relay.
-    async fn fetch(
-        &self,
-        relay: Arc<Url>,
-        directory: Arc<Url>,
-    ) -> Result<Arc<OhttpKeys>, DirectoryFetchError>;
+impl From<request_handler::KeyFetch> for KeyFetch {
+    fn from(fetch: request_handler::KeyFetch) -> Self {
+        Self { relay: Arc::new(fetch.relay.into()), directory: Arc::new(fetch.directory.into()) }
+    }
 }
 
 /// Selects OHTTP relays and payjoin directories.
+///
+/// Returns the order to try them in as plain data. Make every request with
+/// your own HTTP client, so proxy, Tor and TLS settings stay in one place.
 ///
 /// Endpoints are configured as URL strings and deduplicated. Each call draws
 /// its own random order and remembers no failures, so the handler is safe to
@@ -92,33 +57,21 @@ impl RequestHandler {
         })
     }
 
-    /// Fetch OHTTP keys with automatic failover.
+    /// The fetches to attempt for a new session's OHTTP keys, in order.
     ///
-    /// A failed attempt retries the same directory over another relay. A
-    /// directory is given up only once it has failed over every relay, and
-    /// then the next directory is tried.
+    /// Try them front to back and stop at the first that returns keys. Pin
+    /// that fetch's directory in the BIP21 URI: a session's directory must not
+    /// change. A caller with OHTTP keys configured ahead of time skips this
+    /// and uses the directory those keys belong to.
     ///
-    /// Returns the directory alongside the keys: a receiver pins the directory
-    /// in the BIP21 URI at session creation. A caller with OHTTP keys
-    /// configured ahead of time skips this and uses the directory those keys
-    /// belong to.
-    pub async fn fetch_ohttp_keys(
-        &self,
-        fetcher: Arc<dyn OhttpKeysFetcher>,
-    ) -> Result<FetchedOhttpKeys, RequestHandlerError> {
-        let fetch = move |relay: payjoin::Url, directory: payjoin::Url| {
-            let fetcher = fetcher.clone();
-            async move {
-                let ohttp_keys =
-                    fetcher.fetch(Arc::new(relay.into()), Arc::new(directory.into())).await?;
-                Ok::<_, DirectoryFetchError>(Arc::unwrap_or_clone(ohttp_keys).into())
-            }
-        };
-        let (directory, ohttp_keys) = self.inner.fetch_ohttp_keys_with(&mut OsRng, fetch).await?;
-        Ok(FetchedOhttpKeys {
-            directory: Arc::new(directory.into()),
-            ohttp_keys: Arc::new(ohttp_keys.into()),
-        })
+    /// Each directory is listed over every relay that is not itself before
+    /// the next directory. A failure through one relay usually can't be
+    /// pinned on the directory, so retry the directory over its remaining
+    /// relays. When a failure is known to be the directory's, skip its
+    /// remaining pairs. Empty when no relays or no directories are
+    /// configured.
+    pub fn key_fetch_order(&self) -> Vec<KeyFetch> {
+        self.inner.key_fetch_order(&mut OsRng).into_iter().map(Into::into).collect()
     }
 
     /// The relays to try for one request, in a fresh random order, never
@@ -163,6 +116,20 @@ mod tests {
     }
 
     #[test]
+    fn key_fetch_order_lists_each_directory_over_every_other_relay() {
+        let handler = RequestHandler::new(urls(), urls()).unwrap();
+        let order = handler.key_fetch_order();
+        assert_eq!(order.len(), 6);
+        for fetch in &order {
+            assert_ne!(fetch.relay.as_string(), fetch.directory.as_string());
+        }
+        let mut directories: Vec<String> =
+            order.chunks(2).map(|pair| pair[0].directory.as_string()).collect();
+        directories.sort();
+        assert_eq!(directories, canonical_urls());
+    }
+
+    #[test]
     fn relay_order_lists_every_relay_once_except_the_directory() {
         let handler = RequestHandler::new(urls(), Vec::new()).unwrap();
         let directory = Arc::new(Url::parse(urls()[0].clone()).unwrap());
@@ -170,133 +137,5 @@ mod tests {
             handler.relay_order(directory).iter().map(|relay| relay.as_string()).collect();
         order.sort();
         assert_eq!(order, canonical_urls()[1..].to_vec());
-    }
-
-    // Failover loops are async and need a runtime; they run under the
-    // `_test-utils` feature, which enables tokio.
-    #[cfg(feature = "_test-utils")]
-    mod failover {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Mutex;
-
-        use super::*;
-
-        fn test_keys() -> Arc<OhttpKeys> {
-            Arc::new(OhttpKeys::decode(payjoin_test_utils::ohttp_key_config_bytes()).unwrap())
-        }
-
-        struct TransientThenKeys {
-            calls: AtomicUsize,
-            keys: Arc<OhttpKeys>,
-        }
-
-        #[async_trait::async_trait]
-        impl OhttpKeysFetcher for TransientThenKeys {
-            async fn fetch(
-                &self,
-                _relay: Arc<Url>,
-                _directory: Arc<Url>,
-            ) -> Result<Arc<OhttpKeys>, DirectoryFetchError> {
-                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Err(DirectoryFetchError::Transient { detail: "down".to_string() });
-                }
-                Ok(self.keys.clone())
-            }
-        }
-
-        #[tokio::test]
-        async fn fetch_retries_over_another_relay() {
-            let mailroom = RequestHandler::new(urls(), urls()).unwrap();
-            let fetcher =
-                Arc::new(TransientThenKeys { calls: AtomicUsize::new(0), keys: test_keys() });
-            let result = mailroom.fetch_ohttp_keys(fetcher.clone()).await.unwrap();
-            assert!(canonical_urls().contains(&result.directory.as_string()));
-            // The transient failure is retried over another relay.
-            assert_eq!(fetcher.calls.load(Ordering::SeqCst), 2);
-        }
-
-        struct AlwaysFails {
-            calls: AtomicUsize,
-            directories: Mutex<Vec<String>>,
-        }
-
-        #[async_trait::async_trait]
-        impl OhttpKeysFetcher for AlwaysFails {
-            async fn fetch(
-                &self,
-                _relay: Arc<Url>,
-                directory: Arc<Url>,
-            ) -> Result<Arc<OhttpKeys>, DirectoryFetchError> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                self.directories.lock().unwrap().push(directory.as_string());
-                Err(DirectoryFetchError::Transient { detail: "404".to_string() })
-            }
-        }
-
-        #[tokio::test]
-        async fn fetch_tries_every_relay_for_each_directory_then_gives_up() {
-            let mailroom = RequestHandler::new(urls(), urls()).unwrap();
-            let fetcher = Arc::new(AlwaysFails {
-                calls: AtomicUsize::new(0),
-                directories: Mutex::new(Vec::new()),
-            });
-            let result = mailroom.fetch_ohttp_keys(fetcher.clone()).await;
-            match result {
-                Err(e) => assert_eq!(
-                    e.to_string(),
-                    "No valid directories available, last error: OHTTP keys fetch failed: 404"
-                ),
-                Ok(_) => panic!("expected directories to be exhausted, got keys"),
-            }
-            // Each directory is tried over the two relays that are not itself.
-            assert_eq!(fetcher.calls.load(Ordering::SeqCst), 6);
-            let mut tried = fetcher.directories.lock().unwrap().clone();
-            tried.sort();
-            tried.dedup();
-            assert_eq!(tried.len(), 3);
-        }
-
-        struct NeverCalled {
-            calls: AtomicUsize,
-        }
-
-        #[async_trait::async_trait]
-        impl OhttpKeysFetcher for NeverCalled {
-            async fn fetch(
-                &self,
-                _relay: Arc<Url>,
-                _directory: Arc<Url>,
-            ) -> Result<Arc<OhttpKeys>, DirectoryFetchError> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                unreachable!("no relay may be tried")
-            }
-        }
-
-        #[tokio::test]
-        async fn fetch_without_relays_fails() {
-            let mailroom = RequestHandler::new(Vec::new(), urls()).unwrap();
-            let fetcher = Arc::new(NeverCalled { calls: AtomicUsize::new(0) });
-            let result = mailroom.fetch_ohttp_keys(fetcher).await;
-            assert_eq!(
-                result.err().map(|e| e.to_string()).as_deref(),
-                Some("No valid relays available")
-            );
-        }
-
-        #[tokio::test]
-        async fn second_fetch_retries_directories_that_failed_the_first() {
-            // Every directory fails the first fetch over every relay. The
-            // second fetch tries them again and succeeds.
-            let mailroom = RequestHandler::new(urls(), urls()).unwrap();
-            let fetcher = Arc::new(AlwaysFails {
-                calls: AtomicUsize::new(0),
-                directories: Mutex::new(Vec::new()),
-            });
-            assert!(mailroom.fetch_ohttp_keys(fetcher).await.is_err());
-            let fetcher =
-                Arc::new(TransientThenKeys { calls: AtomicUsize::new(0), keys: test_keys() });
-            let result = mailroom.fetch_ohttp_keys(fetcher).await.unwrap();
-            assert!(canonical_urls().contains(&result.directory.as_string()));
-        }
     }
 }

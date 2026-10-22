@@ -54,18 +54,27 @@ impl MailroomManager {
             return Ok(configured.clone());
         }
         #[cfg(feature = "_manual-tls")]
-        let cert_der = self.cert_der.clone();
+        let cert_der = self.cert_der.as_deref();
         #[cfg(not(feature = "_manual-tls"))]
-        let cert_der: Option<Vec<u8>> = None;
-        // OsRng rather than thread_rng: ThreadRng is !Send and must not be
-        // held across the fetch's await points.
-        self.handler
-            .fetch_ohttp_keys_with(&mut OsRng, move |relay, directory| {
-                let cert_der = cert_der.clone();
-                async move { fetch_via_relay(cert_der.as_deref(), &relay, &directory).await }
-            })
-            .await
-            .map_err(Into::into)
+        let cert_der: Option<&[u8]> = None;
+        let mut last_error = None;
+        for fetch in self.handler.key_fetch_order(&mut OsRng) {
+            match fetch_via_relay(cert_der, &fetch.relay, &fetch.directory).await {
+                Ok(keys) => return Ok((fetch.directory, keys)),
+                Err(e) => {
+                    tracing::debug!(
+                        "Directory {} failed via relay {}: {e}",
+                        fetch.directory,
+                        fetch.relay
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+        match last_error {
+            Some(e) => Err(anyhow!("No valid directories available, last error: {e}")),
+            None => Err(anyhow!("No usable relay and directory pair configured")),
+        }
     }
 
     pub fn relay_order(&self, directory: &Url) -> Vec<Url> {

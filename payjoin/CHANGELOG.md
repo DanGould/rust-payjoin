@@ -5,12 +5,14 @@
 ### Relay and directory failover
 
 - Add `request_handler::RequestHandler`, which selects OHTTP relays and
-  payjoin directories and fails over between them
-- Add `RequestHandler::fetch_ohttp_keys_with`, which fetches OHTTP keys
-  over a caller-supplied transport and tries each directory over every
-  relay before moving on to the next. The handler holds no HTTP client;
-  with the `io` feature, `payjoin::io::fetch_ohttp_keys` can serve as the
-  fetch
+  payjoin directories and returns the order to try them in as plain
+  data. It holds no HTTP client: the caller makes every request with its
+  own, and with the `io` feature `payjoin::io::fetch_ohttp_keys` can make
+  the key fetches
+- Add `RequestHandler::key_fetch_order`, which lists the relay and
+  directory pairs to try when fetching OHTTP keys for a new session,
+  grouped by directory so a caller can retry a directory over other
+  relays or skip to the next one
 - Add `RequestHandler::relay_order`, which returns the relays to try for
   one request in a fresh random order. The caller posts with its own HTTP
   client and moves to the next relay on failure. It needs `v2`, not `io`

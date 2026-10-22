@@ -306,25 +306,6 @@ class TestValidation(unittest.TestCase):
             payjoin.SenderBuilder("not-a-psbt", uri)
 
 
-def _test_ohttp_keys() -> payjoin.OhttpKeys:
-    return payjoin.OhttpKeys.decode(
-        bytes.fromhex(
-            "01001604ba48c49c3d4a92a3ad00ecc63a024da10ced02180c73ec12d8a7ad2cc91bb483824fe2bee8d28bfe2eb2fc6453bc4d31cd851e8a6540e86c5382af588d370957000400010003"
-        )
-    )
-
-
-class _FirstRelayDownFetcher(payjoin.OhttpKeysFetcher):
-    def __init__(self):
-        self.relays = []
-
-    async def fetch(self, relay, directory):
-        self.relays.append(relay.as_string())
-        if len(self.relays) == 1:
-            raise payjoin.DirectoryFetchError.Transient("relay down")
-        return _test_ohttp_keys()
-
-
 class TestRequestHandler(unittest.TestCase):
     relays = [
         "https://relay-a.example",
@@ -333,28 +314,25 @@ class TestRequestHandler(unittest.TestCase):
     ]
     directory = payjoin.Url.parse("https://directory.example")
 
-    def test_fetch_ohttp_keys_fails_over_to_another_relay(self):
-        import asyncio
+    def test_key_fetch_order_tries_the_directory_over_every_other_relay(self):
+        # The directory is also listed as a relay; it must never be used to
+        # reach itself.
+        handler = payjoin.RequestHandler(
+            self.relays + [self.directory.as_string()], [self.directory.as_string()]
+        )
+        order = handler.key_fetch_order()
+        self.assertEqual(
+            {fetch.directory.as_string() for fetch in order},
+            {self.directory.as_string()},
+        )
+        self.assertEqual(
+            sorted(fetch.relay.as_string() for fetch in order),
+            sorted(payjoin.Url.parse(relay).as_string() for relay in self.relays),
+        )
 
-        async def run_test():
-            handler = payjoin.RequestHandler(self.relays, [self.directory.as_string()])
-            fetcher = _FirstRelayDownFetcher()
-            fetched = await handler.fetch_ohttp_keys(fetcher)
-            self.assertEqual(fetched.directory.as_string(), self.directory.as_string())
-            self.assertEqual(len(fetcher.relays), 2)
-            self.assertNotEqual(fetcher.relays[0], fetcher.relays[1])
-
-        asyncio.run(run_test())
-
-    def test_fetch_ohttp_keys_without_relays_raises(self):
-        import asyncio
-
-        async def run_test():
-            handler = payjoin.RequestHandler([], [self.directory.as_string()])
-            with self.assertRaises(cast(type[Exception], payjoin.RequestHandlerError)):
-                await handler.fetch_ohttp_keys(_FirstRelayDownFetcher())
-
-        asyncio.run(run_test())
+    def test_key_fetch_order_without_relays_is_empty(self):
+        handler = payjoin.RequestHandler([], [self.directory.as_string()])
+        self.assertEqual(handler.key_fetch_order(), [])
 
     def test_relay_order_skips_the_directory(self):
         # The directory is also listed as a relay; it must never be used to

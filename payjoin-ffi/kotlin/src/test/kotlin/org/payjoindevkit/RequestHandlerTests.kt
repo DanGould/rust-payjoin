@@ -2,9 +2,7 @@ package org.payjoindevkit
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
-import kotlin.test.assertNotEquals
-import kotlinx.coroutines.test.runTest
+import kotlin.test.assertTrue
 
 private val relays = listOf(
     "https://relay-a.example",
@@ -14,35 +12,25 @@ private val relays = listOf(
 
 private const val DIRECTORY = "https://directory.example"
 
-private class FirstRelayDownFetcher : OhttpKeysFetcher {
-    val relaysTried = mutableListOf<String>()
-
-    override suspend fun fetch(relay: Url, directory: Url): OhttpKeys {
-        relaysTried.add(relay.asString())
-        if (relaysTried.size == 1) throw DirectoryFetchException.Transient("relay down")
-        return OhttpKeys.decode(ohttpKeysData)
-    }
-}
-
 class RequestHandlerTests {
     @Test
-    fun fetchOhttpKeysFailsOverToAnotherRelay() = runTest {
+    fun keyFetchOrderTriesTheDirectoryOverEveryOtherRelay() {
         val directory = Url.parse(DIRECTORY)
-        val handler = RequestHandler(relays, listOf(directory.asString()))
-        val fetcher = FirstRelayDownFetcher()
+        // The directory is also listed as a relay; it must never be used to
+        // reach itself.
+        val handler = RequestHandler(relays + directory.asString(), listOf(directory.asString()))
 
-        val fetched = handler.fetchOhttpKeys(fetcher)
+        val order = handler.keyFetchOrder()
 
-        assertEquals(directory.asString(), fetched.directory.asString())
-        assertEquals(2, fetcher.relaysTried.size)
-        assertNotEquals(fetcher.relaysTried[0], fetcher.relaysTried[1])
+        assertEquals(setOf(directory.asString()), order.map { it.directory.asString() }.toSet())
+        assertEquals(relays.map { Url.parse(it).asString() }.sorted(), order.map { it.relay.asString() }.sorted())
     }
 
     @Test
-    fun fetchOhttpKeysWithoutRelaysThrows() = runTest {
+    fun keyFetchOrderWithoutRelaysIsEmpty() {
         val handler = RequestHandler(emptyList(), listOf(DIRECTORY))
 
-        assertFailsWith<RequestHandlerException> { handler.fetchOhttpKeys(FirstRelayDownFetcher()) }
+        assertTrue(handler.keyFetchOrder().isEmpty())
     }
 
     @Test

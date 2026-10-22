@@ -347,50 +347,29 @@ function runUnitTests(name: string, payjoin: typeof nodejsPayjoin) {
         ];
         const directoryUrl = "https://directory.example";
 
-        function firstRelayDownFetcher(): nodejsPayjoin.OhttpKeysFetcher & {
-            relaysTried: string[];
-        } {
-            const relaysTried: string[] = [];
-            return {
-                relaysTried,
-                async fetch(relay) {
-                    relaysTried.push(relay.asString());
-                    if (relaysTried.length === 1) {
-                        throw new payjoin.DirectoryFetchError.Transient({
-                            detail: "relay down",
-                        });
-                    }
-                    return payjoin.OhttpKeys.decode(OHTTP_KEYS);
-                },
-            };
-        }
-
-        test("fetch OHTTP keys fails over to another relay", async () => {
+        test("key fetch order tries the directory over every other relay", () => {
             const directory = payjoin.Url.parse(directoryUrl);
-            const handler = new payjoin.RequestHandler(relays, [
-                directory.asString(),
-            ]);
-            const fetcher = firstRelayDownFetcher();
-
-            const fetched = await handler.fetchOhttpKeys(fetcher);
-
-            assert.strictEqual(
-                fetched.directory.asString(),
-                directory.asString(),
+            // The directory is also listed as a relay; it must never be used
+            // to reach itself.
+            const handler = new payjoin.RequestHandler(
+                [...relays, directory.asString()],
+                [directory.asString()],
             );
-            assert.strictEqual(fetcher.relaysTried.length, 2);
-            assert.notStrictEqual(
-                fetcher.relaysTried[0],
-                fetcher.relaysTried[1],
+            const order = handler.keyFetchOrder();
+            assert.deepStrictEqual(
+                [...new Set(order.map((fetch) => fetch.directory.asString()))],
+                [directory.asString()],
             );
+            const tried = order.map((fetch) => fetch.relay.asString()).sort();
+            const expected = relays
+                .map((relay) => payjoin.Url.parse(relay).asString())
+                .sort();
+            assert.deepStrictEqual(tried, expected);
         });
 
-        test("fetch OHTTP keys without relays throws", async () => {
+        test("key fetch order without relays is empty", () => {
             const handler = new payjoin.RequestHandler([], [directoryUrl]);
-
-            await assert.rejects(() =>
-                handler.fetchOhttpKeys(firstRelayDownFetcher()),
-            );
+            assert.deepStrictEqual(handler.keyFetchOrder(), []);
         });
 
         test("relay order skips the directory", () => {

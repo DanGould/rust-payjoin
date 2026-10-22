@@ -336,27 +336,33 @@ void main() {
     ];
     final directory = payjoin.Url.parse(input: "https://directory.example");
 
-    test("Fetch OHTTP keys fails over to another relay", () async {
+    test("Key fetch order tries the directory over every other relay", () {
+      // The directory is also listed as a relay; it must never be used to
+      // reach itself.
       final handler = payjoin.RequestHandler(
-        relays: relays,
+        relays: [...relays, directory.asString()],
         directories: [directory.asString()],
       );
-      final fetcher = FirstRelayDownFetcher();
-      final fetched = await handler.fetchOhttpKeys(fetcher: fetcher);
-      expect(fetched.directory.asString(), directory.asString());
-      expect(fetcher.relays.length, 2);
-      expect(fetcher.relays[0], isNot(fetcher.relays[1]));
+      final order = handler.keyFetchOrder();
+      expect(order.map((fetch) => fetch.directory.asString()).toSet(), {
+        directory.asString(),
+      });
+      final tried = order.map((fetch) => fetch.relay.asString()).toList()
+        ..sort();
+      final expected =
+          relays
+              .map((relay) => payjoin.Url.parse(input: relay).asString())
+              .toList()
+            ..sort();
+      expect(tried, expected);
     });
 
-    test("Fetch OHTTP keys without relays throws", () async {
+    test("Key fetch order without relays is empty", () {
       final handler = payjoin.RequestHandler(
         relays: [],
         directories: [directory.asString()],
       );
-      await expectLater(
-        handler.fetchOhttpKeys(fetcher: FirstRelayDownFetcher()),
-        throwsA(isA<payjoin.RequestHandlerException>()),
-      );
+      expect(handler.keyFetchOrder(), isEmpty);
     });
 
     test("Relay order skips the directory", () {
@@ -380,28 +386,4 @@ void main() {
       expect(order, expected);
     });
   });
-}
-
-payjoin.OhttpKeys testOhttpKeys() => payjoin.OhttpKeys.decode(
-  bytes: Uint8List.fromList(
-    hex.decode(
-      "01001604ba48c49c3d4a92a3ad00ecc63a024da10ced02180c73ec12d8a7ad2cc91bb483824fe2bee8d28bfe2eb2fc6453bc4d31cd851e8a6540e86c5382af588d370957000400010003",
-    ),
-  ),
-);
-
-class FirstRelayDownFetcher implements payjoin.OhttpKeysFetcher {
-  final List<String> relays = [];
-
-  @override
-  Future<payjoin.OhttpKeys> fetch(
-    payjoin.Url relay,
-    payjoin.Url directory,
-  ) async {
-    relays.add(relay.asString());
-    if (relays.length == 1) {
-      throw payjoin.TransientDirectoryFetchException("relay down");
-    }
-    return testOhttpKeys();
-  }
 }
