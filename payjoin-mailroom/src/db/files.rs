@@ -9,11 +9,11 @@ use payjoin::directory::ShortId;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use tokio::fs::{self, File};
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{trace, warn};
 
-use crate::db::{Db as DbTrait, Error as DbError};
+use crate::db::{Db as DbTrait, Error as DbError, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
 
 /// The maximum number of pending or populated mailbox entries.
 ///
@@ -43,6 +43,15 @@ pub(crate) struct Mailboxes {
     pending_v2: HashMap<ShortId, V2WaitMapEntry>,
     insert_order: VecDeque<(SystemTime, ShortId)>,
     ttl: Duration,
+    /// Append-only logs live apart from v2 mailboxes, so the same ShortId can
+    /// never switch a write-once mailbox into a log or back.
+    log_storage: DiskStorage,
+    log_insert_order: VecDeque<(SystemTime, ShortId)>,
+    log_frames: HashMap<ShortId, usize>,
+    /// Every stored log frame counts against `capacity`, so logs can't hold
+    /// more data than the same number of v2 mailboxes.
+    log_frames_total: usize,
+    pending_log: HashMap<(ShortId, usize), V2WaitMapEntry>,
 }
 
 #[derive(Debug)]
@@ -150,10 +159,42 @@ impl DiskStorage {
         }
     }
 
-    fn xor_buffer(&self, buffer: &mut [u8]) {
-        for (byte, &pattern) in buffer.iter_mut().zip(self.xor.iter().cycle()) {
+    fn xor_buffer(&self, buffer: &mut [u8]) { self.xor_buffer_at(buffer, 0) }
+
+    /// XOR a buffer that sits at byte `offset` of its file, so separately
+    /// written log frames share one continuous pattern.
+    fn xor_buffer_at(&self, buffer: &mut [u8], offset: usize) {
+        let pattern = self.xor.iter().cycle().skip(offset % self.xor.len());
+        for (byte, &pattern) in buffer.iter_mut().zip(pattern) {
             *byte ^= pattern;
         }
+    }
+
+    /// The number of whole frames in a log. A torn frame left by an
+    /// interrupted append is not counted and gets overwritten by the next one.
+    async fn frame_count(&self, id: &ShortId) -> io::Result<usize> {
+        Ok(fs::metadata(self.mailbox_path(id)).await?.len() as usize / LOG_FRAME_BYTES)
+    }
+
+    async fn write_frame(&self, id: &ShortId, index: usize, frame: &[u8]) -> io::Result<()> {
+        let offset = index * LOG_FRAME_BYTES;
+        let mut buffer = frame.to_vec();
+        self.xor_buffer_at(&mut buffer, offset);
+
+        let mut file = fs::OpenOptions::new().write(true).open(self.mailbox_path(id)).await?;
+        file.seek(io::SeekFrom::Start(offset as u64)).await?;
+        file.write_all(&buffer).await?;
+        file.sync_data().await
+    }
+
+    async fn read_frame(&self, id: &ShortId, index: usize) -> io::Result<Vec<u8>> {
+        let offset = index * LOG_FRAME_BYTES;
+        let mut file = File::open(self.mailbox_path(id)).await?;
+        file.seek(io::SeekFrom::Start(offset as u64)).await?;
+        let mut buffer = vec![0u8; LOG_FRAME_BYTES];
+        file.read_exact(&mut buffer).await?;
+        self.xor_buffer_at(&mut buffer, offset);
+        Ok(buffer)
     }
 
     async fn remove(&self, id: &ShortId) -> io::Result<Option<()>> {
@@ -188,6 +229,14 @@ impl DiskStorage {
 
 impl Mailboxes {
     async fn init(dir: PathBuf, ttl: Duration) -> io::Result<Self> {
+        let log_storage = DiskStorage::init(dir.join("logs")).await?;
+        let log_insert_order: VecDeque<_> = log_storage.insert_order().await?.into();
+        let mut log_frames = HashMap::default();
+        for (_created, id) in &log_insert_order {
+            log_frames.insert(*id, log_storage.frame_count(id).await?);
+        }
+        let log_frames_total = log_frames.values().sum();
+
         let storage = DiskStorage::init(dir).await?;
         let insert_order = storage.insert_order().await?.into();
         Ok(Self {
@@ -197,6 +246,11 @@ impl Mailboxes {
             pending_v1: HashMap::default(),
             pending_v2: HashMap::default(),
             ttl,
+            log_storage,
+            log_insert_order,
+            log_frames,
+            log_frames_total,
+            pending_log: HashMap::default(),
         })
     }
 }
@@ -298,6 +352,40 @@ impl DbTrait for FilesDb {
     ) -> Result<(), DbError<Self::OperationalError>> {
         let mut guard = self.mailboxes.lock().await;
         Ok(guard.post_v1_res(id, payload).await?)
+    }
+
+    async fn append_log_frame(
+        &self,
+        id: &ShortId,
+        frame: Vec<u8>,
+    ) -> Result<Option<()>, DbError<Self::OperationalError>> {
+        let mut guard = self.mailboxes.lock().await;
+        Ok(guard.append_log(id, frame).await?)
+    }
+
+    async fn wait_for_log_frame(
+        &self,
+        id: &ShortId,
+        index: usize,
+    ) -> Result<Arc<Vec<u8>>, DbError<Self::OperationalError>> {
+        let receiver = {
+            let mut guard = self.mailboxes.lock().await;
+
+            if index < guard.log_len(id) {
+                return Ok(Arc::new(guard.log_storage.read_frame(id, index).await?));
+            } else {
+                guard.wait_log(id, index).await?
+            }
+        };
+
+        let ret = match tokio::time::timeout(self.timeout, receiver).await {
+            Ok(frame) => Ok((frame.expect("receiver must not fail")).clone()),
+            Err(elapsed) => Err(DbError::Timeout(elapsed)),
+        };
+
+        self.mailboxes.lock().await.maybe_cleanup_log_waitmap(id, index);
+
+        ret
     }
 }
 
@@ -426,6 +514,72 @@ impl Mailboxes {
         Ok(ret)
     }
 
+    fn log_len(&self, id: &ShortId) -> usize { self.log_frames.get(id).copied().unwrap_or(0) }
+
+    async fn append_log(&mut self, id: &ShortId, frame: Vec<u8>) -> Result<Option<()>, Error> {
+        if !self.has_capacity().await? {
+            return Err(Error::OverCapacity);
+        }
+
+        let index = match self.log_frames.get(id).copied() {
+            Some(len) if len >= MAX_LOG_FRAMES => return Ok(None),
+            Some(len) => {
+                self.log_storage.write_frame(id, len, &frame).await?;
+                len
+            }
+            None => {
+                // Creating the log through a temp file means a log on disk
+                // always starts with a complete frame.
+                let Some(created) = self.log_storage.try_insert(id, &frame).await? else {
+                    return Err(io::Error::other(format!("untracked log file for {id}")).into());
+                };
+                self.log_insert_order.push_back((created, *id));
+                0
+            }
+        };
+        self.log_frames.insert(*id, index + 1);
+        self.log_frames_total += 1;
+
+        if let Some(pending) = self.pending_log.remove(&(*id, index)) {
+            trace!("notifying pending readers for frame {index} of log {id}");
+
+            pending.sender.send(Arc::new(frame)).expect("sending on oneshot channel must succeed");
+        }
+
+        Ok(Some(()))
+    }
+
+    async fn wait_log(
+        &mut self,
+        id: &ShortId,
+        index: usize,
+    ) -> Result<future::Shared<oneshot::Receiver<Arc<Vec<u8>>>>, Error> {
+        if !self.has_capacity().await? {
+            return Err(Error::OverCapacity);
+        }
+
+        let receiver = self
+            .pending_log
+            .entry((*id, index))
+            .or_insert_with(|| {
+                let (sender, receiver) = oneshot::channel::<Arc<Vec<u8>>>();
+                let shared_receiver = receiver.shared();
+                V2WaitMapEntry { sender, receiver: shared_receiver.clone() }
+            })
+            .receiver
+            .clone();
+
+        Ok(receiver)
+    }
+
+    fn maybe_cleanup_log_waitmap(&mut self, id: &ShortId, index: usize) {
+        if let Some(entry) = self.pending_log.get(&(*id, index)) {
+            if entry.receiver.strong_count().unwrap_or(0) <= 1 {
+                self.pending_log.remove(&(*id, index));
+            }
+        }
+    }
+
     async fn remove(&mut self, id: &ShortId) -> io::Result<Option<()>> {
         self.persistent_storage.remove(id).await
     }
@@ -439,7 +593,11 @@ impl Mailboxes {
     }
 
     fn len(&self) -> usize {
-        self.insert_order.len() + self.pending_v1.len() + self.pending_v2.len()
+        self.insert_order.len()
+            + self.pending_v1.len()
+            + self.pending_v2.len()
+            + self.log_frames_total
+            + self.pending_log.len()
     }
 
     async fn maybe_prune(&mut self) -> io::Result<Duration> {
@@ -463,6 +621,7 @@ impl Mailboxes {
 
         // Prune in flight requests, these can persist in the case of an incomplete session
         self.pending_v2.retain(|_, v| v.receiver.strong_count().unwrap_or(0) > 1);
+        self.pending_log.retain(|_, v| v.receiver.strong_count().unwrap_or(0) > 1);
 
         // Prune any expired mailboxes
         while let Some((created, id)) = self.insert_order.front().cloned() {
@@ -478,17 +637,37 @@ impl Mailboxes {
             }
         }
 
+        // Logs expire as a whole, counted from their first frame
+        while let Some((created, id)) = self.log_insert_order.front().cloned() {
+            if created + self.ttl < now {
+                _ = self.log_insert_order.pop_front();
+                self.log_frames_total -= self.log_frames.remove(&id).unwrap_or(0);
+                if self.log_storage.remove(&id).await?.is_none() {
+                    warn!(
+                        "Log file missing during prune; possible external deletion or disk error"
+                    );
+                } else {
+                    trace!("Pruned old log {id}");
+                }
+            } else {
+                break;
+            }
+        }
+
         Ok(self.next_prune())
     }
 
     fn next_prune(&mut self) -> Duration {
         self.insert_order
             .front()
+            .into_iter()
+            .chain(self.log_insert_order.front())
             .map(|(created, _id)| {
                 self.ttl
                     .checked_sub(created.elapsed().expect("system clock moved back"))
                     .unwrap_or(self.ttl)
             })
+            .min()
             .unwrap_or(self.ttl)
     }
 }
@@ -548,14 +727,16 @@ impl crate::db::SendableError for Error {}
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
     use payjoin::directory::ShortId;
     use tokio::fs;
+    use tokio::io::AsyncWriteExt;
 
     use crate::db::files::DiskStorage;
-    use crate::db::{Db as DbTrait, Error as DbError, FilesDb};
+    use crate::db::{Db as DbTrait, Error as DbError, FilesDb, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
 
     #[tokio::test]
     async fn test_disk_storage_initialization() -> std::io::Result<()> {
@@ -1037,6 +1218,166 @@ mod tests {
         }
 
         assert_all_paths_over_capacity(&db).await;
+
+        Ok(())
+    }
+
+    const TTL: Duration = Duration::from_secs(60 * 60 * 24 * 7);
+
+    fn frame(byte: u8) -> Vec<u8> { vec![byte; LOG_FRAME_BYTES] }
+
+    #[test]
+    fn test_xor_buffer_at_offset() {
+        let storage = DiskStorage { dir: PathBuf::new(), xor: vec![1, 2, 3, 4, 5, 6, 7, 8] };
+        let mut whole = vec![0u8; 20];
+        storage.xor_buffer(&mut whole);
+
+        let mut tail = vec![0u8; 17];
+        storage.xor_buffer_at(&mut tail, 3);
+        assert_eq!(tail, whole[3..], "a buffer at an offset continues the pattern");
+    }
+
+    #[tokio::test]
+    async fn test_log_append_and_read() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+        let id = ShortId([1u8; 8]);
+
+        for byte in 0..3 {
+            db.append_log_frame(&id, frame(byte))
+                .await
+                .expect("appending should succeed")
+                .expect("log should accept the frame");
+        }
+        for byte in 0..3 {
+            let got = db.wait_for_log_frame(&id, byte as usize).await.expect("frame should exist");
+            assert_eq!(*got, frame(byte), "frames should read back in append order");
+        }
+        assert!(
+            matches!(db.wait_for_log_frame(&id, 3).await, Err(DbError::Timeout(_))),
+            "reading past the end should wait and time out"
+        );
+
+        let on_disk = fs::read(dir.path().join("logs").join(id.to_string())).await?;
+        assert_eq!(on_disk.len(), 3 * LOG_FRAME_BYTES, "frames should be stored back to back");
+        assert_ne!(on_disk, [frame(0), frame(1), frame(2)].concat(), "frames should be obfuscated");
+
+        // A v2 mailbox with the same ShortId is a separate, write-once entry
+        assert!(matches!(db.wait_for_v2_payload(&id).await, Err(DbError::Timeout(_))));
+        db.post_v2_payload(&id, b"v2".to_vec()).await.unwrap().expect("v2 post should succeed");
+        assert!(db.post_v2_payload(&id, b"other".to_vec()).await.unwrap().is_none());
+        assert_eq!(&db.wait_for_v2_payload(&id).await.unwrap()[..], b"v2");
+        assert_eq!(*db.wait_for_log_frame(&id, 0).await.unwrap(), frame(0));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_wait() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = FilesDb::init(Duration::from_secs(10), dir.path().to_owned(), TTL).await?;
+        let id = ShortId([1u8; 8]);
+
+        let read_frame = |index| {
+            let db = db.clone();
+            tokio::spawn(async move { db.wait_for_log_frame(&id, index).await })
+        };
+        let (reader0a, reader0b, reader1) = (read_frame(0), read_frame(0), read_frame(1));
+        while db.mailboxes.lock().await.pending_log.len() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
+        db.append_log_frame(&id, frame(0xA)).await.unwrap().expect("first append");
+        assert_eq!(*reader0a.await.unwrap().unwrap(), frame(0xA));
+        assert_eq!(*reader0b.await.unwrap().unwrap(), frame(0xA));
+        assert!(!reader1.is_finished(), "a reader waits for its own frame index");
+
+        db.append_log_frame(&id, frame(0xB)).await.unwrap().expect("second append");
+        assert_eq!(*reader1.await.unwrap().unwrap(), frame(0xB));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_frame_limit() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+        let id = ShortId([1u8; 8]);
+
+        db.append_log_frame(&id, frame(0)).await.unwrap().expect("first append");
+        db.mailboxes.lock().await.log_frames.insert(id, MAX_LOG_FRAMES);
+        assert!(
+            db.append_log_frame(&id, frame(1)).await.unwrap().is_none(),
+            "a full log should reject appends"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_reload() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let id = ShortId([1u8; 8]);
+        {
+            let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+            db.append_log_frame(&id, frame(0)).await.unwrap().expect("first append");
+            db.append_log_frame(&id, frame(1)).await.unwrap().expect("second append");
+        }
+
+        // Simulate an append interrupted partway through a frame
+        let path = dir.path().join("logs").join(id.to_string());
+        let mut file = fs::OpenOptions::new().append(true).open(&path).await?;
+        file.write_all(&[0xFF; 100]).await?;
+        drop(file);
+
+        let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+        assert_eq!(db.mailboxes.lock().await.len(), 2, "only whole frames should be counted");
+        assert_eq!(*db.wait_for_log_frame(&id, 1).await.unwrap(), frame(1));
+        assert!(matches!(db.wait_for_log_frame(&id, 2).await, Err(DbError::Timeout(_))));
+
+        db.append_log_frame(&id, frame(2)).await.unwrap().expect("append after reload");
+        assert_eq!(*db.wait_for_log_frame(&id, 2).await.unwrap(), frame(2));
+        assert_eq!(fs::metadata(&path).await?.len(), 3 * LOG_FRAME_BYTES as u64);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_capacity_and_prune() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = FilesDb::init(
+            Duration::from_millis(2),
+            dir.path().to_owned(),
+            Duration::from_secs(60 * 60 * 24 * 7),
+        )
+        .await?;
+        let ttl = Duration::from_secs(600);
+        {
+            let mut guard = db.mailboxes.lock().await;
+            guard.capacity = 3;
+            guard.ttl = ttl;
+        }
+
+        let id = ShortId([1u8; 8]);
+        for byte in 0..3 {
+            db.append_log_frame(&id, frame(byte)).await.unwrap().expect("append under capacity");
+        }
+        assert!(
+            matches!(db.append_log_frame(&id, frame(3)).await, Err(DbError::OverCapacity)),
+            "every log frame should count against capacity"
+        );
+        assert_all_paths_over_capacity(&db).await;
+
+        {
+            let mut guard = db.mailboxes.lock().await;
+            for (ts, _) in guard.log_insert_order.iter_mut() {
+                *ts -= ttl + Duration::from_secs(1);
+            }
+        }
+        db.prune().await.expect("pruning should not fail");
+        assert_eq!(db.mailboxes.lock().await.len(), 0, "an expired log should free its frames");
+        assert!(!dir.path().join("logs").join(id.to_string()).exists());
+        assert!(matches!(db.wait_for_log_frame(&id, 0).await, Err(DbError::Timeout(_))));
 
         Ok(())
     }

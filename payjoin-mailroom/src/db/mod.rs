@@ -10,6 +10,15 @@ use tower::{Service, ServiceExt};
 pub mod files;
 use crate::metrics::{MetricsService, PayjoinVersion};
 
+/// Size of every frame in an append-only log: the padded length of a BIP 77
+/// HPKE message. Fixed-size frames keep message lengths uniform and make
+/// frame `i` start at byte `i * LOG_FRAME_BYTES`.
+pub const LOG_FRAME_BYTES: usize = 7168;
+
+/// The most frames a single append-only log holds before appends are
+/// rejected, about 7 MiB per log.
+pub const MAX_LOG_FRAMES: usize = 1024;
+
 pub trait SendableError:
     std::error::Error + std::marker::Send + std::marker::Sync + std::convert::Into<anyhow::Error>
 {
@@ -85,6 +94,22 @@ pub trait Db: Clone + Send + Sync + 'static {
         mailbox_id: &ShortId,
         data: Vec<u8>,
     ) -> impl Future<Output = Result<Arc<Vec<u8>>, Error<Self::OperationalError>>> + Send;
+
+    /// Append a frame to an append-only log, creating the log with its first
+    /// frame. Returns `None` if the log already holds [`MAX_LOG_FRAMES`].
+    fn append_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        frame: Vec<u8>,
+    ) -> impl Future<Output = Result<Option<()>, Error<Self::OperationalError>>> + Send;
+
+    /// Read frame `index` of an append-only log, waiting if it hasn't been
+    /// appended yet.
+    fn wait_for_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        index: usize,
+    ) -> impl Future<Output = Result<Arc<Vec<u8>>, Error<Self::OperationalError>>> + Send;
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +118,8 @@ pub enum DbRequest {
     WaitForV2Payload { mailbox_id: ShortId },
     PostV1Response { mailbox_id: ShortId, payload: Vec<u8> },
     PostV1RequestAndWaitForResponse { mailbox_id: ShortId, payload: Vec<u8> },
+    AppendLogFrame { mailbox_id: ShortId, frame: Vec<u8> },
+    WaitForLogFrame { mailbox_id: ShortId, index: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +128,8 @@ pub enum DbResponse {
     WaitForV2Payload(Arc<Vec<u8>>),
     PostV1Response(()),
     PostV1RequestAndWaitForResponse(Arc<Vec<u8>>),
+    AppendLogFrame(Option<()>),
+    WaitForLogFrame(Arc<Vec<u8>>),
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +171,11 @@ impl Service<DbRequest> for FilesDbService {
                     Ok(DbResponse::PostV1RequestAndWaitForResponse(
                         db.post_v1_request_and_wait_for_response(&mailbox_id, payload).await?,
                     )),
+                DbRequest::AppendLogFrame { mailbox_id, frame } =>
+                    Ok(DbResponse::AppendLogFrame(db.append_log_frame(&mailbox_id, frame).await?)),
+                DbRequest::WaitForLogFrame { mailbox_id, index } => Ok(
+                    DbResponse::WaitForLogFrame(db.wait_for_log_frame(&mailbox_id, index).await?),
+                ),
             }
         })
     }
@@ -233,6 +267,38 @@ impl Db for DbServiceAdapter {
             _ => Err(Self::invalid_response("post_v1_request_and_wait_for_response")),
         }
     }
+
+    async fn append_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        frame: Vec<u8>,
+    ) -> Result<Option<()>, Error<Self::OperationalError>> {
+        let response = self
+            .inner
+            .clone()
+            .oneshot(DbRequest::AppendLogFrame { mailbox_id: *mailbox_id, frame })
+            .await?;
+        match response {
+            DbResponse::AppendLogFrame(result) => Ok(result),
+            _ => Err(Self::invalid_response("append_log_frame")),
+        }
+    }
+
+    async fn wait_for_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        index: usize,
+    ) -> Result<Arc<Vec<u8>>, Error<Self::OperationalError>> {
+        let response = self
+            .inner
+            .clone()
+            .oneshot(DbRequest::WaitForLogFrame { mailbox_id: *mailbox_id, index })
+            .await?;
+        match response {
+            DbResponse::WaitForLogFrame(result) => Ok(result),
+            _ => Err(Self::invalid_response("wait_for_log_frame")),
+        }
+    }
 }
 
 pub use files::FilesDb;
@@ -286,5 +352,21 @@ impl<D: Db> Db for MetricsDb<D> {
         let result = self.inner.post_v1_request_and_wait_for_response(mailbox_id, data).await?;
         self.metrics.record_db_entry(PayjoinVersion::One);
         Ok(result)
+    }
+
+    async fn append_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        frame: Vec<u8>,
+    ) -> Result<Option<()>, Error<Self::OperationalError>> {
+        self.inner.append_log_frame(mailbox_id, frame).await
+    }
+
+    async fn wait_for_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        index: usize,
+    ) -> Result<Arc<Vec<u8>>, Error<Self::OperationalError>> {
+        self.inner.wait_for_log_frame(mailbox_id, index).await
     }
 }
