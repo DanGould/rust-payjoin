@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
 use tracing::{error, warn};
 
-use crate::db::{Db, Error as DbError, SendableError};
+use crate::db::{Db, Error as DbError, SendableError, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
 use crate::ohttp_relay::SentinelTag;
 
 const CHACHA20_POLY1305_NONCE_LEN: usize = 32; // chacha20poly1305 n_k
@@ -254,6 +254,8 @@ impl<D: Db> Service<D> {
             (Method::POST, &["", id]) => self.post_mailbox(id, body).await,
             (Method::GET, &["", id]) => self.get_mailbox(id).await,
             (Method::PUT, &["", id]) if self.v1.is_some() => self.put_payjoin_v1(id, body).await,
+            (Method::POST, &["", "log", id]) => self.append_log(id, body).await,
+            (Method::GET, &["", "log", id, index]) => self.get_log_frame(id, index).await,
             _ => Ok(not_found()),
         }
     }
@@ -279,6 +281,52 @@ impl<D: Db> Service<D> {
         let id = ShortId::from_str(id)?;
         let timeout_response = Response::builder().status(StatusCode::ACCEPTED).body(empty())?;
         handle_peek(self.db.wait_for_v2_payload(&id).await, timeout_response)
+    }
+
+    /// `POST /log/{id}`: append one frame to an append-only log shared by any
+    /// number of writers.
+    ///
+    /// The body must be exactly [`LOG_FRAME_BYTES`]. A log is a separate
+    /// resource from the v2 mailbox with the same id and accepts at most
+    /// [`MAX_LOG_FRAMES`] frames, after which appends get `413`.
+    async fn append_log(&self, id: &str, body: Body) -> Result<Response<Body>, HandlerError> {
+        let id = ShortId::from_str(id)?;
+        let frame = body
+            .collect()
+            .await
+            .map_err(|e| HandlerError::InternalServerError(e.into()))?
+            .to_bytes();
+        if frame.len() != LOG_FRAME_BYTES {
+            return Err(HandlerError::BadRequest(anyhow::anyhow!(
+                "log frames must be exactly {LOG_FRAME_BYTES} bytes"
+            )));
+        }
+        match self.db.append_log_frame(&id, frame.into()).await {
+            Ok(Some(())) => Ok(Response::builder().status(StatusCode::OK).body(empty())?),
+            Ok(None) => Err(HandlerError::PayloadTooLarge),
+            Err(DbError::OverCapacity) => Err(HandlerError::ServiceUnavailable(
+                anyhow::Error::msg("mailbox storage at capacity"),
+            )),
+            Err(e) => Err(HandlerError::InternalServerError(e.into())),
+        }
+    }
+
+    /// `GET /log/{id}/{index}`: read frame `index` of an append-only log.
+    ///
+    /// Each response carries one frame so it fits the same fixed-size OHTTP
+    /// response as a v2 GET. A frame that hasn't been appended yet is long
+    /// polled like a v2 mailbox, with `202` if the wait times out.
+    async fn get_log_frame(&self, id: &str, index: &str) -> Result<Response<Body>, HandlerError> {
+        let id = ShortId::from_str(id)?;
+        let index = match index.parse::<usize>() {
+            Ok(index) if index < MAX_LOG_FRAMES => index,
+            _ =>
+                return Err(HandlerError::BadRequest(anyhow::anyhow!(
+                    "log frame index must be below {MAX_LOG_FRAMES}"
+                ))),
+        };
+        let timeout_response = Response::builder().status(StatusCode::ACCEPTED).body(empty())?;
+        handle_peek(self.db.wait_for_log_frame(&id, index).await, timeout_response)
     }
 
     /// Screen a V1 PSBT body against the address blocklist.
@@ -781,6 +829,51 @@ mod tests {
             encode_bhttp_response(too_large).await,
             Err(HandlerError::InternalServerError(_))
         ));
+    }
+
+    // Append-only logs
+
+    #[tokio::test]
+    async fn log_frames_round_trip_through_gateway() {
+        let mut svc = test_service(None).await;
+        let id = valid_short_id_path();
+        let frames: Vec<_> = (0..3).map(|byte| vec![byte; LOG_FRAME_BYTES]).collect();
+
+        for frame in &frames {
+            let (status, _) = through_gateway(&mut svc, "POST", &format!("/log/{id}"), frame).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        for (index, frame) in frames.iter().enumerate() {
+            let (status, content) =
+                through_gateway(&mut svc, "GET", &format!("/log/{id}/{index}"), &[]).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(&content, frame);
+        }
+
+        let (status, content) =
+            through_gateway(&mut svc, "GET", &format!("/log/{id}/3"), &[]).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "a frame not yet appended should time out");
+        assert!(content.is_empty());
+
+        let (status, _) = through_gateway(&mut svc, "GET", &format!("/{id}"), &[]).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "the v2 mailbox with the same id stays empty");
+    }
+
+    #[tokio::test]
+    async fn log_rejects_malformed_requests() {
+        let mut svc = test_service(None).await;
+        let id = valid_short_id_path();
+
+        for len in [0, LOG_FRAME_BYTES - 1, LOG_FRAME_BYTES + 1] {
+            let (status, _) =
+                through_gateway(&mut svc, "POST", &format!("/log/{id}"), &vec![0; len]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "a {len} byte frame should be rejected");
+        }
+        for index in ["x", "-1", &MAX_LOG_FRAMES.to_string()] {
+            let (status, _) =
+                through_gateway(&mut svc, "GET", &format!("/log/{id}/{index}"), &[]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "index {index:?} should be rejected");
+        }
     }
 
     #[tokio::test]

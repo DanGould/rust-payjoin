@@ -662,6 +662,179 @@ mod tests {
         );
     }
 
+    /// Sends one request to the directory through the relay the way a payjoin
+    /// client does and returns the status and content of the decapsulated
+    /// response.
+    async fn ohttp_request(
+        client: &reqwest::Client,
+        relay_url: &str,
+        directory_url: &str,
+        key_config: &ohttp::KeyConfig,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> (axum::http::StatusCode, Vec<u8>) {
+        use payjoin::directory::ENCAPSULATED_MESSAGE_BYTES;
+        // HPKE encapsulated key, AEAD tag and OHTTP request header
+        const PADDED_BHTTP_REQ_BYTES: usize = ENCAPSULATED_MESSAGE_BYTES - (65 + 16 + 7);
+
+        let mut message = bhttp::Message::request(
+            method.as_bytes().to_vec(),
+            b"https".to_vec(),
+            directory_url.trim_start_matches("https://").as_bytes().to_vec(),
+            path.as_bytes().to_vec(),
+        );
+        message.write_content(body);
+        let mut bhttp_req = Vec::new();
+        message.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_req).unwrap();
+        bhttp_req.resize(PADDED_BHTTP_REQ_BYTES, 0);
+        let (encapsulated, response_ctx) =
+            ohttp::ClientRequest::from_config(key_config).unwrap().encapsulate(&bhttp_req).unwrap();
+
+        let response = client
+            .post(format!("{relay_url}/{directory_url}"))
+            .header("Content-Type", "message/ohttp-req")
+            .body(encapsulated)
+            .send()
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let encapsulated = response.bytes().await.unwrap();
+        assert_eq!(encapsulated.len(), ENCAPSULATED_MESSAGE_BYTES);
+
+        let bhttp_res = response_ctx.decapsulate(&encapsulated).unwrap();
+        let message = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(bhttp_res)).unwrap();
+        let status = message.control().status().unwrap().code();
+        (axum::http::StatusCode::from_u16(status).unwrap(), message.content().to_vec())
+    }
+
+    #[tokio::test]
+    async fn append_only_log_with_many_writers_through_relay() {
+        use axum::http::StatusCode;
+
+        use crate::db::LOG_FRAME_BYTES;
+
+        const WRITERS: u8 = 3;
+        const FRAMES_PER_WRITER: u8 = 2;
+        const TOTAL_FRAMES: usize = (WRITERS * FRAMES_PER_WRITER) as usize;
+
+        let cert = local_cert_key();
+        let cert_der = cert.cert.der().to_vec();
+        let key_der = cert.signing_key.serialize_der();
+        let (relay_port, _relay_handle, _relay_tempdir) =
+            start_service(cert_der.clone(), key_der.clone()).await;
+        let (directory_port, _directory_handle, _directory_tempdir) =
+            start_service(cert_der.clone(), key_der).await;
+
+        let client = Arc::new(http_agent(cert_der).unwrap());
+        let relay_url = format!("https://localhost:{relay_port}");
+        let directory_url = format!("https://localhost:{directory_port}");
+        wait_for_service_ready(&relay_url, client.clone()).await.unwrap();
+        wait_for_service_ready(&directory_url, client.clone()).await.unwrap();
+
+        let key_config = {
+            let keys = client
+                .get(format!("{directory_url}/.well-known/ohttp-gateway"))
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            ohttp::KeyConfig::decode(&keys).unwrap()
+        };
+        let log_path = format!("/log/{}", payjoin::directory::ShortId([7u8; 8]));
+        let frame = |writer: u8, seq: u8| vec![writer << 4 | seq; LOG_FRAME_BYTES];
+
+        // The reader is spawned before any append, so it may long-poll an empty log
+        let reader = {
+            let (client, relay_url, directory_url, key_config, log_path) = (
+                client.clone(),
+                relay_url.clone(),
+                directory_url.clone(),
+                key_config.clone(),
+                log_path.clone(),
+            );
+            tokio::spawn(async move {
+                let mut frames = Vec::new();
+                while frames.len() < TOTAL_FRAMES {
+                    let path = format!("{log_path}/{}", frames.len());
+                    match ohttp_request(
+                        &client,
+                        &relay_url,
+                        &directory_url,
+                        &key_config,
+                        "GET",
+                        &path,
+                        &[],
+                    )
+                    .await
+                    {
+                        (StatusCode::OK, frame) => frames.push(frame),
+                        (StatusCode::ACCEPTED, _) => continue,
+                        (status, _) => panic!("unexpected status {status} reading {path}"),
+                    }
+                }
+                frames
+            })
+        };
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|writer| {
+                let (client, relay_url, directory_url, key_config, log_path) = (
+                    client.clone(),
+                    relay_url.clone(),
+                    directory_url.clone(),
+                    key_config.clone(),
+                    log_path.clone(),
+                );
+                tokio::spawn(async move {
+                    for seq in 0..FRAMES_PER_WRITER {
+                        let (status, _) = ohttp_request(
+                            &client,
+                            &relay_url,
+                            &directory_url,
+                            &key_config,
+                            "POST",
+                            &log_path,
+                            &frame(writer, seq),
+                        )
+                        .await;
+                        assert_eq!(status, StatusCode::OK, "writer {writer} append {seq}");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.await.unwrap();
+        }
+
+        let frames = tokio::time::timeout(Duration::from_secs(30), reader)
+            .await
+            .expect("reader should see every frame")
+            .unwrap();
+        for writer in 0..WRITERS {
+            let from_writer: Vec<_> =
+                frames.iter().filter(|frame| frame[0] >> 4 == writer).cloned().collect();
+            let expected: Vec<_> = (0..FRAMES_PER_WRITER).map(|seq| frame(writer, seq)).collect();
+            assert_eq!(from_writer, expected, "writer {writer}'s frames, in the order sent");
+        }
+
+        // No frame past the end: the read waits out the directory timeout
+        let (status, content) = ohttp_request(
+            &client,
+            &relay_url,
+            &directory_url,
+            &key_config,
+            "GET",
+            &format!("{log_path}/{TOTAL_FRAMES}"),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(content.is_empty());
+    }
+
     #[tokio::test]
     async fn middleware_records_metrics() {
         use axum::body::Body;
