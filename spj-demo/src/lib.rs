@@ -8,6 +8,7 @@ pub mod contact;
 pub mod derive;
 pub mod net;
 pub mod regtest;
+pub mod sender;
 pub mod sp_address;
 pub mod uri;
 pub mod video;
