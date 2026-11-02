@@ -8,6 +8,7 @@
 //! reference would produce one return `None` or an error instead.
 
 pub mod bip352;
+pub mod carriage;
 pub mod dleq;
 
 use bitcoin::hashes::{sha256, Hash, HashEngine};

@@ -1,0 +1,554 @@
+{
+  "module": "per_input_proofs",
+  "summary": "BIP 375 per-input shares and proofs, P2TR sender rule, coin selection, full RBF",
+  "reference_code": "bitcoin/bips@927b6de9915c9262615a6399de51b200f81e5aa4 bip-0352/reference.py, bip-0374/reference.py",
+  "conventions": {
+    "txid": "display order (reverse of serialized hash), as in BIP 352 vectors",
+    "outputs": "x-only hex",
+    "shares": "compressed points"
+  },
+  "scenarios": [
+    {
+      "id": "S26a",
+      "title": "Proof form: BIP 375 per-input share a_i*B_scan + BIP 374 DLEQ made with that input's key",
+      "bip375_fields": {
+        "PSBT_GLOBAL_SP_ECDH_SHARE": "0x07",
+        "PSBT_GLOBAL_SP_DLEQ": "0x08",
+        "PSBT_IN_SP_ECDH_SHARE": "0x1d",
+        "PSBT_IN_SP_DLEQ": "0x1e",
+        "PSBT_OUT_SP_V0_INFO": "0x09",
+        "PSBT_OUT_SP_V0_LABEL": "0x0a"
+      },
+      "receiver_inputs": [
+        {
+          "label": "bob-tr-odd",
+          "owner": "receiver",
+          "kind": "p2tr",
+          "txid": "949c61e746f7a39a86460225a6fd0dc7d379979fc9e0e49147abe20518e053a0",
+          "vout": 0,
+          "scriptPubKey": "512065e197e96bf0e91a68f62107b6a3634683724361752d4eb5c4c21dad2dccb705",
+          "txinwitness_stack": [
+            "ea53cf5cd345534210a7955da6c88fa7902d5476b6d20bc6849d167d20bbc580ea53cf5cd345534210a7955da6c88fa7902d5476b6d20bc6849d167d20bbc580"
+          ],
+          "value_sat": 25000,
+          "bip352_pubkey": "0265e197e96bf0e91a68f62107b6a3634683724361752d4eb5c4c21dad2dccb705",
+          "private_key": "0f2566427c4205ef9edadfab61338e7edcbaa5c0a94e2b77edd618ae50139bf5"
+        },
+        {
+          "label": "bob-tr-even",
+          "owner": "receiver",
+          "kind": "p2tr",
+          "txid": "a0e4bc0b748e93b4ebfde0a70604e5e01db22486c108dfb991f9b4a31d286aa4",
+          "vout": 0,
+          "scriptPubKey": "51204e153c05036cc47f94c4b7fbd7452410cc63aceaa5bf3457bab3dd697f3b604f",
+          "txinwitness_stack": [
+            "9ac93ba7ff950006f60083431bbcd8a60f8cf63d42d2ee230531639a7461e3049ac93ba7ff950006f60083431bbcd8a60f8cf63d42d2ee230531639a7461e304"
+          ],
+          "value_sat": 25000,
+          "bip352_pubkey": "024e153c05036cc47f94c4b7fbd7452410cc63aceaa5bf3457bab3dd697f3b604f",
+          "private_key": "1c77b7ed070f167ef6605d81b3fa20c9397f6f6cb767747133144c55e6ff1ab7"
+        }
+      ],
+      "shares": {
+        "bob-tr-odd": "039f4abe7a03ef066dd9d8c8ce5212c340429df436d490dc01abb069502541363a",
+        "bob-tr-even": "039111f8517b60a7cb7d2a5ec3209e846d58693b9b036f8b02f4c66b174ed79b85"
+      },
+      "proofs": {
+        "bob-tr-odd": "b00ceab5625ebbadc99177f557cb24613755b739ccfd7d0341c41ca7bc13055d29ce9b6651690a99e26537f0cee893712a04e94ae50d2eca2c38701058e1cfba",
+        "bob-tr-even": "07aa92fc4ea75c1e7c9e99a7c7c3ffe45b6a7c0c3dd0b39318fdb184178ec27c596713dcfccf97d5146484681efaef773f55ee7cc07b8c01b6593ec5824e4e3f"
+      },
+      "checks": [
+        {
+          "assert": "each share is BIP 375's C = a_i*B_scan (BIP 352 parity applied to the odd-y P2TR key)",
+          "pass": true
+        },
+        {
+          "assert": "BIP 375 VerifyProof(A = input key, B = B_scan, C) accepts each proof",
+          "pass": true
+        },
+        {
+          "assert": "the shares sum to the aggregate share b_scan*A_r (S17, S18): same secret, so every derivation result carries over",
+          "pass": true
+        },
+        {
+          "assert": "the aggregate share's b_scan-witness proof is not a BIP 375 proof (the statement changed, not just the label)",
+          "pass": true
+        },
+        {
+          "assert": "a 'global' share over the receiver's inputs fails BIP 375's 0x07/0x08 check (A_n spans every eligible input)",
+          "pass": true
+        },
+        {
+          "assert": "sender verifies, derives the output itself, applies the amount rule: accepted",
+          "pass": true
+        },
+        {
+          "assert": "the sender's derived output is the receiver's re-derivation, and Bob's restore finds it",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S26b",
+      "title": "PSBTv0 carriage: BIP 375's per-input layout in PSBT_IN_PROPRIETARY, with BIP 174 length prefixes",
+      "share_key": "27fc0373706a1d034e35eee3336cc2edc2ad3d6d1c5c54b25782592524e8b42ceb650dbc074b208d",
+      "proof_key": "27fc0373706a1e034e35eee3336cc2edc2ad3d6d1c5c54b25782592524e8b42ceb650dbc074b208d",
+      "input_map_pairs": "27fc0373706a1d034e35eee3336cc2edc2ad3d6d1c5c54b25782592524e8b42ceb650dbc074b208d2102583869d304e98091a0a1c0807471a14e4ec07339f48e0465c7ad686984ce353127fc0373706a1e034e35eee3336cc2edc2ad3d6d1c5c54b25782592524e8b42ceb650dbc074b208d401189c89f562c292bf99fdf3baf000ec48238cc0e20f8569dcf4437d4300d71e675e148e9a67af31705958b6173be39f9402750c5379670b9ecc5330918f318bc",
+      "note": "BIP 375 lists PSBT v0 under 'Versions Requiring Exclusion' for 0x1d/0x1e; BIP 174 reserves 0xFC for proprietary use",
+      "checks": [
+        {
+          "assert": "share key = 27 fc 03 'spj' 1d <B_scan>: 40 bytes incl. the length byte 0x27 (39)",
+          "pass": true
+        },
+        {
+          "assert": "proof key identical but subtype 1e; values are 21||share (34 bytes) and 40||proof (65 bytes)",
+          "pass": true
+        },
+        {
+          "assert": "per receiver input: 179 bytes raw, 240 in base64; ten inputs fit BIP 77's 7,088-byte proposal plaintext many times over",
+          "pass": true
+        },
+        {
+          "assert": "round-trip: the sender parses both pairs and accepts",
+          "pass": true
+        },
+        {
+          "assert": "PDK today strips proprietary pairs on both sides, so the sender sees no share: rejected: no share for eligible input(s) ['bob-tr'] -> Original",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S26c",
+      "title": "Mailbox-key thief: it can complete a payjoin that pays Bob in full; it cannot redirect, shrink or forge",
+      "can": "read Originals, refuse service, complete payjoins that pay the receiver in full",
+      "cannot": "redirect, shrink, forge a share for the receiver's coins",
+      "checks": [
+        {
+          "assert": "thief contributes its own coin and takes it back: accepted; Bob's restore finds the full 50,000",
+          "pass": true
+        },
+        {
+          "assert": "redirect to Mallory: the derived output is missing, rejected",
+          "pass": true
+        },
+        {
+          "assert": "shrink Bob's output by 1 sat: amount rule, rejected",
+          "pass": true
+        },
+        {
+          "assert": "a share for Bob's coin made without Bob's input key fails the proof against that input's key",
+          "pass": true
+        },
+        {
+          "assert": "contributing its coin without a proof: rejected (coverage)",
+          "pass": true
+        },
+        {
+          "assert": "an ineligible-only contribution needs no proof, and the output the sender derives still pays Bob in full",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S26d",
+      "title": "Per-input proofs avoid the ePrint 2026/2037 burn class only with mandatory coverage; this sender check has it",
+      "remaining": "the input-key lie (a false prevout): S27a",
+      "rule": "every eligible input the sender does not own needs a verified share; the sender decides eligibility from the prevouts and hashes every outpoint",
+      "checks": [
+        {
+          "assert": "sender that sums the shares present derives an output Bob's restore misses (the burn class)",
+          "pass": true
+        },
+        {
+          "assert": "sender check: rejected: no share for eligible input(s) ['bob-b'] -> Original, which Bob's restore finds",
+          "pass": true
+        },
+        {
+          "assert": "a malformed share with no proof check also burns under the naive sender",
+          "pass": true
+        },
+        {
+          "assert": "sender check: the malformed share fails its BIP 374 proof",
+          "pass": true
+        },
+        {
+          "assert": "share made without BIP 352's P2TR negation: proof fails against the input key (a liveness bug, never a burn)",
+          "pass": true
+        },
+        {
+          "assert": "an ineligible receiver input needs no share; the sender still hashes its outpoint (S6g), so the output is found",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S26e",
+      "title": "What the per-input share tells the sender, under BIP 78 coin choice",
+      "note": "the leak is the same for any BIP 375 co-signer; it is bounded to transactions whose eligible inputs are coins this sender created or was shown",
+      "checks": [
+        {
+          "assert": "coin c is the output this sender paid Bob earlier",
+          "pass": true
+        },
+        {
+          "assert": "from C_c and t_c the sender extracts the constant b_scan*B_spend",
+          "pass": true
+        },
+        {
+          "assert": "then it finds Bob's unlabelled output in a later solo spend of any coin this sender made",
+          "pass": true
+        },
+        {
+          "assert": "Bob's change on label 0 stays hidden in this one spend (the label tweak needs b_scan; S26f: two such spends reveal it)",
+          "pass": true
+        },
+        {
+          "assert": "a coin it did not create gives only that coin's share, not b_scan*B_spend",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S26f",
+      "title": "Shares add up: a prober holding the shares of coins it was shown computes the shared secret of any later spend made only of those coins; two such spends with label-0 change give it the label-0 point, after which it finds that change in later such spends",
+      "shares": {
+        "1": "032dc4cbe153f1eaa079b13e525a901bb92ddb4e8a141af9922d8e5dde655aea37",
+        "2": "03cee891683c210835f5d67982a8c765ebdd3d995f2df23b4ff6c25cca47de3d42",
+        "3": "03b6fac3dc6911b6fdc99d880e5c7584b099a7379daa23c022b1f942c17ed08978",
+        "4": "031b5a888e31bf129054b64c3e0f806200f595e8c5507b7e06cae9445683940bd3"
+      },
+      "label0_point": "030b53ee5c63fc7459a2d0b2ee83dddf7d2c1bbdfb3e396389b5a237ee7a6e75f4",
+      "tx1": {
+        "ins": [
+          {
+            "label": "s26f/bob-d1",
+            "owner": "receiver",
+            "kind": "p2tr",
+            "txid": "9048335a4d5a0bad7fe9a39890ed792b373f76d2658f695e59a72b952206e4a1",
+            "vout": 0,
+            "scriptPubKey": "5120182fcc82ad58923c4880a8321d740e65489a9a471afc8c74d53e4b0426e86d06",
+            "txinwitness_stack": [
+              "ad8b520acd9d5088bcaabdeb87d067a95f013633c8aa496117d10e822f572ebfad8b520acd9d5088bcaabdeb87d067a95f013633c8aa496117d10e822f572ebf"
+            ],
+            "value_sat": 25000,
+            "bip352_pubkey": "02182fcc82ad58923c4880a8321d740e65489a9a471afc8c74d53e4b0426e86d06",
+            "private_key": "83229b0f541a6aa5e75c1d82c641d2a73959726510f697ece46892d8f39961ac"
+          }
+        ],
+        "outputs": [
+          "bd97511cbe7d7be22bcd9e6b6e5acbd470ae5e06d3d46e65d9b6b44d799f3be5",
+          "ae4cac3ae73d00f01f660efacca0373ad2f9ff822213f8c13f5fdb5c146f837d"
+        ]
+      },
+      "tx2": {
+        "ins": [
+          {
+            "label": "s26f/bob-d2",
+            "owner": "receiver",
+            "kind": "p2tr",
+            "txid": "b4dc1b46043c15f312484e3c8ca6d4d78b44ae67346412219f15bd4f9ddc4ea2",
+            "vout": 0,
+            "scriptPubKey": "512020e7679ae79bbc2b9bae6a51133abba008af03bfec8c14c544b4f1683f56ed7f",
+            "txinwitness_stack": [
+              "6e6af69ba4b2d7a5081bf4b890ef12ba51d1fdd45ed460ecf711474ee9d57b5d6e6af69ba4b2d7a5081bf4b890ef12ba51d1fdd45ed460ecf711474ee9d57b5d"
+            ],
+            "value_sat": 25000,
+            "bip352_pubkey": "0220e7679ae79bbc2b9bae6a51133abba008af03bfec8c14c544b4f1683f56ed7f",
+            "private_key": "acf3dc8e9de4807741f03a1085ee72221762950cd05db9e4486b56e47efe1346"
+          }
+        ],
+        "outputs": [
+          "6188e8e831ad1bfa0907517d5be9dfbd4afdf5f2eba51339f334f99617e85638",
+          "efb49a016995e30473378470749de2119657e7fb3716f71f3ab959f6c718c494"
+        ]
+      },
+      "note": "a coin-adding receiver's mitigation: spend a shown coin only in a payjoin, together with a coin it has not shown, or with non-SP change",
+      "checks": [
+        {
+          "assert": "each probe session hands the prober one coin's share C_i = b_scan*A_i with a valid proof; it never sees b_scan",
+          "pass": true
+        },
+        {
+          "assert": "one solo spend of a shown coin leaves the label-0 point among 4 candidates",
+          "pass": true
+        },
+        {
+          "assert": "two solo spends, each paying label-0 change: the candidate sets meet in exactly the label-0 point B_spend + L_0*G",
+          "pass": true
+        },
+        {
+          "assert": "a later spend of two shown coins: from C_3 + C_4 alone the prober finds the receiver's unlabelled output (k=0) and its label-0 change (k=1)",
+          "pass": true
+        },
+        {
+          "assert": "the receiver's own scan agrees that those outputs are its own",
+          "pass": true
+        },
+        {
+          "assert": "a spend that includes a coin the prober was not shown: its known shares give the wrong secret, the change stays hidden",
+          "pass": true
+        },
+        {
+          "assert": "one hop only: the change coin's share needs b_scan*B_0, which no probe reveals",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S27a",
+      "title": "P2TR sender rule: required for contact strings; one-time invoices allow v0 senders, and the residual is a fee-cost burn, never a redirect",
+      "residual": "one-time invoice, sender without a P2TR input: a session-key thief can burn that one payment for a fee; it cannot redirect (plain BIP 77: it could)",
+      "checks": [
+        {
+          "assert": "contact string, v0-only sender: contact string, no own P2TR input: broadcast the Original",
+          "pass": true
+        },
+        {
+          "assert": "one-time invoice, v0-only sender: the lie passes every check (valid proof for the described key)",
+          "pass": true
+        },
+        {
+          "assert": "BIP 143 digests ignore the other input's prevout, so the real transaction is valid",
+          "pass": true
+        },
+        {
+          "assert": "residual: Bob's restore misses the output, so that one payment is burned",
+          "pass": true
+        },
+        {
+          "assert": "the thief takes its coin back in its own output and pays 300 sat (a fee) to burn it",
+          "pass": true
+        },
+        {
+          "assert": "one-time mode with BIP 77 trust (substitution allowed) lets the same thief redirect the payment",
+          "pass": true
+        },
+        {
+          "assert": "with the proof required, the same redirect is rejected on the one-time invoice too",
+          "pass": true
+        },
+        {
+          "assert": "sender with a P2TR input: checks pass, it signs, and its BIP 341 signature fails against the real prevout",
+          "pass": true
+        },
+        {
+          "assert": "...so the payjoin never confirms and the sender broadcasts the Original, which Bob finds",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S27b",
+      "title": "No marker carries security: every mode requires the proof; unproven re-derivation only behind a dev flag",
+      "modes": {
+        "bitcoin:bc1pexample?amount=0.0005&sp=sp1qexample&pj=HTTPS://PAYJO.IN/ABCDEFGH%23EX1EXAMPLE-OH1QEXAMPLE-RK1QEXAMPLE": "one-time (proof required)",
+        "bitcoin:?sp=sp1qexample&pjv2=HTTPS://PAYJO.IN/ABCDEFGH%23OH1QEXAMPLE-RK1QEXAMPLE": "contact (proof required, own P2TR input)",
+        "bitcoin:?sp=sp1qexample&pjv2=HTTPS://PAYJO.IN/ABCDEFGH%23EX1QYPQXPQ9-OH1QEXAMPLE-RK1QEXAMPLE": "contact (proof required, own P2TR input)"
+      },
+      "checks": [
+        {
+          "assert": "one-time invoice: one-time (proof required)",
+          "pass": true
+        },
+        {
+          "assert": "contact string: contact (proof required, own P2TR input)",
+          "pass": true
+        },
+        {
+          "assert": "contact string carrying EX1: contact (proof required, own P2TR input) (S18a's pjv2 sender mode read it as BIP 77 trust)",
+          "pass": true
+        },
+        {
+          "assert": "an invoice the sender saves to pay again is treated as a contact",
+          "pass": true
+        },
+        {
+          "assert": "RK_c thief's substitution to Mallory is rejected whatever the mode (the EX1 redirect is gone)",
+          "pass": true
+        },
+        {
+          "assert": "receiver adds an eligible input without shares: rejected: no share for eligible input(s) ['bob-tr'] -> Original (today's behaviour)",
+          "pass": true
+        },
+        {
+          "assert": "with the dev flag on, the same thief's redirect is accepted (dev flag, unproven: ok): the reason default-on waits for proofs",
+          "pass": true
+        },
+        {
+          "assert": "a receiver without proof support adds nothing; the sender signs the Original's outputs as they are",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S28a",
+      "title": "Without a mailbox handoff every payment on a contact string shares one mailbox id; the directory's candidate sets",
+      "candidates": {
+        "filter 0.05": {
+          "mean_candidates": 2.8,
+          "one_event_unique": 0.485,
+          "two_linked_unique": 1.0,
+          "two_unlinked_both_unique": 0.233
+        },
+        "filter 0.2": {
+          "mean_candidates": 11.7,
+          "one_event_unique": 0.153,
+          "two_linked_unique": 0.998,
+          "two_unlinked_both_unique": 0.025
+        },
+        "filter 0.5": {
+          "mean_candidates": 29.8,
+          "one_event_unique": 0.059,
+          "two_linked_unique": 0.984,
+          "two_unlinked_both_unique": 0.004
+        }
+      },
+      "assumed": "candidate counts and q as in S14a",
+      "checks": [
+        {
+          "assert": "one payment alone: ~12 candidate txs (3 to 30 across filters), pinned uniquely 15% of the time",
+          "pass": true
+        },
+        {
+          "assert": "two payments on the same mailbox that are linked on chain: pinned 99.8%",
+          "pass": true
+        },
+        {
+          "assert": "two payments with no chain link: both pinned only 2.5% (the mailbox id groups them; it does not pin them)",
+          "pass": true
+        },
+        {
+          "assert": "without a handoff all 12 payments of one contact share one id: the directory always learns their count and timing",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S29a",
+      "title": "Coin selection is payjoin's open problem: re-offer, chain or fresh; each gives up one property",
+      "options": {
+        "re-offer (BIP 78)": {
+          "probed_coin_in_next_payjoin": 0.827,
+          "coins_shown_to_20_probes": 4,
+          "payjoins_on_own_earlier_output": 0.042,
+          "payjoins_of_240": 240
+        },
+        "chain": {
+          "probed_coin_in_next_payjoin": 0.0,
+          "coins_shown_to_20_probes": 0,
+          "payjoins_on_own_earlier_output": 1.0,
+          "payjoins_of_240": 220
+        },
+        "fresh": {
+          "probed_coin_in_next_payjoin": 0.0,
+          "coins_shown_to_20_probes": 20,
+          "payjoins_on_own_earlier_output": 0.0,
+          "payjoins_of_240": 30
+        }
+      },
+      "checks": [
+        {
+          "assert": "re-offer: probed coin is the next payjoin's input 83%; 20 probes see 4 coins; 4% of payjoins chain a contact's own coins",
+          "pass": true
+        },
+        {
+          "assert": "chain: probed coin in the next payjoin 0%, probes see 0 new coins, but 100% of payjoins spend that contact's earlier output (an on-chain thread)",
+          "pass": true
+        },
+        {
+          "assert": "fresh: probed coin in the next payjoin 0%, no chaining, but 20 probes see 20 coins and coins run out (30 payjoins of 240)",
+          "pass": true
+        },
+        {
+          "assert": "no option keeps all three properties",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S29b",
+      "title": "Unspent check: receivers whose invoices or strings an attacker can mint MUST check; interactive ones may skip and limit per string",
+      "rule": "BIP 78: non-interactive receivers need to verify the transaction; interactive ones limit Originals per address",
+      "checks": [
+        {
+          "assert": "on-demand invoices with no check (S16a's one-time invoice rule): 50 coinless Originals see 7 of 20 coins",
+          "pass": true
+        },
+        {
+          "assert": "on-demand issuer that checks its own node: coinless Originals see 0",
+          "pass": true
+        },
+        {
+          "assert": "with 3 real coins: 2 receiver coins seen, at the cost of 3 real payments (the receiver broadcasts each Original)",
+          "pass": true
+        },
+        {
+          "assert": "interactive contact string (grantee hands one to a funder), no node, per-string limit: 50 probes see 1 coin",
+          "pass": true
+        },
+        {
+          "assert": "an exchange that mints a string per account is on-demand: without the check, 50 accounts see 7 coins",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S30a",
+      "title": "Full RBF: a payjoin that loses the race can replace the winner; the sender watches until confirmation",
+      "checks": [
+        {
+          "assert": "B's higher-fee payjoin replaces A's instead of being rejected at broadcast",
+          "pass": true
+        },
+        {
+          "assert": "rule 'if rejected at broadcast, broadcast the Original': A was accepted, then evicted, and is never paid",
+          "pass": true
+        },
+        {
+          "assert": "rule 'watch until it confirms; if it leaves the mempool, broadcast the Original': both paid",
+          "pass": true
+        },
+        {
+          "assert": "the replacement shares exactly one input with the evicted payjoin: anyone logging replacements learns Bob's coin",
+          "pass": true
+        },
+        {
+          "assert": "a receiver that never offers one coin to two live sessions has no race to log",
+          "pass": true
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "S31a",
+      "title": "Leaked string: an sp1 opens no past payment; it lets the holder probe as the contact. An xpub opens the account",
+      "checks": [
+        {
+          "assert": "leaked account xpub: 17/17 past receipts and change found, and every future one",
+          "pass": true
+        },
+        {
+          "assert": "leaked sp1: 0/12 past SP receipts found without b_scan",
+          "pass": true
+        },
+        {
+          "assert": "leaked contact string: the holder is the contact to the receiver; 30 probes see 1 coin under the per-string limit (its walk-back shows that coin's history, as for any payer)",
+          "pass": true
+        }
+      ],
+      "pass": true
+    }
+  ]
+}
