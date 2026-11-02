@@ -13,7 +13,7 @@ use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{trace, warn};
 
-use crate::db::{Db as DbTrait, Error as DbError, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
+use crate::db::{Db as DbTrait, Error as DbError, LogProbe, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
 
 /// The maximum number of pending or populated mailbox entries.
 ///
@@ -386,6 +386,20 @@ impl DbTrait for FilesDb {
         self.mailboxes.lock().await.maybe_cleanup_log_waitmap(id, index);
 
         ret
+    }
+
+    async fn probe_log_frame(
+        &self,
+        id: &ShortId,
+        index: usize,
+    ) -> Result<LogProbe, DbError<Self::OperationalError>> {
+        let guard = self.mailboxes.lock().await;
+        let frame_count = guard.log_len(id);
+        if index < frame_count {
+            Ok(LogProbe::Frame(Arc::new(guard.log_storage.read_frame(id, index).await?)))
+        } else {
+            Ok(LogProbe::Missing { frame_count })
+        }
     }
 }
 

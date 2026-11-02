@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
 use tracing::{error, warn};
 
-use crate::db::{Db, Error as DbError, SendableError, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
+use crate::db::{Db, Error as DbError, LogProbe, SendableError, LOG_FRAME_BYTES, MAX_LOG_FRAMES};
 use crate::ohttp_relay::SentinelTag;
 
 const CHACHA20_POLY1305_NONCE_LEN: usize = 32; // chacha20poly1305 n_k
@@ -30,6 +30,10 @@ const BHTTP_RES_FRAMING_BYTES: usize = 1 + 2 + 1 + 2 + 1;
 /// response is padded to exactly [`BHTTP_REQ_BYTES`], so a larger payload
 /// could be stored but never retrieved intact.
 const MAX_MAILBOX_PAYLOAD_BYTES: usize = BHTTP_REQ_BYTES - BHTTP_RES_FRAMING_BYTES;
+
+/// Inner response header on a log read that returned no frame without
+/// waiting: the number of frames the log holds.
+const LOG_FRAME_COUNT_HEADER: &str = "log-frame-count";
 
 const V1_REJECT_RES_JSON: &str =
     r#"{{"errorCode": "original-psbt-rejected", "message": "Body is not a string"}}"#;
@@ -248,6 +252,7 @@ impl<D: Db> Service<D> {
         req: Request<Body>,
     ) -> Result<Response<Body>, HandlerError> {
         let path = req.uri().path().to_string();
+        let query = req.uri().query().map(str::to_string);
         let (parts, body) = req.into_parts();
         let path_segments: Vec<&str> = path.split('/').collect();
         match (parts.method, path_segments.as_slice()) {
@@ -255,7 +260,8 @@ impl<D: Db> Service<D> {
             (Method::GET, &["", id]) => self.get_mailbox(id).await,
             (Method::PUT, &["", id]) if self.v1.is_some() => self.put_payjoin_v1(id, body).await,
             (Method::POST, &["", "log", id]) => self.append_log(id, body).await,
-            (Method::GET, &["", "log", id, index]) => self.get_log_frame(id, index).await,
+            (Method::GET, &["", "log", id, index]) =>
+                self.get_log_frame(id, index, query.as_deref()).await,
             _ => Ok(not_found()),
         }
     }
@@ -314,9 +320,17 @@ impl<D: Db> Service<D> {
     /// `GET /log/{id}/{index}`: read frame `index` of an append-only log.
     ///
     /// Each response carries one frame so it fits the same fixed-size OHTTP
-    /// response as a v2 GET. A frame that hasn't been appended yet is long
-    /// polled like a v2 mailbox, with `202` if the wait times out.
-    async fn get_log_frame(&self, id: &str, index: &str) -> Result<Response<Body>, HandlerError> {
+    /// response as a v2 GET. By default a frame that hasn't been appended yet
+    /// is long polled like a v2 mailbox, with `202` if the wait times out.
+    /// With `?wait=0` the read doesn't wait: a missing frame gets `202` at
+    /// once, with the log's frame count in the [`LOG_FRAME_COUNT_HEADER`]
+    /// header. `?wait=1` asks for the default.
+    async fn get_log_frame(
+        &self,
+        id: &str,
+        index: &str,
+        query: Option<&str>,
+    ) -> Result<Response<Body>, HandlerError> {
         let id = ShortId::from_str(id)?;
         let index = match index.parse::<usize>() {
             Ok(index) if index < MAX_LOG_FRAMES => index,
@@ -325,8 +339,28 @@ impl<D: Db> Service<D> {
                     "log frame index must be below {MAX_LOG_FRAMES}"
                 ))),
         };
+        let wait = match query {
+            None | Some("") | Some("wait=1") => true,
+            Some("wait=0") => false,
+            Some(query) =>
+                return Err(HandlerError::BadRequest(anyhow::anyhow!(
+                    "unsupported log read query {query:?}, expected wait=0 or wait=1"
+                ))),
+        };
         let timeout_response = Response::builder().status(StatusCode::ACCEPTED).body(empty())?;
-        handle_peek(self.db.wait_for_log_frame(&id, index).await, timeout_response)
+        if wait {
+            return handle_peek(self.db.wait_for_log_frame(&id, index).await, timeout_response);
+        }
+        let frame = match self.db.probe_log_frame(&id, index).await {
+            Ok(LogProbe::Frame(frame)) => Ok(frame),
+            Ok(LogProbe::Missing { frame_count }) =>
+                return Ok(Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .header(LOG_FRAME_COUNT_HEADER, frame_count)
+                    .body(empty())?),
+            Err(e) => Err(e),
+        };
+        handle_peek(frame, timeout_response)
     }
 
     /// Screen a V1 PSBT body against the address blocklist.
@@ -664,14 +698,14 @@ mod tests {
     use crate::ohttp_relay::SentinelTag;
 
     async fn test_service(v1: Option<V1>) -> Service<FilesDb> {
+        test_service_with_timeout(v1, Duration::from_millis(100)).await
+    }
+
+    async fn test_service_with_timeout(v1: Option<V1>, timeout: Duration) -> Service<FilesDb> {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db = FilesDb::init(
-            Duration::from_millis(100),
-            dir.keep(),
-            Duration::from_secs(60 * 60 * 24 * 7),
-        )
-        .await
-        .expect("db init");
+        let db = FilesDb::init(timeout, dir.keep(), Duration::from_secs(60 * 60 * 24 * 7))
+            .await
+            .expect("db init");
         let ohttp: ohttp::Server =
             crate::key_config::gen_ohttp_server_config().expect("ohttp config").into();
         Service::new(db, ohttp, SentinelTag::new([0u8; 32]), v1)
@@ -753,6 +787,20 @@ mod tests {
         path: &str,
         body: &[u8],
     ) -> (StatusCode, Vec<u8>) {
+        let (status, _headers, content) =
+            through_gateway_with_headers(svc, method, path, &[], body).await;
+        (status, content)
+    }
+
+    /// Like [`through_gateway`], with headers on the inner request and the
+    /// inner response's headers returned.
+    async fn through_gateway_with_headers(
+        svc: &mut Service<FilesDb>,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &[u8])],
+        body: &[u8],
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
         let encoded_config = svc.ohttp.config().encode().expect("encode key config");
         let config = ohttp::KeyConfig::decode(&encoded_config).expect("decode key config");
         let mut message = bhttp::Message::request(
@@ -761,6 +809,9 @@ mod tests {
             b"localhost".to_vec(),
             path.as_bytes().to_vec(),
         );
+        for (name, value) in headers {
+            message.put_header(*name, *value);
+        }
         message.write_content(body);
         let mut bhttp_req = Vec::new();
         message.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_req).expect("encode request");
@@ -782,14 +833,26 @@ mod tests {
         let bytes = res_body.collect().await.unwrap().to_bytes();
         if parts.status != StatusCode::OK {
             // Handler errors leave the gateway unencapsulated.
-            return (parts.status, bytes.to_vec());
+            return (parts.status, parts.headers, bytes.to_vec());
         }
+        assert_eq!(bytes.len(), ENCAPSULATED_MESSAGE_BYTES, "every OHTTP response is padded");
 
         let bhttp_res = client.decapsulate(&bytes).expect("decapsulate response");
         let message = bhttp::Message::read_bhttp(&mut std::io::Cursor::new(bhttp_res))
             .expect("gateway response must parse");
         let status = message.control().status().expect("response status").code();
-        (StatusCode::from_u16(status).unwrap(), message.content().to_vec())
+        let headers = message
+            .header()
+            .fields()
+            .iter()
+            .map(|field| {
+                (
+                    axum::http::HeaderName::from_bytes(field.name()).expect("header name"),
+                    HeaderValue::from_bytes(field.value()).expect("header value"),
+                )
+            })
+            .collect();
+        (StatusCode::from_u16(status).unwrap(), headers, message.content().to_vec())
     }
 
     #[tokio::test]
@@ -873,6 +936,83 @@ mod tests {
             let (status, _) =
                 through_gateway(&mut svc, "GET", &format!("/log/{id}/{index}"), &[]).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "index {index:?} should be rejected");
+        }
+    }
+
+    /// The frame count a log read reported, if any.
+    fn frame_count(headers: &axum::http::HeaderMap) -> Option<usize> {
+        headers.get(LOG_FRAME_COUNT_HEADER).map(|v| v.to_str().unwrap().parse().unwrap())
+    }
+
+    #[tokio::test]
+    async fn log_probe_returns_frame_count_without_waiting() {
+        let mut svc = test_service_with_timeout(None, Duration::from_secs(60)).await;
+        let id = valid_short_id_path();
+        let probe = |index: usize| format!("/log/{id}/{index}?wait=0");
+
+        let (status, headers, content) = tokio::time::timeout(
+            Duration::from_secs(10),
+            through_gateway_with_headers(&mut svc, "GET", &probe(0), &[], &[]),
+        )
+        .await
+        .expect("a probe of an empty log should not wait");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(frame_count(&headers), Some(0));
+        assert!(content.is_empty());
+
+        let frames: Vec<_> = (0..2).map(|byte| vec![byte; LOG_FRAME_BYTES]).collect();
+        for frame in &frames {
+            let (status, _) = through_gateway(&mut svc, "POST", &format!("/log/{id}"), frame).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        for index in [2, 5, MAX_LOG_FRAMES - 1] {
+            let (status, headers, content) = tokio::time::timeout(
+                Duration::from_secs(10),
+                through_gateway_with_headers(&mut svc, "GET", &probe(index), &[], &[]),
+            )
+            .await
+            .expect("a probe past the end should not wait");
+            assert_eq!(status, StatusCode::ACCEPTED, "index {index}");
+            assert_eq!(frame_count(&headers), Some(2), "index {index}");
+            assert!(content.is_empty());
+        }
+
+        for (index, frame) in frames.iter().enumerate() {
+            let (status, headers, content) =
+                through_gateway_with_headers(&mut svc, "GET", &probe(index), &[], &[]).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(&content, frame, "a probe of a stored frame returns it");
+            assert_eq!(frame_count(&headers), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn log_read_waits_by_default() {
+        let timeout = Duration::from_millis(100);
+        let mut svc = test_service_with_timeout(None, timeout).await;
+        let id = valid_short_id_path();
+
+        for path in [format!("/log/{id}/0"), format!("/log/{id}/0?wait=1")] {
+            let start = std::time::Instant::now();
+            let (status, headers, content) =
+                through_gateway_with_headers(&mut svc, "GET", &path, &[], &[]).await;
+            assert!(start.elapsed() >= timeout, "{path} should long-poll");
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(frame_count(&headers), None);
+            assert!(content.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn log_read_rejects_invalid_wait_flags() {
+        let mut svc = test_service(None).await;
+        let id = valid_short_id_path();
+
+        for query in ["wait=2", "wait=", "wait=true", "wait", "wait=0&wait=1", "other=0"] {
+            let path = format!("/log/{id}/0?{query}");
+            let (status, _) = through_gateway(&mut svc, "GET", &path, &[]).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query:?} should be rejected");
         }
     }
 

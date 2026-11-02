@@ -19,6 +19,17 @@ pub const LOG_FRAME_BYTES: usize = 7168;
 /// rejected, about 7 MiB per log.
 pub const MAX_LOG_FRAMES: usize = 1024;
 
+/// The result of reading a log frame without waiting for it.
+#[derive(Clone, Debug)]
+pub enum LogProbe {
+    Frame(Arc<Vec<u8>>),
+    /// The frame hasn't been appended yet. The log holds `frame_count`
+    /// frames, so the next append lands at that index.
+    Missing {
+        frame_count: usize,
+    },
+}
+
 pub trait SendableError:
     std::error::Error + std::marker::Send + std::marker::Sync + std::convert::Into<anyhow::Error>
 {
@@ -110,6 +121,14 @@ pub trait Db: Clone + Send + Sync + 'static {
         mailbox_id: &ShortId,
         index: usize,
     ) -> impl Future<Output = Result<Arc<Vec<u8>>, Error<Self::OperationalError>>> + Send;
+
+    /// Read frame `index` of an append-only log if it exists, without
+    /// waiting for it.
+    fn probe_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        index: usize,
+    ) -> impl Future<Output = Result<LogProbe, Error<Self::OperationalError>>> + Send;
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +139,7 @@ pub enum DbRequest {
     PostV1RequestAndWaitForResponse { mailbox_id: ShortId, payload: Vec<u8> },
     AppendLogFrame { mailbox_id: ShortId, frame: Vec<u8> },
     WaitForLogFrame { mailbox_id: ShortId, index: usize },
+    ProbeLogFrame { mailbox_id: ShortId, index: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +150,7 @@ pub enum DbResponse {
     PostV1RequestAndWaitForResponse(Arc<Vec<u8>>),
     AppendLogFrame(Option<()>),
     WaitForLogFrame(Arc<Vec<u8>>),
+    ProbeLogFrame(LogProbe),
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +197,8 @@ impl Service<DbRequest> for FilesDbService {
                 DbRequest::WaitForLogFrame { mailbox_id, index } => Ok(
                     DbResponse::WaitForLogFrame(db.wait_for_log_frame(&mailbox_id, index).await?),
                 ),
+                DbRequest::ProbeLogFrame { mailbox_id, index } =>
+                    Ok(DbResponse::ProbeLogFrame(db.probe_log_frame(&mailbox_id, index).await?)),
             }
         })
     }
@@ -299,6 +322,22 @@ impl Db for DbServiceAdapter {
             _ => Err(Self::invalid_response("wait_for_log_frame")),
         }
     }
+
+    async fn probe_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        index: usize,
+    ) -> Result<LogProbe, Error<Self::OperationalError>> {
+        let response = self
+            .inner
+            .clone()
+            .oneshot(DbRequest::ProbeLogFrame { mailbox_id: *mailbox_id, index })
+            .await?;
+        match response {
+            DbResponse::ProbeLogFrame(result) => Ok(result),
+            _ => Err(Self::invalid_response("probe_log_frame")),
+        }
+    }
 }
 
 pub use files::FilesDb;
@@ -368,5 +407,12 @@ impl<D: Db> Db for MetricsDb<D> {
         index: usize,
     ) -> Result<Arc<Vec<u8>>, Error<Self::OperationalError>> {
         self.inner.wait_for_log_frame(mailbox_id, index).await
+    }
+    async fn probe_log_frame(
+        &self,
+        mailbox_id: &ShortId,
+        index: usize,
+    ) -> Result<LogProbe, Error<Self::OperationalError>> {
+        self.inner.probe_log_frame(mailbox_id, index).await
     }
 }
