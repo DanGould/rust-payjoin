@@ -7,6 +7,7 @@
 //! [`PublicKey`](bitcoin::secp256k1::PublicKey), so functions whose BIP
 //! reference would produce one return `None` or an error instead.
 
+pub mod bip352;
 pub mod dleq;
 
 use bitcoin::hashes::{sha256, Hash, HashEngine};
