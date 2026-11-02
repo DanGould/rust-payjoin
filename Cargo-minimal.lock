@@ -3369,6 +3369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spj-crypto"
+version = "0.0.0"
+dependencies = [
+ "bitcoin",
+ "serde_json",
+]
+
+[[package]]
 name = "spj-demo"
 version = "0.0.0"
 dependencies = [
