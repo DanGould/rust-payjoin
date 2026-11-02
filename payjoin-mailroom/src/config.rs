@@ -16,6 +16,10 @@ pub struct Config {
     #[serde(deserialize_with = "deserialize_duration_secs")]
     pub mailbox_ttl: Duration,
     pub v1: Option<V1Config>,
+    /// Give append-only logs mailbox semantics: only a log's owner creates
+    /// and reads it, and appends to a log its owner hasn't created are
+    /// refused. See [`crate::contact_log`].
+    pub contact_logs: bool,
     #[cfg(feature = "telemetry")]
     pub telemetry: Option<TelemetryConfig>,
     #[cfg(feature = "acme")]
@@ -133,6 +137,7 @@ impl Default for Config {
             timeout: Duration::from_secs(30),
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
             v1: None,
+            contact_logs: false,
             #[cfg(feature = "telemetry")]
             telemetry: None,
             #[cfg(feature = "acme")]
@@ -165,6 +170,7 @@ impl Config {
             timeout,
             mailbox_ttl: Duration::from_secs(60 * 60 * 24 * 7), // 1 week
             v1,
+            contact_logs: false,
             #[cfg(feature = "telemetry")]
             telemetry: None,
             #[cfg(feature = "acme")]
@@ -217,6 +223,12 @@ mod tests {
         assert_eq!(parse("").log_format, LogFormat::Text);
         assert_eq!(parse("log_format = \"text\"").log_format, LogFormat::Text);
         assert_eq!(parse("log_format = \"json\"").log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn contact_logs_default_off() {
+        assert!(!parse("").contact_logs);
+        assert!(parse("contact_logs = true").contact_logs);
     }
 
     #[cfg(feature = "telemetry")]

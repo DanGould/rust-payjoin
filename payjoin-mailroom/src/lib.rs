@@ -20,6 +20,7 @@ use crate::ohttp_relay::SentinelTag;
 pub mod access_control;
 pub mod cli;
 pub mod config;
+pub mod contact_log;
 pub mod db;
 pub mod directory;
 pub mod heartbeat;
@@ -321,7 +322,12 @@ async fn init_directory(
     } else {
         None
     };
-    Ok(crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1))
+    let directory = crate::directory::Service::new(db, ohttp_config.into(), sentinel_tag, v1);
+    Ok(if config.contact_logs {
+        directory.with_admission(std::sync::Arc::new(crate::contact_log::ContactLogs::default()))
+    } else {
+        directory
+    })
 }
 
 #[cfg(feature = "access-control")]
@@ -527,15 +533,24 @@ mod tests {
         cert_der: Vec<u8>,
         key_der: Vec<u8>,
     ) -> (u16, tokio::task::JoinHandle<anyhow::Result<()>>, tempfile::TempDir) {
+        start_service_with(cert_der, key_der, |_| {}).await
+    }
+
+    /// Like [`start_service`], with `configure` applied to the test config.
+    async fn start_service_with(
+        cert_der: Vec<u8>,
+        key_der: Vec<u8>,
+        configure: impl FnOnce(&mut Config),
+    ) -> (u16, tokio::task::JoinHandle<anyhow::Result<()>>, tempfile::TempDir) {
         let tempdir = tempdir().unwrap();
         let mut root_store = RootCertStore::empty();
         root_store.add(CertificateDer::from(cert_der.clone())).unwrap();
         let tls_config = RustlsConfig::from_der(vec![cert_der], key_der).await.unwrap();
 
+        let mut config = test_config(tempdir.path());
+        configure(&mut config);
         let (port, handle) =
-            serve_manual_tls(test_config(tempdir.path()), Some(tls_config), root_store, None)
-                .await
-                .unwrap();
+            serve_manual_tls(config, Some(tls_config), root_store, None).await.unwrap();
         (port, handle, tempdir)
     }
 
@@ -674,6 +689,33 @@ mod tests {
         path: &str,
         body: &[u8],
     ) -> (axum::http::StatusCode, Vec<u8>) {
+        ohttp_request_with_headers(
+            client,
+            relay_url,
+            directory_url,
+            key_config,
+            method,
+            path,
+            &[],
+            body,
+        )
+        .await
+    }
+
+    /// Like [`ohttp_request`], with headers on the inner request. A request
+    /// the gateway refuses before encapsulating a response returns the outer
+    /// status, which the relay also sees.
+    #[allow(clippy::too_many_arguments)]
+    async fn ohttp_request_with_headers(
+        client: &reqwest::Client,
+        relay_url: &str,
+        directory_url: &str,
+        key_config: &ohttp::KeyConfig,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &[u8])],
+        body: &[u8],
+    ) -> (axum::http::StatusCode, Vec<u8>) {
         use payjoin::directory::ENCAPSULATED_MESSAGE_BYTES;
         // HPKE encapsulated key, AEAD tag and OHTTP request header
         const PADDED_BHTTP_REQ_BYTES: usize = ENCAPSULATED_MESSAGE_BYTES - (65 + 16 + 7);
@@ -684,6 +726,9 @@ mod tests {
             directory_url.trim_start_matches("https://").as_bytes().to_vec(),
             path.as_bytes().to_vec(),
         );
+        for (name, value) in headers {
+            message.put_header(*name, *value);
+        }
         message.write_content(body);
         let mut bhttp_req = Vec::new();
         message.write_bhttp(bhttp::Mode::KnownLength, &mut bhttp_req).unwrap();
@@ -698,7 +743,9 @@ mod tests {
             .send()
             .await
             .expect("request should complete");
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        if response.status() != axum::http::StatusCode::OK {
+            return (response.status(), response.bytes().await.unwrap().to_vec());
+        }
         let encapsulated = response.bytes().await.unwrap();
         assert_eq!(encapsulated.len(), ENCAPSULATED_MESSAGE_BYTES);
 
@@ -833,6 +880,93 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn contact_log_mailbox_semantics_through_relay() {
+        use axum::http::StatusCode;
+        use hex::DisplayHex;
+
+        use crate::contact_log::{log_id, OWNER_SCHEME};
+        use crate::db::LOG_FRAME_BYTES;
+
+        let cert = local_cert_key();
+        let cert_der = cert.cert.der().to_vec();
+        let key_der = cert.signing_key.serialize_der();
+        let (relay_port, _relay_handle, _relay_tempdir) =
+            start_service(cert_der.clone(), key_der.clone()).await;
+        let (directory_port, _directory_handle, _directory_tempdir) =
+            start_service_with(cert_der.clone(), key_der, |config| config.contact_logs = true)
+                .await;
+
+        let client = http_agent(cert_der).unwrap();
+        let relay_url = format!("https://localhost:{relay_port}");
+        let directory_url = format!("https://localhost:{directory_port}");
+        wait_for_service_ready(&relay_url, Arc::new(client.clone())).await.unwrap();
+        wait_for_service_ready(&directory_url, Arc::new(client.clone())).await.unwrap();
+        let key_config = {
+            let keys = client
+                .get(format!("{directory_url}/.well-known/ohttp-gateway"))
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            ohttp::KeyConfig::decode(&keys).unwrap()
+        };
+        let request =
+            |method: &'static str, path: String, owner: Option<[u8; 32]>, body: Vec<u8>| {
+                let (client, relay_url, directory_url, key_config) =
+                    (&client, &relay_url, &directory_url, &key_config);
+                async move {
+                    let owner = owner.map(|token| format!("{OWNER_SCHEME} {}", token.as_hex()));
+                    let headers: Vec<(&str, &[u8])> =
+                        owner.iter().map(|value| ("authorization", value.as_bytes())).collect();
+                    ohttp_request_with_headers(
+                        client,
+                        relay_url,
+                        directory_url,
+                        key_config,
+                        method,
+                        &path,
+                        &headers,
+                        &body,
+                    )
+                    .await
+                }
+            };
+
+        let token = [0x5a; 32];
+        let log = format!("/log/{}", log_id(&token));
+        let frame = |byte: u8| vec![byte; LOG_FRAME_BYTES];
+
+        let (status, _) = request("POST", log.clone(), None, frame(1)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "append before the owner creates the log");
+
+        let (status, _) = request("GET", format!("{log}/0?wait=0"), Some(token), vec![]).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "the owner's first read creates the log");
+
+        for sender in [1, 2] {
+            let (status, _) = request("POST", log.clone(), None, frame(sender)).await;
+            assert_eq!(status, StatusCode::OK, "sender {sender} appends");
+        }
+
+        let (status, _) = request("GET", format!("{log}/0?wait=0"), None, vec![]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a sender cannot read");
+        let (status, _) = request("GET", format!("{log}/0?wait=0"), Some([0x5b; 32]), vec![]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "another log's owner cannot read");
+
+        for (index, sender) in [1, 2].into_iter().enumerate() {
+            let (status, content) =
+                request("GET", format!("{log}/{index}?wait=0"), Some(token), vec![]).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(content, frame(sender), "frame {index} is sender {sender}'s");
+        }
+
+        let (status, _) =
+            request("POST", format!("/log/{}", log_id(&[0x5b; 32])), None, frame(3)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "other logs stay uncreated");
     }
 
     #[tokio::test]

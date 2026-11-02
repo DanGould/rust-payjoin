@@ -168,6 +168,11 @@ impl<D: Db> Service<D> {
         Self { db, ohttp, sentinel_tag, v1, admission: Arc::new(AdmitAll) }
     }
 
+    /// Replace the [`AdmissionHook`] that log requests pass through.
+    pub(crate) fn with_admission(self, admission: Arc<dyn AdmissionHook>) -> Self {
+        Self { admission, ..self }
+    }
+
     async fn serve_request<B>(&self, req: Request<B>) -> Result<Response<Body>>
     where
         B: axum::body::HttpBody<Data = Bytes> + Send + 'static,
