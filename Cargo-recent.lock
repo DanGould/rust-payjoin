@@ -3749,6 +3749,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "spj-web"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "bitcoin",
+ "futures",
+ "payjoin",
+ "payjoin-test-utils",
+ "serde_json",
+ "spj-demo",
+ "tokio",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

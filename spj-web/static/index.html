@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Silent payjoin wallets</title>
+    <link
+      rel="preload"
+      href="fonts/SchibstedGrotesk-var.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <link rel="stylesheet" href="fonts/fonts.css" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span
+        ><span class="wordmark">Silent payjoin</span>
+      </div>
+      <div class="controls">
+        <span class="height" id="height">Regtest</span>
+      </div>
+    </header>
+
+    <main class="stage">
+      <section
+        class="party"
+        id="payer-party"
+        data-who="alice"
+        aria-label="The payer's wallet"
+      >
+        <div class="phone"><div class="screen" id="payer"></div></div>
+      </section>
+
+      <section
+        class="lane"
+        id="lane"
+        aria-label="What travels between the wallets"
+      >
+        <div class="node directory" id="directory">
+          <div class="node-name">Payjoin mailboxes</div>
+          <div class="node-note">a public directory server</div>
+        </div>
+        <div class="middle">
+          <div class="uri" id="uri"></div>
+          <div class="tx" id="tx"></div>
+        </div>
+        <div class="node network" id="network">
+          <div class="node-name">Bitcoin network</div>
+        </div>
+      </section>
+
+      <section class="party" data-who="bob" aria-label="Bob's wallet">
+        <div class="phone"><div class="screen" id="bob"></div></div>
+      </section>
+    </main>
+
+    <div class="flyers" id="flyers" aria-hidden="true"></div>
+    <div class="toast" id="toast" role="status"></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

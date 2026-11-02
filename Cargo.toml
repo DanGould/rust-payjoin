@@ -8,6 +8,7 @@ members = [
   "payjoin-mailroom",
   "spj-crypto",
   "spj-demo",
+  "spj-web",
 ]
 resolver = "3"
 

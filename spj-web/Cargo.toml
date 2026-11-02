@@ -1,0 +1,17 @@
+[package]
+name = "spj-web"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+description = "Web wallets for the silent payjoin demo, on regtest"
+
+[dependencies]
+axum = "0.8"
+bitcoin = { version = "0.32.102", features = ["base64", "rand-std"] }
+futures = "0.3.21"
+payjoin = { version = "1.2.0", features = ["_contact-log"] }
+payjoin-test-utils = "0.0.1"
+serde_json = "1.0.149"
+spj-demo = { path = "../spj-demo" }
+tokio = { version = "1.52.3", features = ["full"] }
