@@ -3,9 +3,12 @@
 //! that let one string serve many payments, and a recorder that films a
 //! transaction's page in a local mempool explorer.
 
+pub mod chain;
 pub mod contact;
+pub mod derive;
 pub mod net;
 pub mod regtest;
 pub mod sp_address;
 pub mod uri;
 pub mod video;
+pub mod wallet;

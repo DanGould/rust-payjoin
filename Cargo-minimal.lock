@@ -3388,6 +3388,7 @@ dependencies = [
  "reqwest",
  "rustls",
  "serde_json",
+ "spj-crypto",
  "tempfile",
  "tokio",
 ]
