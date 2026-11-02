@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>The problem</title>
+    <link rel="stylesheet" href="../../static/fonts/fonts.css" />
+    <link rel="stylesheet" href="card.css" />
+    <style>
+      /* Two transactions side by side in time: a silent payment, then the
+       same payment with Bob's coin added. Each step rises in when the
+       narration reaches it. */
+      .pick {
+        display: flex;
+        gap: 18px;
+        justify-content: center;
+        margin: 0 0 44px;
+      }
+      .opt {
+        font-size: 28px;
+        font-weight: 700;
+        padding: 10px 24px;
+        border-radius: 999px;
+      }
+      .opt.sp {
+        box-shadow: inset 0 0 0 2px #b893f5;
+      }
+      .opt.pj {
+        box-shadow: inset 0 0 0 2px #ff7ab8;
+      }
+      .or {
+        font-size: 26px;
+        color: #8e9aab;
+        align-self: center;
+      }
+      .rows {
+        display: flex;
+        flex-direction: column;
+        gap: 30px;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 230px 40px 290px 360px;
+        align-items: center;
+        gap: 0 12px;
+        text-align: left;
+      }
+      .label {
+        grid-column: 1 / -1;
+        font-size: 21px;
+        color: #8e9aab;
+        margin: 0 0 10px;
+      }
+      .box {
+        font-size: 23px;
+        font-weight: 600;
+        padding: 12px 16px;
+        border-radius: 12px;
+        background: #141a26;
+        box-shadow: inset 0 0 0 1.5px #2c3545;
+      }
+      .box .coin {
+        color: #33c7a2;
+      }
+      .out {
+        color: #b893f5;
+      }
+      .arrow {
+        font-size: 30px;
+        color: #8e9aab;
+        text-align: center;
+      }
+      .restore {
+        font-size: 22px;
+        line-height: 1.3;
+        padding-left: 18px;
+        border-left: 3px solid #2c3545;
+      }
+      .restore b {
+        display: block;
+        font-size: 24px;
+      }
+      .found {
+        color: #5fd38d;
+      }
+      .lost {
+        color: #ff6b5a;
+      }
+      /* An output's key, as a short mark: the same mark means the wallet
+         finds the output, a different one means it doesn't. */
+      .key {
+        display: inline-block;
+        font-family: "Fragment Mono", monospace;
+        font-size: 19px;
+        padding: 1px 8px;
+        border-radius: 999px;
+        color: #b893f5;
+        box-shadow: inset 0 0 0 1.5px #b893f5;
+        margin-left: 6px;
+      }
+      .key.other {
+        color: #ff6b5a;
+        box-shadow: inset 0 0 0 1.5px #ff6b5a;
+      }
+      .inputs {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <p class="kicker rise">Today</p>
+    <div class="pick rise" style="--i: 0.6">
+      <span class="opt sp">Silent payments</span><span class="or">or</span
+      ><span class="opt pj">Payjoin</span>
+    </div>
+    <div class="rows">
+      <div class="row rise" style="--i: 3">
+        <div class="label">
+          A silent payment: Alice works out Bob's output from her inputs
+        </div>
+        <div class="inputs"><span class="box">Alice's coin</span></div>
+        <span class="arrow">→</span>
+        <span class="box out"
+          >Bob's output <span class="key">key 4b7a…</span></span
+        >
+        <span class="restore"
+          ><span class="rise" style="--i: 4.5"
+            >Bob's wallet, recovered from his seed, does the same math:
+            <span class="key">key 4b7a…</span></span
+          ><b class="found rise" style="--i: 6.5">same key, finds it</b></span
+        >
+      </div>
+      <div class="row rise" style="--i: 7.5">
+        <div class="label">
+          Add a payjoin: Bob adds a coin, and his output keeps its old key
+        </div>
+        <div class="inputs">
+          <span class="box">Alice's coin</span
+          ><span class="box rise" style="--i: 8.5"
+            ><span class="coin">+ Bob's coin</span></span
+          >
+        </div>
+        <span class="arrow">→</span>
+        <span class="box out"
+          >Bob's output <span class="key">key 4b7a…</span></span
+        >
+        <span class="restore"
+          ><span class="rise" style="--i: 11"
+            >Bob's wallet does the math over these inputs:
+            <span class="key other">key 9e03…</span></span
+          ><b class="lost rise" style="--i: 13"
+            >different key, can't find it</b
+          ></span
+        >
+      </div>
+    </div>
+  </body>
+</html>

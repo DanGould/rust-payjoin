@@ -1,0 +1,100 @@
+/* The cards between the sections of the recorded video. record.mjs opens
+   each one and adds the class "go" once it is recording; every element
+   with --i rises in after --i steps. */
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+body {
+  background: #05080f;
+  color: #fff;
+  font-family:
+    "Schibsted Grotesk",
+    -apple-system,
+    "Helvetica Neue",
+    sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.title {
+  font-size: 50px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin: 0 0 34px;
+}
+.lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.lines li {
+  font-size: 31px;
+  font-weight: 500;
+  color: #c9d1db;
+  margin: 0 0 16px;
+}
+.kicker {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8e9aab;
+  margin: 0 0 18px;
+}
+.bob {
+  color: #33c7a2;
+  font-weight: 700;
+}
+.alice {
+  color: #7f9bff;
+  font-weight: 700;
+}
+.carol {
+  color: #ff8a5c;
+  font-weight: 700;
+}
+.exchange {
+  color: #a9b8c9;
+  font-weight: 700;
+}
+.sp {
+  color: #b893f5;
+  font-weight: 700;
+}
+.pj {
+  color: #ff7ab8;
+  font-weight: 700;
+}
+.bad {
+  color: #ff6b5a;
+  font-weight: 700;
+}
+.ok {
+  color: #5fd38d;
+  font-weight: 700;
+}
+.rise {
+  opacity: 0;
+  transform: translateY(12px);
+}
+.go .rise {
+  animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+  animation-delay: calc(var(--i, 0) * 1s + 0.2s);
+}
+@keyframes rise {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.mark {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: conic-gradient(#b893f5 0 50%, #33c7a2 50% 100%);
+  margin: 0 auto 24px;
+}
