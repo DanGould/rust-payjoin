@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add append-only logs behind OHTTP for multiparty protocols. `POST /log/{id}` appends a 7168-byte frame and `GET /log/{id}/{index}` long-polls one frame. `GET /log/{id}/{index}?wait=0` doesn't wait: a missing frame gets `202` at once with the log's frame count in an inner `log-frame-count` header. Logs are separate from v2 mailboxes, hold up to 1024 frames, and count each frame against capacity (#365)
+- Add append-only logs behind OHTTP for multiparty protocols. `POST /log/{id}` appends a 7168-byte frame and `GET /log/{id}/{index}` long-polls one frame. `GET /log/{id}/{index}?wait=0` doesn't wait: a missing frame gets `202` at once with the log's frame count in an inner `log-frame-count` header. An append returns the frame's index in an inner `log-frame-index` header, and appending a frame the log already holds returns its original index without storing it again. Logs are separate from v2 mailboxes, hold up to 1024 frames, and count each frame against capacity (#365)
 - Reject mailbox payloads too large to return through the OHTTP gateway with 413, and V1 requests too large to relay with `original-psbt-rejected`, instead of truncating the response (#1983)
 
 ## 0.1.3

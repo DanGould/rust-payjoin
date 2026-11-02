@@ -107,12 +107,14 @@ pub trait Db: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Arc<Vec<u8>>, Error<Self::OperationalError>>> + Send;
 
     /// Append a frame to an append-only log, creating the log with its first
-    /// frame. Returns `None` if the log already holds [`MAX_LOG_FRAMES`].
+    /// frame, and return the frame's index. A frame identical to one already
+    /// in the log is not stored again and its original index is returned.
+    /// Returns `None` if the log already holds [`MAX_LOG_FRAMES`].
     fn append_log_frame(
         &self,
         mailbox_id: &ShortId,
         frame: Vec<u8>,
-    ) -> impl Future<Output = Result<Option<()>, Error<Self::OperationalError>>> + Send;
+    ) -> impl Future<Output = Result<Option<usize>, Error<Self::OperationalError>>> + Send;
 
     /// Read frame `index` of an append-only log, waiting if it hasn't been
     /// appended yet.
@@ -148,7 +150,7 @@ pub enum DbResponse {
     WaitForV2Payload(Arc<Vec<u8>>),
     PostV1Response(()),
     PostV1RequestAndWaitForResponse(Arc<Vec<u8>>),
-    AppendLogFrame(Option<()>),
+    AppendLogFrame(Option<usize>),
     WaitForLogFrame(Arc<Vec<u8>>),
     ProbeLogFrame(LogProbe),
 }
@@ -295,7 +297,7 @@ impl Db for DbServiceAdapter {
         &self,
         mailbox_id: &ShortId,
         frame: Vec<u8>,
-    ) -> Result<Option<()>, Error<Self::OperationalError>> {
+    ) -> Result<Option<usize>, Error<Self::OperationalError>> {
         let response = self
             .inner
             .clone()
@@ -397,7 +399,7 @@ impl<D: Db> Db for MetricsDb<D> {
         &self,
         mailbox_id: &ShortId,
         frame: Vec<u8>,
-    ) -> Result<Option<()>, Error<Self::OperationalError>> {
+    ) -> Result<Option<usize>, Error<Self::OperationalError>> {
         self.inner.append_log_frame(mailbox_id, frame).await
     }
 

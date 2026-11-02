@@ -4,6 +4,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use bitcoin::hashes::{sha256, Hash};
 use futures::future::{self, FutureExt};
 use payjoin::directory::ShortId;
 use rand::rngs::OsRng;
@@ -47,11 +48,32 @@ pub(crate) struct Mailboxes {
     /// never switch a write-once mailbox into a log or back.
     log_storage: DiskStorage,
     log_insert_order: VecDeque<(SystemTime, ShortId)>,
-    log_frames: HashMap<ShortId, usize>,
+    logs: HashMap<ShortId, Log>,
     /// Every stored log frame counts against `capacity`, so logs can't hold
     /// more data than the same number of v2 mailboxes.
     log_frames_total: usize,
     pending_log: HashMap<(ShortId, usize), V2WaitMapEntry>,
+}
+
+/// The in-memory view of one append-only log.
+#[derive(Debug, Default)]
+struct Log {
+    len: usize,
+    /// The position of each distinct frame, so a repeated append returns
+    /// where the frame already is instead of storing it again. This index is
+    /// kept per log on purpose: one shared across logs would tell the
+    /// operator which logs received the same frame, linking mailboxes that
+    /// are otherwise unrelated. Within a single log the operator already
+    /// sees every frame.
+    positions: HashMap<sha256::Hash, usize>,
+}
+
+impl Log {
+    /// Record the frame stored at the end of the log.
+    fn push(&mut self, hash: sha256::Hash) {
+        self.positions.entry(hash).or_insert(self.len);
+        self.len += 1;
+    }
 }
 
 #[derive(Debug)]
@@ -170,10 +192,13 @@ impl DiskStorage {
         }
     }
 
-    /// The number of whole frames in a log. A torn frame left by an
-    /// interrupted append is not counted and gets overwritten by the next one.
-    async fn frame_count(&self, id: &ShortId) -> io::Result<usize> {
-        Ok(fs::metadata(self.mailbox_path(id)).await?.len() as usize / LOG_FRAME_BYTES)
+    /// The hashes of the whole frames in a log, in order. A torn frame left
+    /// by an interrupted append is skipped and gets overwritten by the next
+    /// one.
+    async fn frame_hashes(&self, id: &ShortId) -> io::Result<Vec<sha256::Hash>> {
+        let mut buffer = fs::read(self.mailbox_path(id)).await?;
+        self.xor_buffer(&mut buffer);
+        Ok(buffer.chunks_exact(LOG_FRAME_BYTES).map(sha256::Hash::hash).collect())
     }
 
     async fn write_frame(&self, id: &ShortId, index: usize, frame: &[u8]) -> io::Result<()> {
@@ -231,11 +256,14 @@ impl Mailboxes {
     async fn init(dir: PathBuf, ttl: Duration) -> io::Result<Self> {
         let log_storage = DiskStorage::init(dir.join("logs")).await?;
         let log_insert_order: VecDeque<_> = log_storage.insert_order().await?.into();
-        let mut log_frames = HashMap::default();
+        let mut logs = HashMap::<ShortId, Log>::default();
         for (_created, id) in &log_insert_order {
-            log_frames.insert(*id, log_storage.frame_count(id).await?);
+            let log = logs.entry(*id).or_default();
+            for hash in log_storage.frame_hashes(id).await? {
+                log.push(hash);
+            }
         }
-        let log_frames_total = log_frames.values().sum();
+        let log_frames_total = logs.values().map(|log| log.len).sum();
 
         let storage = DiskStorage::init(dir).await?;
         let insert_order = storage.insert_order().await?.into();
@@ -248,7 +276,7 @@ impl Mailboxes {
             ttl,
             log_storage,
             log_insert_order,
-            log_frames,
+            logs,
             log_frames_total,
             pending_log: HashMap::default(),
         })
@@ -358,7 +386,7 @@ impl DbTrait for FilesDb {
         &self,
         id: &ShortId,
         frame: Vec<u8>,
-    ) -> Result<Option<()>, DbError<Self::OperationalError>> {
+    ) -> Result<Option<usize>, DbError<Self::OperationalError>> {
         let mut guard = self.mailboxes.lock().await;
         Ok(guard.append_log(id, frame).await?)
     }
@@ -528,14 +556,19 @@ impl Mailboxes {
         Ok(ret)
     }
 
-    fn log_len(&self, id: &ShortId) -> usize { self.log_frames.get(id).copied().unwrap_or(0) }
+    fn log_len(&self, id: &ShortId) -> usize { self.logs.get(id).map_or(0, |log| log.len) }
 
-    async fn append_log(&mut self, id: &ShortId, frame: Vec<u8>) -> Result<Option<()>, Error> {
+    async fn append_log(&mut self, id: &ShortId, frame: Vec<u8>) -> Result<Option<usize>, Error> {
+        let hash = sha256::Hash::hash(&frame);
+        if let Some(&index) = self.logs.get(id).and_then(|log| log.positions.get(&hash)) {
+            return Ok(Some(index));
+        }
+
         if !self.has_capacity().await? {
             return Err(Error::OverCapacity);
         }
 
-        let index = match self.log_frames.get(id).copied() {
+        let index = match self.logs.get(id).map(|log| log.len) {
             Some(len) if len >= MAX_LOG_FRAMES => return Ok(None),
             Some(len) => {
                 self.log_storage.write_frame(id, len, &frame).await?;
@@ -551,7 +584,7 @@ impl Mailboxes {
                 0
             }
         };
-        self.log_frames.insert(*id, index + 1);
+        self.logs.entry(*id).or_default().push(hash);
         self.log_frames_total += 1;
 
         if let Some(pending) = self.pending_log.remove(&(*id, index)) {
@@ -560,7 +593,7 @@ impl Mailboxes {
             pending.sender.send(Arc::new(frame)).expect("sending on oneshot channel must succeed");
         }
 
-        Ok(Some(()))
+        Ok(Some(index))
     }
 
     async fn wait_log(
@@ -655,7 +688,7 @@ impl Mailboxes {
         while let Some((created, id)) = self.log_insert_order.front().cloned() {
             if created + self.ttl < now {
                 _ = self.log_insert_order.pop_front();
-                self.log_frames_total -= self.log_frames.remove(&id).unwrap_or(0);
+                self.log_frames_total -= self.logs.remove(&id).map_or(0, |log| log.len);
                 if self.log_storage.remove(&id).await?.is_none() {
                     warn!(
                         "Log file missing during prune; possible external deletion or disk error"
@@ -1319,7 +1352,7 @@ mod tests {
         let id = ShortId([1u8; 8]);
 
         db.append_log_frame(&id, frame(0)).await.unwrap().expect("first append");
-        db.mailboxes.lock().await.log_frames.insert(id, MAX_LOG_FRAMES);
+        db.mailboxes.lock().await.logs.get_mut(&id).expect("log exists").len = MAX_LOG_FRAMES;
         assert!(
             db.append_log_frame(&id, frame(1)).await.unwrap().is_none(),
             "a full log should reject appends"
@@ -1352,6 +1385,86 @@ mod tests {
         db.append_log_frame(&id, frame(2)).await.unwrap().expect("append after reload");
         assert_eq!(*db.wait_for_log_frame(&id, 2).await.unwrap(), frame(2));
         assert_eq!(fs::metadata(&path).await?.len(), 3 * LOG_FRAME_BYTES as u64);
+
+        Ok(())
+    }
+
+    fn log_path(dir: &tempfile::TempDir, id: &ShortId) -> PathBuf {
+        dir.path().join("logs").join(id.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_log_dedup() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+        let id = ShortId([1u8; 8]);
+
+        assert_eq!(db.append_log_frame(&id, frame(0)).await.unwrap(), Some(0));
+        assert_eq!(db.append_log_frame(&id, frame(1)).await.unwrap(), Some(1));
+        assert_eq!(
+            db.append_log_frame(&id, frame(0)).await.unwrap(),
+            Some(0),
+            "a repeated frame should keep its original index"
+        );
+        assert_eq!(db.mailboxes.lock().await.len(), 2, "a repeated frame takes no capacity slot");
+        assert_eq!(fs::metadata(log_path(&dir, &id)).await?.len(), 2 * LOG_FRAME_BYTES as u64);
+        assert!(matches!(db.wait_for_log_frame(&id, 2).await, Err(DbError::Timeout(_))));
+
+        assert_eq!(
+            db.append_log_frame(&id, frame(2)).await.unwrap(),
+            Some(2),
+            "the next new frame should follow the last stored one"
+        );
+        assert_eq!(*db.wait_for_log_frame(&id, 2).await.unwrap(), frame(2));
+
+        db.mailboxes.lock().await.capacity = 3;
+        assert!(matches!(db.append_log_frame(&id, frame(3)).await, Err(DbError::OverCapacity)));
+        assert_eq!(
+            db.append_log_frame(&id, frame(1)).await.unwrap(),
+            Some(1),
+            "a repeated frame should still be accepted at capacity"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_dedup_after_reload() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let id = ShortId([1u8; 8]);
+        {
+            let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+            db.append_log_frame(&id, frame(0)).await.unwrap().expect("first append");
+            db.append_log_frame(&id, frame(1)).await.unwrap().expect("second append");
+        }
+
+        let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+        assert_eq!(db.append_log_frame(&id, frame(1)).await.unwrap(), Some(1));
+        assert_eq!(db.append_log_frame(&id, frame(0)).await.unwrap(), Some(0));
+        assert_eq!(db.mailboxes.lock().await.len(), 2);
+        assert_eq!(fs::metadata(log_path(&dir, &id)).await?.len(), 2 * LOG_FRAME_BYTES as u64);
+        assert_eq!(db.append_log_frame(&id, frame(2)).await.unwrap(), Some(2));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_log_dedup_is_per_log() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = FilesDb::init(Duration::from_millis(1), dir.path().to_owned(), TTL).await?;
+        let (id_a, id_b) = (ShortId([1u8; 8]), ShortId([2u8; 8]));
+
+        assert_eq!(db.append_log_frame(&id_a, frame(0)).await.unwrap(), Some(0));
+        assert_eq!(
+            db.append_log_frame(&id_b, frame(0)).await.unwrap(),
+            Some(0),
+            "the same frame in another log should be stored there too"
+        );
+        assert_eq!(db.mailboxes.lock().await.len(), 2, "each log should hold its own copy");
+        for id in [id_a, id_b] {
+            assert_eq!(fs::metadata(log_path(&dir, &id)).await?.len(), LOG_FRAME_BYTES as u64);
+            assert_eq!(*db.wait_for_log_frame(&id, 0).await.unwrap(), frame(0));
+        }
 
         Ok(())
     }

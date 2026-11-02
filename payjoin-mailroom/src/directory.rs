@@ -35,6 +35,10 @@ const MAX_MAILBOX_PAYLOAD_BYTES: usize = BHTTP_REQ_BYTES - BHTTP_RES_FRAMING_BYT
 /// waiting: the number of frames the log holds.
 const LOG_FRAME_COUNT_HEADER: &str = "log-frame-count";
 
+/// Inner response header on a successful log append: the index the frame
+/// is stored at.
+const LOG_FRAME_INDEX_HEADER: &str = "log-frame-index";
+
 const V1_REJECT_RES_JSON: &str =
     r#"{{"errorCode": "original-psbt-rejected", "message": "Body is not a string"}}"#;
 const V1_UNAVAILABLE_RES_JSON: &str = r#"{{"errorCode": "unavailable", "message": "V2 receiver offline. V1 sends require synchronous communications."}}"#;
@@ -295,6 +299,11 @@ impl<D: Db> Service<D> {
     /// The body must be exactly [`LOG_FRAME_BYTES`]. A log is a separate
     /// resource from the v2 mailbox with the same id and accepts at most
     /// [`MAX_LOG_FRAMES`] frames, after which appends get `413`.
+    ///
+    /// The response carries the frame's index in the
+    /// [`LOG_FRAME_INDEX_HEADER`] header. Appending a frame the log already
+    /// holds stores nothing and returns the original index, so a writer can
+    /// retry an append without duplicating it.
     async fn append_log(&self, id: &str, body: Body) -> Result<Response<Body>, HandlerError> {
         let id = ShortId::from_str(id)?;
         let frame = body
@@ -308,7 +317,10 @@ impl<D: Db> Service<D> {
             )));
         }
         match self.db.append_log_frame(&id, frame.into()).await {
-            Ok(Some(())) => Ok(Response::builder().status(StatusCode::OK).body(empty())?),
+            Ok(Some(index)) => Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(LOG_FRAME_INDEX_HEADER, index)
+                .body(empty())?),
             Ok(None) => Err(HandlerError::PayloadTooLarge),
             Err(DbError::OverCapacity) => Err(HandlerError::ServiceUnavailable(
                 anyhow::Error::msg("mailbox storage at capacity"),
@@ -937,6 +949,39 @@ mod tests {
                 through_gateway(&mut svc, "GET", &format!("/log/{id}/{index}"), &[]).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "index {index:?} should be rejected");
         }
+    }
+
+    #[tokio::test]
+    async fn log_append_returns_frame_index() {
+        let mut svc = test_service(None).await;
+        let path = format!("/log/{}", valid_short_id_path());
+        let index_of = |headers: &axum::http::HeaderMap| -> usize {
+            headers[LOG_FRAME_INDEX_HEADER].to_str().unwrap().parse().unwrap()
+        };
+
+        for (byte, expected) in [(0, 0), (1, 1), (0, 0), (2, 2), (1, 1)] {
+            let (status, headers, _) = through_gateway_with_headers(
+                &mut svc,
+                "POST",
+                &path,
+                &[],
+                &vec![byte; LOG_FRAME_BYTES],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(index_of(&headers), expected, "frame {byte:#x}");
+        }
+
+        let (status, headers, _) =
+            through_gateway_with_headers(&mut svc, "GET", &format!("{path}/0?wait=0"), &[], &[])
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(LOG_FRAME_INDEX_HEADER).is_none());
+        let (status, headers, _) =
+            through_gateway_with_headers(&mut svc, "GET", &format!("{path}/3?wait=0"), &[], &[])
+                .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(frame_count(&headers), Some(3), "repeated frames should not be stored");
     }
 
     /// The frame count a log read reported, if any.
