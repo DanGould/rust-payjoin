@@ -5,7 +5,9 @@ use std::task::{Context, Poll};
 
 use anyhow::Result;
 use axum::body::{Body, Bytes};
-use axum::http::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE};
+use axum::http::header::{
+    HeaderMap, HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN, AUTHORIZATION, CONTENT_TYPE,
+};
 use axum::http::{Method, Request, Response, StatusCode, Uri};
 use http_body_util::BodyExt;
 use payjoin::directory::{ShortId, ShortIdError, ENCAPSULATED_MESSAGE_BYTES};
@@ -107,12 +109,38 @@ fn parse_address_lines(text: &str) -> std::collections::HashSet<bitcoin::ScriptB
         .collect()
 }
 
+/// An operation on an append-only log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LogOperation {
+    Append,
+    Read,
+}
+
+/// Decides whether a request to an append-only log may proceed.
+///
+/// Every log append and read passes its inner `authorization` header, if it
+/// has one, to this hook before storage is touched. The header is optional
+/// and [`AdmitAll`] lets every request through. The slot exists so that
+/// admission control, such as requiring an anonymous credential per append,
+/// can be enabled later without changing the request format.
+pub(crate) trait AdmissionHook: Send + Sync {
+    fn admit(&self, operation: LogOperation, id: &ShortId, authorization: Option<&[u8]>) -> bool;
+}
+
+/// The default [`AdmissionHook`], which admits every request.
+pub(crate) struct AdmitAll;
+
+impl AdmissionHook for AdmitAll {
+    fn admit(&self, _: LogOperation, _: &ShortId, _: Option<&[u8]>) -> bool { true }
+}
+
 #[derive(Clone)]
 pub struct Service<D: Db> {
     db: D,
     ohttp: ohttp::Server,
     sentinel_tag: SentinelTag,
     v1: Option<V1>,
+    admission: Arc<dyn AdmissionHook>,
 }
 
 impl<D: Db, B> tower::Service<Request<B>> for Service<D>
@@ -137,7 +165,7 @@ where
 
 impl<D: Db> Service<D> {
     pub fn new(db: D, ohttp: ohttp::Server, sentinel_tag: SentinelTag, v1: Option<V1>) -> Self {
-        Self { db, ohttp, sentinel_tag, v1 }
+        Self { db, ohttp, sentinel_tag, v1, admission: Arc::new(AdmitAll) }
     }
 
     async fn serve_request<B>(&self, req: Request<B>) -> Result<Response<Body>>
@@ -263,9 +291,9 @@ impl<D: Db> Service<D> {
             (Method::POST, &["", id]) => self.post_mailbox(id, body).await,
             (Method::GET, &["", id]) => self.get_mailbox(id).await,
             (Method::PUT, &["", id]) if self.v1.is_some() => self.put_payjoin_v1(id, body).await,
-            (Method::POST, &["", "log", id]) => self.append_log(id, body).await,
+            (Method::POST, &["", "log", id]) => self.append_log(id, &parts.headers, body).await,
             (Method::GET, &["", "log", id, index]) =>
-                self.get_log_frame(id, index, query.as_deref()).await,
+                self.get_log_frame(id, index, query.as_deref(), &parts.headers).await,
             _ => Ok(not_found()),
         }
     }
@@ -304,8 +332,14 @@ impl<D: Db> Service<D> {
     /// [`LOG_FRAME_INDEX_HEADER`] header. Appending a frame the log already
     /// holds stores nothing and returns the original index, so a writer can
     /// retry an append without duplicating it.
-    async fn append_log(&self, id: &str, body: Body) -> Result<Response<Body>, HandlerError> {
+    async fn append_log(
+        &self,
+        id: &str,
+        headers: &HeaderMap,
+        body: Body,
+    ) -> Result<Response<Body>, HandlerError> {
         let id = ShortId::from_str(id)?;
+        self.admit_log_request(LogOperation::Append, &id, headers)?;
         let frame = body
             .collect()
             .await
@@ -342,6 +376,7 @@ impl<D: Db> Service<D> {
         id: &str,
         index: &str,
         query: Option<&str>,
+        headers: &HeaderMap,
     ) -> Result<Response<Body>, HandlerError> {
         let id = ShortId::from_str(id)?;
         let index = match index.parse::<usize>() {
@@ -359,6 +394,7 @@ impl<D: Db> Service<D> {
                     "unsupported log read query {query:?}, expected wait=0 or wait=1"
                 ))),
         };
+        self.admit_log_request(LogOperation::Read, &id, headers)?;
         let timeout_response = Response::builder().status(StatusCode::ACCEPTED).body(empty())?;
         if wait {
             return handle_peek(self.db.wait_for_log_frame(&id, index).await, timeout_response);
@@ -373,6 +409,22 @@ impl<D: Db> Service<D> {
             Err(e) => Err(e),
         };
         handle_peek(frame, timeout_response)
+    }
+
+    /// Run a log request past the [`AdmissionHook`], rejecting it with `403`
+    /// if the hook refuses it.
+    fn admit_log_request(
+        &self,
+        operation: LogOperation,
+        id: &ShortId,
+        headers: &HeaderMap,
+    ) -> Result<(), HandlerError> {
+        let authorization = headers.get(AUTHORIZATION).map(HeaderValue::as_bytes);
+        if self.admission.admit(operation, id, authorization) {
+            Ok(())
+        } else {
+            Err(HandlerError::Forbidden(anyhow::anyhow!("log {operation:?} for {id} not admitted")))
+        }
     }
 
     /// Screen a V1 PSBT body against the address blocklist.
@@ -982,6 +1034,103 @@ mod tests {
                 .await;
         assert_eq!(status, StatusCode::ACCEPTED);
         assert_eq!(frame_count(&headers), Some(3), "repeated frames should not be stored");
+    }
+
+    #[tokio::test]
+    async fn log_requests_need_no_authorization_by_default() {
+        let mut svc = test_service(None).await;
+        let id = valid_short_id_path();
+        let credential = "Bearer ".to_string() + &"k7Q-xP3_9a".repeat(30);
+        let tokens: [Option<&[u8]>; 4] =
+            [None, Some(b"anything"), Some(b""), Some(credential.as_bytes())];
+
+        for (index, token) in tokens.into_iter().enumerate() {
+            let headers: Vec<(&str, &[u8])> =
+                token.map(|token| ("authorization", token)).into_iter().collect();
+            let (status, _, _) = through_gateway_with_headers(
+                &mut svc,
+                "POST",
+                &format!("/log/{id}"),
+                &headers,
+                &vec![index as u8; LOG_FRAME_BYTES],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "append with {token:?}");
+            for query in ["", "?wait=0"] {
+                let path = format!("/log/{id}/{index}{query}");
+                let (status, _, content) =
+                    through_gateway_with_headers(&mut svc, "GET", &path, &headers, &[]).await;
+                assert_eq!(status, StatusCode::OK, "{path} with {token:?}");
+                assert_eq!(content, vec![index as u8; LOG_FRAME_BYTES]);
+            }
+        }
+    }
+
+    type AdmissionCall = (LogOperation, ShortId, Option<Vec<u8>>);
+
+    #[derive(Default)]
+    struct RecordingHook {
+        deny: bool,
+        seen: std::sync::Mutex<Vec<AdmissionCall>>,
+    }
+
+    impl AdmissionHook for RecordingHook {
+        fn admit(&self, operation: LogOperation, id: &ShortId, auth: Option<&[u8]>) -> bool {
+            self.seen.lock().unwrap().push((operation, *id, auth.map(<[u8]>::to_vec)));
+            !self.deny
+        }
+    }
+
+    #[tokio::test]
+    async fn log_requests_pass_through_admission_hook() {
+        let mut svc = test_service(None).await;
+        let id = ShortId([0u8; 8]);
+        let frame = vec![1; LOG_FRAME_BYTES];
+        let hook = Arc::new(RecordingHook::default());
+        svc.admission = hook.clone();
+
+        let requests = [
+            ("POST", format!("/log/{id}"), Some(&b"token-a"[..]), &frame[..]),
+            ("GET", format!("/log/{id}/0"), None, &[]),
+            ("GET", format!("/log/{id}/0?wait=0"), Some(&b"token-b"[..]), &[]),
+        ];
+        for (method, path, token, body) in &requests {
+            let headers: Vec<(&str, &[u8])> =
+                token.map(|token| ("authorization", token)).into_iter().collect();
+            let (status, _, _) =
+                through_gateway_with_headers(&mut svc, method, path, &headers, body).await;
+            assert_eq!(status, StatusCode::OK, "{method} {path}");
+        }
+        assert_eq!(
+            *hook.seen.lock().unwrap(),
+            [
+                (LogOperation::Append, id, Some(b"token-a".to_vec())),
+                (LogOperation::Read, id, None),
+                (LogOperation::Read, id, Some(b"token-b".to_vec())),
+            ]
+        );
+
+        let other = ShortId([2u8; 8]);
+        svc.admission = Arc::new(RecordingHook { deny: true, ..Default::default() });
+        for (method, path, body) in [
+            ("POST", format!("/log/{other}"), &frame[..]),
+            ("GET", format!("/log/{other}/0"), &[]),
+            ("GET", format!("/log/{other}/0?wait=0"), &[]),
+        ] {
+            let (status, _) = through_gateway(&mut svc, method, &path, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
+        }
+        svc.admission = Arc::new(AdmitAll);
+        let (status, headers, _) = through_gateway_with_headers(
+            &mut svc,
+            "GET",
+            &format!("/log/{other}/0?wait=0"),
+            &[],
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(frame_count(&headers), Some(0), "a refused append should store nothing");
     }
 
     /// The frame count a log read reported, if any.
