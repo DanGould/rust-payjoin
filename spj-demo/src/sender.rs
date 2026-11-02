@@ -6,6 +6,8 @@
 //!   their BIP 375 shares, derive the receiver's outputs from the sender's own
 //!   keys and the verified shares, and require each derived output exactly
 //!   once, paying at least what the Original paid.
+//! - [`broadcast`] and [`watch`]: broadcast the Original if the payjoin is
+//!   refused, or if it later leaves the mempool without confirming.
 //!
 //! A sender that fails any rule broadcasts its Original, which is an ordinary
 //! silent payment the receiver finds by scanning.
@@ -20,12 +22,13 @@ use bitcoin::sighash::{Annex, Prevouts, SighashCache};
 use bitcoin::taproot::ControlBlock;
 use bitcoin::{
     Amount, EcdsaSighashType, OutPoint, Script, ScriptBuf, TapSighashType, Transaction, TxOut,
-    Witness,
+    Txid, Witness,
 };
+use payjoin_test_utils::bitcoind;
 use spj_crypto::{bip352, carriage};
 
-use crate::derive;
 use crate::sp_address::SpAddress;
+use crate::{chain, derive};
 
 /// One payment the sender put in its Original.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -495,5 +498,61 @@ fn spend_is_valid(
             &key,
         )
         .is_ok()
+    }
+}
+
+/// How a broadcast ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Broadcast {
+    Payjoin(Txid),
+    /// The node refused the payjoin, so the Original went out instead.
+    Original {
+        txid: Txid,
+        refused: String,
+    },
+}
+
+/// Broadcast a signed payjoin through the sender's own node, or the Original
+/// if the node refuses it.
+pub fn broadcast(
+    node: &bitcoind::Client,
+    payjoin: &Transaction,
+    original: &Transaction,
+) -> Result<Broadcast, chain::Error> {
+    match chain::broadcast(node, payjoin) {
+        Ok(txid) => Ok(Broadcast::Payjoin(txid)),
+        Err(refused) => {
+            let txid = chain::broadcast(node, original).map_err(|e| e.to_string())?;
+            Ok(Broadcast::Original { txid, refused: refused.to_string() })
+        }
+    }
+}
+
+/// Where a broadcast payjoin stands on the sender's next look.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Watch {
+    Confirmed,
+    InMempool,
+    /// Neither confirmed nor in the mempool, so something replaced it, and
+    /// the Original went out.
+    OriginalBroadcast(Txid),
+}
+
+/// Look at a broadcast payjoin through the sender's own node. Under full RBF a
+/// conflicting transaction can evict a payjoin after the node accepted it, so
+/// a sender watches until it confirms. If it's gone, the Original is
+/// broadcast.
+pub fn watch(
+    node: &bitcoind::Client,
+    payjoin: Txid,
+    original: &Transaction,
+) -> Result<Watch, chain::Error> {
+    match chain::confirmations(node, payjoin)? {
+        Some(0) => Ok(Watch::InMempool),
+        Some(_) => Ok(Watch::Confirmed),
+        None => {
+            let txid = chain::broadcast(node, original).map_err(|e| e.to_string())?;
+            Ok(Watch::OriginalBroadcast(txid))
+        }
     }
 }
