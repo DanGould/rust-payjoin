@@ -5,12 +5,15 @@
 
 pub mod chain;
 pub mod contact;
+pub mod contacts;
 pub mod derive;
 pub mod flow;
+pub mod narrate;
 pub mod net;
 pub mod persist;
 pub mod receiver;
 pub mod regtest;
+pub mod scenes;
 pub mod sender;
 pub mod sp_address;
 pub mod uri;

@@ -202,6 +202,12 @@ impl Keychain {
         }
     }
 
+    /// Forget the coins `tx` spends, without taking its outputs as coins.
+    pub fn forget_spent(&mut self, tx: &Transaction) {
+        let spent: BTreeSet<OutPoint> = tx.input.iter().map(|i| i.previous_output).collect();
+        self.coins.retain(|coin| !spent.contains(&coin.outpoint));
+    }
+
     /// Hold a coin for a payjoin in progress.
     pub fn reserve(&mut self, outpoint: OutPoint) { self.reserved.insert(outpoint); }
 
