@@ -86,6 +86,34 @@ fn set_expiration(url: &mut Url, exp: &Time) {
     set_param(url, &exp_str)
 }
 
+/// The `OH1…-RK1…` fragment of a contact string: the directory's OHTTP keys
+/// and the receiver key, encoded as in a BIP 77 URI but with no expiration.
+#[cfg(feature = "_contact-log")]
+pub(crate) fn contact_fragment(ohttp_keys: &OhttpKeys, receiver_pubkey: &HpkePublicKey) -> String {
+    let mut url = Url::parse("http://localhost").expect("a constant URL parses");
+    set_receiver_pubkey(&mut url, receiver_pubkey);
+    set_ohttp(&mut url, ohttp_keys);
+    url.fragment().expect("both parameters were just set").to_string()
+}
+
+/// Parse a contact string's fragment into the directory's OHTTP keys and the
+/// receiver key.
+#[cfg(feature = "_contact-log")]
+pub(crate) fn parse_contact_fragment(
+    fragment: &str,
+) -> Result<(OhttpKeys, HpkePublicKey), crate::contact_log::ParseFragmentError> {
+    use crate::contact_log::ParseFragmentError;
+
+    if fragment.chars().any(|c| c.is_lowercase()) {
+        return Err(ParseFragmentError(PjParseError::LowercaseFragment.to_string()));
+    }
+    let url = Url::parse(&format!("http://localhost/#{fragment}"))
+        .map_err(|e| ParseFragmentError(e.to_string()))?;
+    let ohttp_keys = ohttp(&url).map_err(|e| ParseFragmentError(e.to_string()))?;
+    let receiver_pubkey = receiver_pubkey(&url).map_err(|e| ParseFragmentError(e.to_string()))?;
+    Ok((ohttp_keys, receiver_pubkey))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PjParam {
     directory: Url,
@@ -129,6 +157,34 @@ impl PjParam {
         let ex = expiration(&url).map_err(PjParseError::InvalidExp)?;
 
         Ok(Self::new(url, id, ex, oh, rk))
+    }
+
+    /// The parameters a sender needs to pay a receiver's contact log at
+    /// `directory`, encrypting to `receiver_pubkey`.
+    ///
+    /// A contact string carries no expiration, so the sender picks how long
+    /// it will wait for a proposal before broadcasting the Original. Send the
+    /// Original with [`crate::send::v2::Sender::create_contact_log_post_request`].
+    #[cfg(feature = "_contact-log")]
+    pub fn for_contact_log(
+        directory: Url,
+        ohttp_keys: OhttpKeys,
+        receiver_pubkey: HpkePublicKey,
+        patience: std::time::Duration,
+    ) -> Result<Self, crate::time::ConversionError> {
+        let id = ShortId::from(&receiver_pubkey);
+        let mut endpoint = directory;
+        endpoint
+            .path_segments_mut()
+            .expect("Payjoin Directory URL cannot be a base")
+            .push(&id.to_string());
+        Ok(Self::new(endpoint, id, Time::from_now(patience)?, ohttp_keys, receiver_pubkey))
+    }
+
+    /// The directory this endpoint is on, without the mailbox id.
+    #[cfg(feature = "_contact-log")]
+    pub(crate) fn directory(&self) -> Url {
+        self.directory.join(".").expect("removing the last path segment cannot fail")
     }
 
     /// The receiver's ephemeral public key. This field is accessible outside of

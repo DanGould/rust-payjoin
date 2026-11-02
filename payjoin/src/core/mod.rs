@@ -33,6 +33,8 @@ pub(crate) mod hpke;
 pub mod persist;
 #[cfg(feature = "v2")]
 pub use crate::hpke::{HpkeKeyPair, HpkePublicKey};
+#[cfg(feature = "_contact-log")]
+pub mod contact_log;
 #[cfg(feature = "v2")]
 pub(crate) mod ohttp;
 #[cfg(feature = "v2")]

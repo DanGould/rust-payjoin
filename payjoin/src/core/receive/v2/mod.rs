@@ -570,6 +570,17 @@ impl ReceiverBuilder {
         Self(SessionContext { max_fee_rate, ..self.0 })
     }
 
+    /// Use `receiver_key` instead of a fresh key.
+    ///
+    /// A contact log serves many payments with one receiver key, and each
+    /// payment it delivers is handled by its own session built with that key.
+    /// See [`crate::contact_log`]. Outside a contact log a receiver key must
+    /// never be reused.
+    #[cfg(feature = "_contact-log")]
+    pub fn with_receiver_key(self, receiver_key: HpkeKeyPair) -> Self {
+        Self(SessionContext { receiver_key, ..self.0 })
+    }
+
     pub fn build(self) -> NextStateTransition<SessionEvent, Receiver<Initialized>> {
         NextStateTransition::success(
             SessionEvent::Created(self.0.clone()),
@@ -602,6 +613,45 @@ impl Receiver<Initialized> {
             return Err(InternalCreateRequestError::Expired(self.session_context.expiration).into());
         }
         let (body, ohttp_ctx) = self.fallback_req_body()?;
+        let req = Request::new_v2(&self.session_context.full_relay_url(ohttp_relay)?, &body);
+        Ok((req, OhttpResponse::new(ohttp_ctx)))
+    }
+
+    /// Construct an OHTTP encapsulated GET request that reads frame `index`
+    /// of this receiver key's contact log, without waiting if the frame
+    /// hasn't arrived.
+    ///
+    /// The request carries the log's owner token, so it also creates the log
+    /// on the directory if needed. Pass the response to
+    /// [`Receiver<Initialized>::process_response`]. A frame the receiver key
+    /// can't decrypt, such as one written by a party that doesn't follow the
+    /// protocol, closes this session, so read each index with a fresh session
+    /// built with [`ReceiverBuilder::with_receiver_key`].
+    #[cfg(feature = "_contact-log")]
+    pub fn create_contact_log_request(
+        &self,
+        ohttp_relay: impl IntoUrl,
+        index: usize,
+    ) -> Result<(Request, OhttpResponse), CreateRequestError> {
+        use crate::contact_log;
+
+        if self.session_context.expiration.elapsed() {
+            return Err(InternalCreateRequestError::Expired(self.session_context.expiration).into());
+        }
+        let receiver_key = &self.session_context.receiver_key;
+        let target = contact_log::read_target(
+            &self.session_context.directory,
+            &contact_log::log_id(receiver_key),
+            index,
+        );
+        let authorization = contact_log::owner_authorization(receiver_key);
+        let (body, ohttp_ctx) = crate::ohttp::ohttp_encapsulate_with_headers(
+            &self.session_context.ohttp_keys,
+            "GET",
+            target.as_str(),
+            &[("authorization", authorization.as_bytes())],
+            None,
+        )?;
         let req = Request::new_v2(&self.session_context.full_relay_url(ohttp_relay)?, &body);
         Ok((req, OhttpResponse::new(ohttp_ctx)))
     }

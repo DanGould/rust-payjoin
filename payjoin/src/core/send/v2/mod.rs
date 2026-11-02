@@ -391,6 +391,43 @@ impl Sender<WithReplyKey> {
         Ok((request, OhttpResponse::new(ohttp_ctx)))
     }
 
+    /// Like [`Sender::create_v2_post_request`], but appends the Original PSBT
+    /// to the receiver's contact log `log_id` instead of posting it to the
+    /// receiver's v2 mailbox.
+    ///
+    /// The receiver replies to this sender's reply mailbox as in a standard
+    /// session, so the rest of the flow is unchanged. If the receiver never
+    /// created the log, the directory refuses the append with an HTTP 403
+    /// outside the OHTTP envelope, and the sender should broadcast the
+    /// Original. See [`crate::contact_log`].
+    #[cfg(feature = "_contact-log")]
+    pub fn create_contact_log_post_request(
+        &self,
+        ohttp_relay: impl IntoUrl,
+        log_id: &crate::directory::ShortId,
+    ) -> Result<(Request, OhttpResponse), CreateRequestError> {
+        if self.session_context.pj_param.expiration().elapsed() {
+            return Err(InternalCreateRequestError::Expired(
+                self.session_context.pj_param.expiration(),
+            )
+            .into());
+        }
+
+        let mut sanitized_psbt = self.session_context.psbt_ctx.original_psbt.clone();
+        clear_unneeded_fields(&mut sanitized_psbt);
+        let body = serialize_v2_body(
+            &sanitized_psbt,
+            self.session_context.psbt_ctx.output_substitution,
+            self.session_context.psbt_ctx.fee_contribution,
+            self.session_context.psbt_ctx.min_fee_rate,
+        )?;
+        let target =
+            crate::contact_log::append_target(&self.session_context.pj_param.directory(), log_id);
+        let (request, ohttp_ctx) =
+            extract_request_to(&self.session_context, ohttp_relay, body, &target)?;
+        Ok((request, OhttpResponse::new(ohttp_ctx)))
+    }
+
     /// Processes the response for the initial POST message from the sender
     /// client in the v2 Payjoin protocol.
     ///
@@ -440,6 +477,16 @@ pub(crate) fn extract_request(
     ohttp_relay: impl IntoUrl,
     body: Vec<u8>,
 ) -> Result<(Request, ClientResponse), CreateRequestError> {
+    extract_request_to(session_context, ohttp_relay, body, &session_context.pj_param.endpoint())
+}
+
+/// Encrypt message A and encapsulate it as a `POST` to `target`.
+fn extract_request_to(
+    session_context: &SessionContext,
+    ohttp_relay: impl IntoUrl,
+    body: Vec<u8>,
+    target: &Url,
+) -> Result<(Request, ClientResponse), CreateRequestError> {
     let body = encrypt_message_a(
         body,
         HpkeKeyPair::from_secret_key(&session_context.reply_key).public_key(),
@@ -450,7 +497,7 @@ pub(crate) fn extract_request(
     let (body, ohttp_ctx) = ohttp_encapsulate(
         session_context.pj_param.ohttp_keys(),
         "POST",
-        session_context.pj_param.endpoint().as_str(),
+        target.as_str(),
         Some(&body),
     )
     .map_err(InternalCreateRequestError::OhttpEncapsulation)?;

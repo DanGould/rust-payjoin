@@ -18,6 +18,19 @@ pub(crate) fn ohttp_encapsulate(
     target_resource: &str,
     body: Option<&[u8]>,
 ) -> Result<([u8; ENCAPSULATED_MESSAGE_BYTES], ohttp::ClientResponse), OhttpEncapsulationError> {
+    ohttp_encapsulate_with_headers(ohttp_keys, method, target_resource, &[], body)
+}
+
+/// Like [`ohttp_encapsulate`], with `headers` on the inner request. The
+/// headers and the target's query travel inside the encapsulation, so the
+/// relay sees neither.
+pub(crate) fn ohttp_encapsulate_with_headers(
+    ohttp_keys: &OhttpKeys,
+    method: &str,
+    target_resource: &str,
+    headers: &[(&str, &[u8])],
+    body: Option<&[u8]>,
+) -> Result<([u8; ENCAPSULATED_MESSAGE_BYTES], ohttp::ClientResponse), OhttpEncapsulationError> {
     use std::fmt::Write;
     let ohttp_keys = ohttp_keys.0.clone();
 
@@ -30,13 +43,19 @@ pub(crate) fn ohttp_encapsulate(
         }
         authority.into_bytes()
     };
+    let path_and_query = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_string(),
+    };
     let mut bhttp_message = bhttp::Message::request(
         method.as_bytes().to_vec(),
         url.scheme().as_bytes().to_vec(),
         authority_bytes,
-        url.path().as_bytes().to_vec(),
+        path_and_query.into_bytes(),
     );
-    // None of our messages include headers, so we don't add them
+    for (name, value) in headers {
+        bhttp_message.put_header(*name, *value);
+    }
     if let Some(body) = body {
         bhttp_message.write_content(body);
     }

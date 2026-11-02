@@ -82,6 +82,11 @@ fn ellswift_bytes_from_encapped_key(
 #[derive(Clone, PartialEq, Eq)]
 pub struct HpkeSecretKey(SecretKey);
 
+impl HpkeSecretKey {
+    #[cfg(feature = "_contact-log")]
+    pub(crate) fn to_bytes(&self) -> [u8; 32] { self.0.to_bytes().into() }
+}
+
 impl fmt::Debug for HpkeSecretKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "SecpHpkeSecretKey([REDACTED])")

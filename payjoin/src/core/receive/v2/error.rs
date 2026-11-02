@@ -16,6 +16,17 @@ impl From<InternalSessionError> for SessionError {
     fn from(value: InternalSessionError) -> Self { SessionError(value) }
 }
 
+impl SessionError {
+    /// Whether the receiver key couldn't decrypt the message the directory
+    /// delivered.
+    ///
+    /// A contact log is open to any writer, so a frame the key can't decrypt
+    /// is skipped rather than ending the log, while a bad directory response
+    /// is not. See [`crate::contact_log`].
+    #[cfg(feature = "_contact-log")]
+    pub fn is_undecryptable(&self) -> bool { matches!(self.0, InternalSessionError::Hpke(_)) }
+}
+
 impl From<crate::into_url::Error> for SessionError {
     fn from(e: crate::into_url::Error) -> Self { SessionError(InternalSessionError::ParseUrl(e)) }
 }
