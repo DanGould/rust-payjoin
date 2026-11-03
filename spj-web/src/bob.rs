@@ -311,6 +311,7 @@ impl Bob {
             entry.label = entry.label.or(f.label);
             entry.restored = Some(entry.restored.unwrap_or(true) && restored.contains(&f.outpoint));
             self.received.insert(f.outpoint, f.value);
+            self.receiver.record_silent_coin(f.outpoint);
         }
         for h in self.scanned + 1..=height {
             for tx in chain::block(client, h)? {

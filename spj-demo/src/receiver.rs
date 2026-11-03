@@ -59,6 +59,8 @@ pub enum Decline {
     NotV2,
     /// No coin the receiver can prove a share for.
     NoCoin,
+    /// The coin the receiver would add is a silent payment output.
+    SilentPaymentCoin(OutPoint),
     /// The finished proposal failed the receiver's own check.
     SelfCheck(SelfCheckError),
     /// The payjoin session refused a step.
@@ -76,6 +78,8 @@ impl fmt::Display for Decline {
             Decline::SubstitutionDisabled => write!(f, "the sender disallowed output substitution"),
             Decline::NotV2 => write!(f, "the Original came from a BIP 78 sender"),
             Decline::NoCoin => write!(f, "no coin to add"),
+            Decline::SilentPaymentCoin(op) =>
+                write!(f, "the coin to add, {op}, is a silent payment output"),
             Decline::SelfCheck(e) => write!(f, "self-check failed: {e}"),
             Decline::Session(e) => write!(f, "session: {e}"),
         }
@@ -108,6 +112,9 @@ pub struct SpReceiver {
     pub labels: LabelBook,
     /// Inputs of every Original received, across all of this receiver's URIs.
     seen: BTreeSet<OutPoint>,
+    /// Silent payment outputs the receiver holds, which it never adds to a
+    /// payjoin.
+    silent_coins: BTreeSet<OutPoint>,
     /// The fee rates the receiver accepts paying for its own input.
     pub fee_range: (FeeRate, FeeRate),
 }
@@ -120,11 +127,16 @@ impl SpReceiver {
             secp,
             keys,
             seen: BTreeSet::new(),
+            silent_coins: BTreeSet::new(),
             fee_range: (FeeRate::BROADCAST_MIN, FeeRate::from_sat_per_vb_u32(2)),
         }
     }
 
     pub fn address(&self) -> SpAddress { self.keys.address(&self.secp) }
+
+    /// Record that `outpoint` is a silent payment output paying this
+    /// receiver, so that [`Self::propose`] refuses to add it.
+    pub fn record_silent_coin(&mut self, outpoint: OutPoint) { self.silent_coins.insert(outpoint); }
 
     /// The address and label of the contact named `name`, the same each
     /// time it is asked for.
@@ -197,12 +209,12 @@ impl SpReceiver {
         if log.from_v2_sender() != Some(true) {
             return Err(Decline::NotV2);
         }
-        let coin = coins.spendable().into_iter().next().ok_or(Decline::NoCoin)?;
+        let coin = pick_coin(coins, &self.silent_coins)?;
         let coin_secret = coins.bip352_secret(&coin.txout.script_pubkey).ok_or(Decline::NoCoin)?;
 
         // The coin is chosen, so the final input set is known: re-derive each
         // output paying the receiver over it, in the order its `k` was found
-        // and on the label it was paid to, so it stays with that URI.
+        // and on the label it was paid to, where the payer's check looks.
         let labels: Vec<Option<u32>> = found.iter().map(|f| f.label).collect();
         let mut derived = Vec::new();
         let outputs = if found.is_empty() {
@@ -277,6 +289,16 @@ impl SpReceiver {
         coins.reserve(coin.outpoint);
         Ok(Proposal { receiver, coin, found, derived, share })
     }
+}
+
+/// The coin to add to a payjoin from `coins`, refusing one in `silent`.
+fn pick_coin(coins: &Keychain, silent: &BTreeSet<OutPoint>) -> Result<Coin, Decline> {
+    let coin = coins.spendable().into_iter().next().ok_or(Decline::NoCoin)?;
+    // A payer who knows a silent payment coin's tweak learns b_scan·B_spend from its share.
+    if silent.contains(&coin.outpoint) {
+        return Err(Decline::SilentPaymentCoin(coin.outpoint));
+    }
+    Ok(coin)
 }
 
 /// The BIP 352 keys of a transaction's eligible inputs.
@@ -442,4 +464,36 @@ pub fn self_check(
         return Err(SelfCheckError::SenderMisses);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::{absolute, transaction, Amount};
+
+    use super::*;
+    use crate::wallet::KeyKind;
+
+    #[test]
+    fn a_silent_payment_coin_is_never_added() {
+        let mut coins = Keychain::new("test", "pick coin test", KeyKind::P2tr, 0);
+        let funding = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: coins.address().script_pubkey(),
+            }],
+        };
+        coins.credit(&funding);
+        let coin = coins.coins()[0].clone();
+
+        let mut receiver = SpReceiver::new(SpKeys::from_seed("pick coin test"));
+        assert_eq!(pick_coin(&coins, &receiver.silent_coins).ok(), Some(coin.clone()));
+        receiver.record_silent_coin(coin.outpoint);
+        assert!(matches!(
+            pick_coin(&coins, &receiver.silent_coins),
+            Err(Decline::SilentPaymentCoin(op)) if op == coin.outpoint
+        ));
+    }
 }
