@@ -32,7 +32,7 @@ Alice scans it. Her wallet speaks both, but Bob already gave her a fresh address
 
 ## confirmed
 
-Confirmed. And if Bob ever loses this phone, a fresh wallet from his backup words and derivation path runs the same scan, and finds the same money.
+Confirmed. And if Bob ever loses this phone, a fresh wallet from his backup words and derivation path finds the same money.
 
 ## contact-note
 
