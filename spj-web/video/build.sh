@@ -92,18 +92,22 @@ WORK="$work/take" WALLETS_URL="http://127.0.0.1:$wallet_port" CHROME=chromium \
 # locally. Its count of requests shows they all went there.
 curl -sf "http://127.0.0.1:$wallet_port/api/state" >"$work/state.json"
 python3 -c 'import json,sys; m = json.load(sys.stdin)["mailroom"]; print("mailroom {}: {} requests, all to the local directory".format(m["host"], m["requests"]))' <"$work/state.json"
-# Each transfer Bob found by scanning, the label it paid if any, and
-# whether a wallet restored from his backup words, knowing no labels, finds
-# it too. A silent transfer the restore misses fails the take.
+# Each transfer Bob received, where it landed (an ordinary address, or his
+# silent payment address and the label it paid, if any), and whether a
+# wallet restored from his backup words finds it too: ordinary addresses up
+# to the gap limit, silent payments by scanning with no labels known. A
+# transfer the restore misses fails the take.
 python3 -c '
 import json, sys
 received = json.load(sys.stdin)["received"]
 missed = 0
 for r in received:
     if not r["by_scan"]:
-        print("received {}: {} sats to the address".format(r["txid"][:12], r["amount"]))
-        continue
-    to = "the unlabelled silent payment address" if r["label"] is None else "label {}".format(r["label"])
+        to = "an ordinary address"
+    elif r["label"] is None:
+        to = "the unlabelled silent payment address"
+    else:
+        to = "label {}".format(r["label"])
     print("received {}: {} sats on {}{}, restore {}".format(
         r["txid"][:12], r["amount"], to,
         " ({})".format(r["label_for"]) if r["label_for"] else "",

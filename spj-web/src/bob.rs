@@ -28,6 +28,14 @@ use crate::Shared;
 
 pub type Reply = oneshot::Sender<Result<Value, String>>;
 
+/// The seed of Bob's wallet, which his backup words stand for.
+const SEED: &str = "bob";
+/// The BIP 86 account whose addresses go in one-time URIs.
+const ONE_TIME_ACCOUNT: u32 = 0;
+/// How many unused receive addresses in a row a restored wallet derives
+/// before it stops looking, as BIP 44 sets it.
+const GAP_LIMIT: u32 = 20;
+
 pub enum Command {
     /// Show a one-time URI for this amount.
     OneTime { amount: Amount, reply: Reply },
@@ -59,6 +67,9 @@ pub struct Bob {
     /// What Bob holds besides his keychains' coins: outputs found by scanning
     /// and payments to a one-time URI's ordinary address.
     received: BTreeMap<OutPoint, Amount>,
+    /// Every output script in the blocks scanned, which a restored wallet
+    /// checks its ordinary addresses against.
+    on_chain: BTreeSet<ScriptBuf>,
 }
 
 impl Bob {
@@ -76,14 +87,15 @@ impl Bob {
             scanned,
             index: Vec::new(),
             received: BTreeMap::new(),
+            on_chain: BTreeSet::new(),
         }
     }
 
     /// The keychains a demo Bob funds from before the wallets start.
     pub fn keychains() -> (Keychain, Keychain) {
         (
-            Keychain::new("bob-hot", "bob", KeyKind::P2tr, 0),
-            Keychain::new("bob-keychain", "bob", KeyKind::P2tr, 1),
+            Keychain::new("bob-hot", SEED, KeyKind::P2tr, ONE_TIME_ACCOUNT),
+            Keychain::new("bob-keychain", SEED, KeyKind::P2tr, 1),
         )
     }
 
@@ -283,9 +295,10 @@ impl Bob {
 
     /// Scan blocks since the last scan: each taproot output against Bob's
     /// scan key and the labels he handed out, plus payments to a one-time
-    /// URI's ordinary address. Each silent transfer found is also looked
-    /// for the way a wallet restored from his backup words would, knowing
-    /// no labels, over every block so far.
+    /// URI's ordinary address. Each transfer found is also looked for the
+    /// way a wallet restored from his backup words would, over every block
+    /// so far: silent payments by scanning without knowing any labels,
+    /// ordinary addresses by deriving them up to the gap limit.
     async fn scan(&mut self) -> Result<(), Error> {
         let client = self.shared.regtest.client();
         let height = chain::height(client)?;
@@ -331,10 +344,13 @@ impl Bob {
                     })
                     .sum();
                 for (vout, out) in tx.output.iter().enumerate() {
+                    self.on_chain.insert(out.script_pubkey.clone());
                     if self.one_time_coins.owns(&out.script_pubkey) {
                         let outpoint = OutPoint { txid, vout: vout as u32 };
                         self.received.insert(outpoint, out.value);
-                        by_tx.entry(txid).or_default().gross += out.value.to_sat();
+                        let entry = by_tx.entry(txid).or_default();
+                        entry.gross += out.value.to_sat();
+                        entry.ordinary.push(out.script_pubkey.clone());
                     }
                 }
                 if spent > 0 {
@@ -347,9 +363,14 @@ impl Bob {
             }
         }
         self.scanned = height;
-        for (txid, received) in by_tx {
+        let restored_ordinary = restore_ordinary(&self.on_chain);
+        for (txid, mut received) in by_tx {
             if received.gross == 0 {
                 continue;
+            }
+            if !received.ordinary.is_empty() {
+                let found = received.ordinary.iter().all(|s| restored_ordinary.contains(s));
+                received.restored = Some(received.restored.unwrap_or(true) && found);
             }
             let label_for = received.label.and_then(|m| match self.receiver.labels.purpose(m)? {
                 Purpose::Contact(name) => Some(name.clone()),
@@ -374,6 +395,25 @@ impl Bob {
     }
 }
 
+/// The addresses of Bob's one-time account that a wallet restored from his
+/// backup words finds paid in `on_chain`: it derives them in order, and
+/// stops after [`GAP_LIMIT`] in a row that nothing pays.
+fn restore_ordinary(on_chain: &BTreeSet<ScriptBuf>) -> BTreeSet<ScriptBuf> {
+    let mut restored = Keychain::new("restored", SEED, KeyKind::P2tr, ONE_TIME_ACCOUNT);
+    let mut found = BTreeSet::new();
+    let mut unused = 0;
+    while unused < GAP_LIMIT {
+        let script = restored.address().script_pubkey();
+        if on_chain.contains(&script) {
+            found.insert(script);
+            unused = 0;
+        } else {
+            unused += 1;
+        }
+    }
+    found
+}
+
 /// What one transaction brought Bob.
 #[derive(Default)]
 struct Received {
@@ -383,7 +423,26 @@ struct Received {
     by_scan: bool,
     /// The label its silent payment output pays.
     label: Option<u32>,
-    /// Whether a restore from Bob's backup words finds every silent payment
-    /// output in it. `None` when it has none.
+    /// Its outputs to addresses of Bob's one-time account.
+    ordinary: Vec<ScriptBuf>,
+    /// Whether a restore from Bob's backup words finds every output in it
+    /// that pays Bob. `None` when it has none.
     restored: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restore_finds_ordinary_addresses_up_to_the_gap_limit() {
+        let (mut one_time, _) = Bob::keychains();
+        let scripts: Vec<ScriptBuf> =
+            (0..=GAP_LIMIT + 10).map(|_| one_time.address().script_pubkey()).collect();
+        let near = scripts[4].clone();
+        let far = scripts[4 + GAP_LIMIT as usize + 1].clone();
+        let restored = restore_ordinary(&BTreeSet::from([near.clone(), far.clone()]));
+        assert!(restored.contains(&near));
+        assert!(!restored.contains(&far), "past the gap limit");
+    }
 }
