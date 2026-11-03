@@ -291,7 +291,9 @@
                 new Promise((ok) => {
                   const g = st.get(s.id);
                   g.onsuccess = () => {
-                    if (g.result) takes.set(s.id, g.result);
+                    // A take counts only for the wording it was read from.
+                    if (g.result && g.result.text === s.html)
+                      takes.set(s.id, g.result);
                     ok();
                   };
                   g.onerror = () => ok();
@@ -434,7 +436,11 @@
         );
         if (kept.length < rate * 0.3) return;
         const pcm = trim(kept, rate);
-        const take = { blob: wav(pcm, rate), seconds: pcm.length / rate };
+        const take = {
+          blob: wav(pcm, rate),
+          seconds: pcm.length / rate,
+          text: SEGMENTS[at].html,
+        };
         const id = SEGMENTS[at].id;
         takes.set(id, take);
         saveTake(id, take);
