@@ -16,7 +16,7 @@ Naively, the two don't work together. The onchain address derived from a silent 
 
 ## overview
 
-This video shows how one URI gets him both. A one-time URI is an ordinary payjoin that also tells the payer Bob has a silent payment address. A contact URI, for someone Bob transacts with again and again, is where Silent Payjoin happens. There's not one open donation address and mailbox for everyone. More on that at the end.
+This video shows how one URI gets him both. A one-time URI is an ordinary payjoin that also tells the payer Bob has a silent payment address. A contact URI, for someone Bob transacts with again and again, is where a Silent Payjoin happens. There's not one open donation address and mailbox for everyone. More on that at the end.
 
 ## one-time
 
