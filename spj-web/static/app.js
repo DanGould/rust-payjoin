@@ -464,8 +464,7 @@ const payoutName = (payout) =>
 
 const tagHtml = ([cls, text]) => `<span class="tag ${cls}">${text}</span>`;
 
-// The BIP 352 label a silent payment address carries, and for a contact's
-// label, whose it is. A one-time URI's label needs no name: it is the URI's.
+// The BIP 352 label a silent payment address carries, and whose it is.
 function labelChip(m, contact) {
   const text = contact ? `label ${m}, ${contact}` : `label ${m}`;
   return `<span class="lbl">${esc(text)}</span>`;

@@ -162,8 +162,8 @@ pub struct Restored {
 /// Backup words hold the keys, not how many labels the wallet handed out,
 /// and a restore only finds outputs on labels it searches for. 20 is BIP
 /// 44's address gap limit, with the same trade-off: after more than 20
-/// URIs in a row that are never paid, a restore misses what the next ones
-/// receive. A full-node scan pays at most one point addition per label
+/// contacts in a row that never pay, a restore misses what the next ones
+/// send. A full-node scan pays at most one point addition per label
 /// per transaction, but a light client tests one candidate key per label
 /// against block filters, and pays per label in downloads and false
 /// positives, which is what keeps the number small.
@@ -229,12 +229,12 @@ mod tests {
     use super::*;
     use crate::derive::SpKeys;
 
-    /// One transaction paying `keys` on label `m` at `k = 0`.
-    fn paying(secp: &Secp256k1<All>, keys: &SpKeys, n: u8, m: u32) -> TweakEntry {
+    /// One transaction paying `keys` on label `m`, or unlabelled, at `k = 0`.
+    fn paying(secp: &Secp256k1<All>, keys: &SpKeys, n: u8, m: Option<u32>) -> TweakEntry {
         let tweak = SecretKey::from_slice(&[n; 32]).unwrap().public_key(secp);
         let ecdh = tweak.mul_tweak(secp, &Scalar::from(keys.scan)).unwrap();
         let t_0 = bip352::output_tweak(&ecdh, 0).unwrap();
-        let output = keys.spend_for(secp, Some(m)).unwrap().add_exp_tweak(secp, &t_0).unwrap();
+        let output = keys.spend_for(secp, m).unwrap().add_exp_tweak(secp, &t_0).unwrap();
         TweakEntry {
             height: n.into(),
             txid: Txid::from_byte_array([n; 32]),
@@ -243,20 +243,22 @@ mod tests {
         }
     }
 
-    /// A restore finds labels within the lookahead of the highest one it
-    /// has found, however far that has climbed, and none beyond.
+    /// A restore finds the unlabelled address and labels within the
+    /// lookahead of the highest one it has found, however far that has
+    /// climbed, and none beyond.
     #[test]
     fn restore_searches_past_each_label_it_finds() {
         let secp = Secp256k1::new();
         let keys = SpKeys::from_seed("restore test");
         let spend = keys.spend.public_key(&secp);
         let reach = LABEL_LOOKAHEAD;
-        let index: Vec<TweakEntry> = [(1, reach), (2, 2 * reach), (3, 3 * reach + 1)]
-            .into_iter()
-            .map(|(n, m)| paying(&secp, &keys, n, m))
-            .collect();
+        let index: Vec<TweakEntry> =
+            [(1, None), (2, Some(reach)), (3, Some(2 * reach)), (4, Some(3 * reach + 1))]
+                .into_iter()
+                .map(|(n, m)| paying(&secp, &keys, n, m))
+                .collect();
         let labels: Vec<_> =
             restore(&secp, &keys.scan, &spend, &index).iter().map(|f| f.label).collect();
-        assert_eq!(labels, [Some(reach), Some(2 * reach)]);
+        assert_eq!(labels, [None, Some(reach), Some(2 * reach)]);
     }
 }

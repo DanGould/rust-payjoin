@@ -1,7 +1,7 @@
-//! Bob's phone: a silent payment wallet that hands out one-time URIs and
-//! a contact URI, each on its own label, answers each Original that
-//! arrives with a coin and a proof, and finds what it received by scanning
-//! new blocks.
+//! Bob's phone: a silent payment wallet that hands out one-time URIs on
+//! his unlabelled address and a contact URI on the contact's own label,
+//! answers each Original that arrives with a coin and a proof, and finds
+//! what it received by scanning new blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -134,16 +134,10 @@ impl Bob {
 
     fn one_time(&mut self, amount: Amount) -> Result<Value, Error> {
         let body = self.one_time_coins.address();
-        let (label, sp) = self.receiver.next_one_time();
+        let sp = self.receiver.address();
         let one_time = flow::one_time(&self.shared.regtest.mailroom, sp, body, amount)?;
         let uri = one_time.uri.to_string();
-        self.receiver.record_one_time(label, uri.clone());
-        let data = json!({
-            "uri": uri,
-            "amount": amount.to_sat(),
-            "qr": qr_svg(&uri),
-            "label": label,
-        });
+        let data = json!({ "uri": uri, "amount": amount.to_sat(), "qr": qr_svg(&uri) });
         self.one_time = Some(one_time);
         self.emit("bob.one_time", data.clone());
         Ok(data)

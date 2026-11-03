@@ -1,16 +1,11 @@
-//! Which BIP 352 label a receiver puts in each URI it hands out.
+//! Which BIP 352 label a receiver gives each contact.
 //!
-//! When the receiver adds a coin it received as a silent payment to a
-//! payjoin, the coin's BIP 375 share is `(b_m + t)·B_scan`, where `b_m` is
-//! the spend secret of the label `m` the coin was paid on and `t` the
-//! coin's output tweak. A payer that knows `t`, because it made the coin,
-//! learns `b_scan·B_m` from the share. For the unlabelled address that is
-//! `b_scan·B_spend`, which lets the payer pick out the receiver's outputs
-//! in any later spend made only of coins it paid. For a label it covers
-//! that label alone. So each one-time URI gets a fresh label, and each
-//! contact gets one label, fixed for as long as the contact lasts, so what
-//! a contact can learn covers only the coins it paid. Label 0 stays
-//! reserved for change, as BIP 352 says.
+//! A one-time URI carries the receiver's unlabelled silent payment address.
+//! Its fresh mailbox already tells the receiver which URI a payer used, and
+//! every label costs a light client one more filter lookup per transaction.
+//! A contact gets one label, fixed for as long as the contact lasts, so the
+//! receiver can tell which contact a transfer came from. Label 0 stays
+//! reserved for change, as BIP 352 says, so contacts are numbered from 1.
 
 use std::collections::BTreeMap;
 
@@ -27,8 +22,6 @@ pub const CHANGE: u32 = 0;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Purpose {
     Change,
-    /// A one-time URI, as handed out.
-    OneTime(String),
     /// A contact, by the name the receiver gave it.
     Contact(String),
 }
@@ -48,8 +41,8 @@ impl LabelBook {
         }
     }
 
-    /// The label the next one-time URI takes: one above the highest
-    /// handed out, so no two URIs share one.
+    /// The label the next contact takes: one above the highest handed
+    /// out, so no two contacts share one.
     pub fn next(&self) -> u32 { self.purposes.last_key_value().map_or(CHANGE, |(m, _)| m + 1) }
 
     /// Record that label `m` went to `purpose`, and scan for it from now on.
@@ -96,24 +89,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_time_uris_take_fresh_labels_and_a_contact_keeps_its_own() {
+    fn contacts_take_labels_from_1_and_keep_them() {
         let secp = Secp256k1::new();
         let keys = SpKeys::from_seed("labels test");
         let mut book = LabelBook::new(&secp, &keys);
         assert_eq!(book.next(), 1, "label 0 is change");
 
-        let first = book.next();
-        book.record(&secp, &keys, first, Purpose::OneTime("uri 1".into()));
         let (exchange, address) = book.contact_address(&secp, &keys, "Exchange").unwrap();
-        let second = book.next();
-        book.record(&secp, &keys, second, Purpose::OneTime("uri 2".into()));
-        assert_eq!((first, exchange, second), (1, 2, 3));
+        let (friend, _) = book.contact_address(&secp, &keys, "Friend").unwrap();
+        assert_eq!((exchange, friend), (1, 2));
 
         let (again, same) = book.contact_address(&secp, &keys, "Exchange").unwrap();
         assert_eq!((again, same), (exchange, address), "a contact keeps its label");
         assert_eq!(same, keys.labelled_address(&secp, exchange).unwrap());
-        assert_eq!(book.purpose(first), Some(&Purpose::OneTime("uri 1".into())));
-        assert_eq!(book.table().len(), 4);
-        assert_eq!(book.table().highest(), Some(3));
+        assert_eq!(book.purpose(exchange), Some(&Purpose::Contact("Exchange".into())));
+        assert_eq!(book.table().len(), 3);
+        assert_eq!(book.table().highest(), Some(2));
     }
 }

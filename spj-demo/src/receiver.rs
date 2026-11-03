@@ -33,7 +33,7 @@ use spj_crypto::{bip352, carriage};
 use crate::chain;
 pub use crate::derive::SpKeys;
 use crate::derive::{self, scan, Found};
-use crate::labels::{LabelBook, Purpose};
+use crate::labels::LabelBook;
 use crate::persist::EventLog;
 use crate::sp_address::SpAddress;
 use crate::wallet::{Coin, Keychain};
@@ -125,18 +125,6 @@ impl SpReceiver {
     }
 
     pub fn address(&self) -> SpAddress { self.keys.address(&self.secp) }
-
-    /// The address for the next one-time URI, on a label no other URI has.
-    /// Record the URI with [`Self::record_one_time`] once it is made.
-    pub fn next_one_time(&self) -> (u32, SpAddress) {
-        let m = self.labels.next();
-        (m, self.keys.labelled_address(&self.secp, m).expect("label tweaks are valid scalars"))
-    }
-
-    /// Scan for label `m` from now on, as the label of one-time URI `uri`.
-    pub fn record_one_time(&mut self, m: u32, uri: String) {
-        self.labels.record(&self.secp, &self.keys, m, Purpose::OneTime(uri));
-    }
 
     /// The address and label of the contact named `name`, the same each
     /// time it is asked for.

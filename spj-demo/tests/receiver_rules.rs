@@ -192,26 +192,23 @@ async fn s9e_silent_payjoin_on_regtest_is_found_from_the_tweak_index() -> Result
     Ok(())
 }
 
-/// R1 with a label: Bob's one-time URI carries his address on a fresh label.
-/// His scan of the Original finds the output on that label, he re-derives it
-/// on the same label, Alice's check derives it from the labelled `sp=` in
-/// the URI, and a restore from Bob's seed finds the confirmed payjoin there.
+/// R1 with a label: Bob's address on the label he gave a contact. His scan
+/// of the Original finds the output on that label, he re-derives it on the
+/// same label, Alice's check derives it from the labelled `sp=` she was
+/// given, and a restore from Bob's seed finds the confirmed payjoin there.
+/// A one-time session carries it here, since the derivation doesn't depend
+/// on how the Original reaches Bob.
 #[tokio::test(flavor = "multi_thread")]
-async fn r1_labelled_one_time_uri() -> Result<(), Error> {
+async fn r1_labelled_contact_address() -> Result<(), Error> {
     let Cast { regtest, mut bob, mut bob_coins, mut alice } = cast(1, 1).await?;
     let secp = secp();
     let amount = Amount::from_sat(50_000);
     let start = chain::height(regtest.client())?;
-    for earlier in ["first", "second"] {
-        let (m, _) = bob.next_one_time();
-        bob.record_one_time(m, earlier.into());
-    }
-    let (m, sp) = bob.next_one_time();
-    assert_eq!(m, 3, "label 0 is change and two URIs came before");
+    let (m, sp) = bob.contact_address("Exchange");
+    assert_eq!(m, 1, "label 0 is change");
     assert_ne!(sp, bob.address());
     let body = bob_coins.address();
     let one_time = flow::one_time(&regtest.mailroom, sp, body.clone(), amount)?;
-    bob.record_one_time(m, one_time.uri.to_string());
     let original = flow::sp_original(&secp, &mut alice, &one_time.uri.sp, amount)?;
     let sending = flow::post_original(
         &regtest.mailroom,
@@ -234,7 +231,7 @@ async fn r1_labelled_one_time_uri() -> Result<(), Error> {
         Some(&body.script_pubkey()),
     )?;
     let labels: Vec<_> = proposal.found.iter().map(|f| f.label).collect();
-    assert_eq!(labels, [Some(m)], "the Original pays the URI's label");
+    assert_eq!(labels, [Some(m)], "the Original pays the contact's label");
     flow::post_proposal(&regtest.mailroom, &proposal.receiver, &one_time.log).await?;
 
     let mut psbt = flow::poll_proposal(&regtest.mailroom, &sending).await?.ok_or("a proposal")?;
