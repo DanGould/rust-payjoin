@@ -747,7 +747,7 @@ await sleep(1500);
 await spot(
   $("#uri .part.sp"),
   "Bob's silent payment address",
-  "On a fresh label, for this URI alone",
+  "Labelled for this URI",
 );
 await sleep(1600);
 await spot($("#uri .part.pj"), "A payjoin mailbox");
