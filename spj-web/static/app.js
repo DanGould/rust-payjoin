@@ -23,7 +23,7 @@ const shortMid = (s, a = 10, b = 6) =>
 const PEOPLE = {
   carol: { name: "Carol", kind: "Payjoin wallet" },
   alice: { name: "Alice", kind: "Silent payment wallet" },
-  exchange: { name: "Exchange", kind: "Pays its users" },
+  exchange: { name: "Exchange", kind: "Back office" },
   bob: { name: "Bob", kind: "Silent payment wallet" },
 };
 
@@ -139,8 +139,8 @@ function setTx(tx, status, cls = "") {
     checked: old?.checked ?? false,
     found: old?.found ?? false,
     rederived: old?.rederived ?? false,
-    // The key Bob's output had in the payer's payment, before Bob worked it
-    // out again.
+    // The key Bob's output had in the payer's transaction, before Bob worked
+    // it out again.
     firstKey: old?.firstKey ?? bobKey(tx),
   };
 }
@@ -185,13 +185,15 @@ async function apply({ kind, data }) {
       await pickUp("#bob");
       Object.assign(state.bob, {
         screen: "incoming",
-        steps: ["A payment is in my mailbox"],
+        steps: ["A transaction is waiting in my mailbox"],
         status: "Answering",
       });
       return;
     case "bob.found":
       state.bob.steps.push(
-        data.silent ? "Found my output by scanning" : "It pays my address",
+        data.silent
+          ? "Found my output in it by scanning"
+          : "It pays my address",
       );
       if (state.tx) state.tx.found = data.silent;
       return;
@@ -215,26 +217,37 @@ async function apply({ kind, data }) {
     case "bob.declined":
       state.bob.steps.push(
         data.already_paid
-          ? "Already paid on chain. Nothing to add"
+          ? "It already went out on chain. Nothing to add"
           : `Declined: ${data.reason}`,
       );
-      state.bob.status = "";
+      state.bob.status = data.already_paid ? "Scanning the chain" : "";
+      state.bob.alreadyPaid = data.already_paid;
       return;
     case "bob.received": {
       const tags = data.by_scan
         ? data.payjoin
-          ? ["spj", "Silent payjoin"]
+          ? ["spj", "Silent Payjoin"]
           : ["sp", "Silent payment"]
         : ["pj", "Payjoin"];
+      // A message read after its transaction went out: the steps stay up,
+      // ending with where the money was found.
+      if (state.bob.screen === "incoming" && state.bob.alreadyPaid) {
+        state.bob.steps.push(
+          `Found it in a block by scanning, +${sats(data.amount)}`,
+        );
+        state.bob.status = "";
+        state.bob.alreadyPaid = false;
+      } else {
+        state.bob.screen = "home";
+      }
       state.bob.activity.unshift({
         what: "Received",
         amount: data.amount,
         tag: tags,
-        sub: data.by_scan ? "Found by scanning" : "Paid to the request address",
+        sub: data.by_scan ? "Found by scanning" : "Paid to the URI's address",
         fresh: moving,
       });
       state.bob.balance = data.balance;
-      state.bob.screen = "home";
       return;
     }
   }
@@ -257,18 +270,18 @@ async function apply({ kind, data }) {
       p.screen = "progress";
       p.steps.push(
         who === "carol"
-          ? "Signed a payment to the address"
+          ? "Signed a transaction to the address"
           : "Worked out Bob's output and signed",
       );
       p.status = "Waiting for Bob";
       state.uri = null;
-      setTx(data.tx, `${payerName(who)}'s payment`);
+      setTx(data.tx, `${payerName(who)}'s transaction`);
       state.tx.checked = false;
       state.tx.found = false;
       state.tx.rederived = false;
       state.tx.firstKey = bobKey(state.tx);
       render();
-      await post("#payer", "Payment");
+      await post("#payer", "Transaction");
       if (state.tx) state.tx.status = "In Bob's mailbox";
       return;
     }
@@ -293,7 +306,7 @@ async function apply({ kind, data }) {
           ? "No answer from Bob in time"
           : `Rejected the proposal: ${data.reason}`,
       );
-      p.status = "Sending the payment as it is";
+      p.status = "Sending the transaction as it is";
       if (state.tx) {
         state.tx.status = "Sent as it is";
         state.tx.cls = "fallback";
@@ -302,19 +315,19 @@ async function apply({ kind, data }) {
       return;
     case "broadcast":
       p.steps.push(
-        data.payjoin ? "Signed and broadcast" : "Sent the payment as it is",
+        data.payjoin ? "Signed and broadcast" : "Sent the transaction as it is",
       );
       p.status = "Broadcasting";
       setTx(data.tx, "In mempool", "mempool");
       if (!data.payjoin) state.tx.cls = "mempool";
       render();
-      await fly("#payer", "#network", data.payjoin ? "Payjoin" : "Payment");
+      await fly("#payer", "#network", data.payjoin ? "Payjoin" : "Transaction");
       return;
     case "confirmed": {
       const silent = who !== "carol";
       const tag = data.payjoin
         ? silent
-          ? ["spj", "Silent payjoin"]
+          ? ["spj", "Silent Payjoin"]
           : ["pj", "Payjoin"]
         : ["sp", "Silent payment"];
       if (state.tx) {
@@ -436,7 +449,7 @@ function balance(sat) {
 
 const tagHtml = ([cls, text]) => `<span class="tag ${cls}">${text}</span>`;
 
-function activity(rows, empty = "No payments yet") {
+function activity(rows, empty = "Nothing yet") {
   if (!rows.length) return `<div class="empty">${empty}</div>`;
   return `<ul class="list">${rows
     .slice(0, 4)
@@ -449,10 +462,15 @@ function activity(rows, empty = "No payments yet") {
     .join("")}</ul>`;
 }
 
+// A QR finder: four corners and a scan line.
+const SCAN_ICON = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/><path d="M7 12h10"/></svg>`;
+
 function contactCard(c) {
   if (!c) return "";
+  // A contact without reusable payjoin offers to scan the contact's
+  // contact URI, which has it.
   const note = c.note
-    ? `<div class="note">${esc(c.note[0].toUpperCase() + c.note.slice(1))}</div>`
+    ? `<div class="note"><span>${esc(c.note[0].toUpperCase() + c.note.slice(1))}</span><button class="note-scan" type="button" aria-label="Scan ${esc(c.name)}'s contact URI">${SCAN_ICON}</button></div>`
     : '<div class="c-ok">Silent payments and reusable payjoin</div>';
   return `<div class="contact"><div class="c-head"><span class="avatar">B</span>${esc(c.name)}</div>
     <div class="c-sp">${esc(shortMid(c.sp, 18, 8))}</div>${note}</div>`;
@@ -502,12 +520,12 @@ function bobView() {
     case "request": {
       const r = b.request;
       return `<div class="view">
-        <div class="head"><h2>Request</h2></div>
+        <div class="head"><h2>Receive</h2></div>
         <div class="qr">${r.qr ?? ""}</div>
         <div class="request-amount">${sats(r.amount)}</div>
-        <div class="request-kind">One-time request</div>
+        <div class="request-kind">One-time URI</div>
         ${miniUri(r.uri)}
-        ${statusLine("Waiting for payment")}
+        ${statusLine("Waiting to be paid")}
       </div>`;
     }
     case "contact": {
@@ -515,7 +533,7 @@ function bobView() {
       return `<div class="view">
         <div class="head"><h2>My contact</h2></div>
         <div class="qr">${c.qr ?? ""}</div>
-        <div class="request-kind" style="margin-top:10px">Reusable. Give it to payers you know</div>
+        <div class="request-kind" style="margin-top:10px">Reusable. Share it with anyone you transact with again and again</div>
         ${miniUri(c.uri)}
         <div class="spacer"></div>
         ${activity(b.activity)}
@@ -532,7 +550,7 @@ function bobView() {
         ${who("bob")}
         ${balance(b.balance)}
         <div class="actions">
-          <button class="btn primary" data-act="request" type="button">Request</button>
+          <button class="btn primary" data-act="request" type="button">Receive</button>
           <button class="btn soft" data-act="share-contact" type="button">My contact</button>
         </div>
         <div class="section-title">Activity</div>
@@ -541,8 +559,57 @@ function bobView() {
   }
 }
 
+// A URI carries no name, so the payer names the contact before saving it.
+function saveContact(p) {
+  if (p.contacts[0])
+    return `<div class="section-title">Saved to contacts</div>${contactCard(p.contacts[0])}`;
+  return `<div class="section-title">Save to contacts</div>
+    <div class="save-contact">
+      <input class="field" id="contact-name" placeholder="Name" autocomplete="off" />
+      <button class="btn primary" data-act="save-contact" type="button">Save</button>
+    </div>`;
+}
+
+// The exchange is a desktop back office in a browser window, not a phone.
+function exchangeView(p) {
+  const contact = p.contacts[0];
+  let main;
+  if (p.screen === "scan") {
+    main = `<div class="panel wide">
+      <div class="section-title">Add a contact</div>
+      <label class="field-label">Contact URI</label>
+      <div class="field mono">${esc(shortMid(p.scan.uri.toLowerCase(), 34, 10))}</div>
+      <div class="status-line"><span class="spinner"></span><span>Saving</span></div>
+    </div>`;
+  } else if (p.screen === "progress") {
+    main = `<div class="panel wide">
+      <div class="section-title">Payout to Bob, ${sats(state.amount)}</div>
+      ${statusLine(p.status)}
+      ${steps(p.steps)}
+    </div>`;
+  } else {
+    const act = contact
+      ? `<button class="btn primary" data-act="pay-bob" type="button">Pay Bob ${fmt(state.amount)} sats</button>`
+      : '<button class="btn primary" data-act="scan" type="button">Add contact</button>';
+    main = `<div class="panel">
+        <div class="section-title">Saved contact</div>
+        ${contact ? contactCard(contact) : '<div class="empty">No contacts yet</div>'}
+      </div>
+      <div class="panel">
+        <div class="section-title">Payouts</div>
+        ${activity(p.activity)}
+      </div>
+      <div class="console-actions">${act}</div>`;
+  }
+  return `<div class="view console-view">
+    <div class="console-head">${who("exchange")}<div class="console-balance">${balance(p.balance)}</div></div>
+    <div class="console-body">${main}</div>
+  </div>`;
+}
+
 function payerView(name) {
   const p = state.payers[name];
+  if (name === "exchange") return exchangeView(p);
   const scanned = p.scan;
   switch (p.screen) {
     case "scan":
@@ -583,9 +650,9 @@ function payerView(name) {
         <p class="done-title">Sent</p>
         <div class="done-sub">${sats(d.amount)} to Bob</div>
         <div class="done-tags">${tagHtml(d.tag)}</div>
-        ${name === "alice" && p.contacts[0] ? `<div class="section-title">Saved to contacts</div>${contactCard(p.contacts[0])}` : ""}
+        ${name === "alice" ? saveContact(p) : ""}
         <div class="spacer"></div>
-        <a class="btn primary block" id="view-explorer" href="${esc(d.explorer)}">View in explorer</a>
+        ${d.explorer ? `<a class="btn primary block" id="view-explorer" href="${esc(d.explorer)}">View in explorer</a>` : ""}
       </div>`;
     }
     default: {
@@ -608,10 +675,15 @@ function payerView(name) {
   }
 }
 
+function browserbar() {
+  return `<div class="browserbar"><span class="dots"><i></i><i></i><i></i></span><span class="url">backoffice.exchange.example/payouts</span></div>`;
+}
+
 function renderPhone(id, html, screenKey) {
   const root = $(`#${id}`);
   if (lastHtml[id] === html) return;
-  root.innerHTML = statusbar() + html;
+  const bar = screenKey.startsWith("exchange:") ? browserbar() : statusbar();
+  root.innerHTML = bar + html;
   if (moving && lastScreen[id] !== screenKey)
     root.querySelector(".view")?.classList.add("enter");
   lastHtml[id] = html;
@@ -625,7 +697,7 @@ function renderUri() {
     ? (() => {
         const p = uriParts(u.uri);
         const contact = u.kind === "contact";
-        return `<div class="uri-card"><div class="label">${contact ? "Bob's contact string" : "Bob's one-time request"}</div><div class="uri-parts">
+        return `<div class="uri-card"><div class="label">${contact ? "Bob's contact URI" : "Bob's one-time URI"}</div><div class="uri-parts">
       <div class="part addr ${p.address ? "" : "dim"}"><span class="name">Address</span><span class="val">${p.address ? esc(shortMid(p.address, 18, 8)) : "none"}</span></div>
       <div class="part sp"><span class="name">sp=</span><span class="val">${esc(shortMid(p.sp, 22, 8))}</span></div>
       <div class="part pj"><span class="name">${p.pjKey}=</span><span class="val">${esc(shortMid(p.pj.toLowerCase(), 26, 6))}</span></div>
@@ -711,6 +783,7 @@ function render() {
     : "Regtest";
   const party = $("#payer-party");
   party.dataset.who = state.payer;
+  document.body.dataset.payer = state.payer;
   renderPhone(
     "payer",
     payerView(state.payer),
@@ -762,6 +835,15 @@ document.addEventListener("click", async (ev) => {
       Object.assign(p, { screen: "progress", steps: [], status: "Preparing" });
       render();
       await api(`/api/${name}/pay`, { uri: p.scan.uri });
+    }
+    if (act === "save-contact") {
+      const field = $("#contact-name");
+      if (!field.value.trim()) {
+        field.focus();
+        return;
+      }
+      el.disabled = true;
+      await api("/api/alice/save-contact", { name: field.value });
     }
     if (act === "pay-bob") {
       el.disabled = true;

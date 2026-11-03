@@ -31,6 +31,8 @@
 
   --phone-h: min(calc(100vh - 92px), 820px);
   --phone-w: calc(var(--phone-h) * 0.4615);
+  --console-w: 480px;
+  --console-h: 430px;
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
@@ -602,9 +604,142 @@ button {
   color: var(--note-ink);
   border-left: 4px solid var(--note);
   border-radius: 8px;
-  padding: 6px 9px;
+  padding: 6px 6px 6px 9px;
   font-size: 12.5px;
   line-height: 1.3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.note-scan {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: var(--note);
+  color: var(--ink);
+}
+
+/* Naming a contact: a URI carries no name. */
+.save-contact {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0 8px;
+}
+.field {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 0;
+  background: var(--white);
+  box-shadow: inset 0 0 0 1.5px var(--mist-deep);
+  color: var(--ink);
+  outline: none;
+}
+.field:focus {
+  box-shadow: inset 0 0 0 2px var(--alice);
+}
+.field.mono {
+  font-family: var(--data);
+  font-size: 12.5px;
+  color: var(--silent);
+  word-break: break-all;
+}
+.field-label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+
+/* The exchange's back office: a browser window in the payer's column. */
+body[data-payer="exchange"] .stage {
+  grid-template-columns: var(--console-w) 1fr var(--phone-w);
+}
+[data-who="exchange"] .phone {
+  width: var(--console-w);
+  height: var(--console-h);
+  padding: 0;
+  border-radius: 12px;
+  background: #e9edf2;
+  box-shadow:
+    0 0 0 1px #b9c2cd,
+    0 30px 60px -28px rgba(20, 23, 31, 0.55);
+}
+[data-who="exchange"] .screen {
+  border-radius: 12px;
+  background: #e9edf2;
+}
+.browserbar {
+  flex: none;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  border-bottom: 1px solid #cfd6de;
+}
+.browserbar .dots {
+  display: flex;
+  gap: 6px;
+}
+.browserbar .dots i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #c3ccd7;
+}
+.browserbar .url {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  background: var(--white);
+  border-radius: 999px;
+  padding: 5px 14px;
+}
+.console-view {
+  background: var(--paper);
+  padding: 12px 18px 16px;
+}
+.console-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.console-balance {
+  text-align: right;
+}
+.console-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr auto;
+  gap: 4px 16px;
+}
+.console-body .panel {
+  min-width: 0;
+  overflow: hidden;
+}
+.console-body .panel.wide {
+  grid-column: 1 / -1;
+}
+.console-body .panel .section-title {
+  margin-top: 4px;
+}
+.console-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
+.console-view .list li {
+  padding: 7px 0;
 }
 
 .asleep::after {

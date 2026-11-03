@@ -34,6 +34,9 @@ use crate::Shared;
 pub enum Command {
     /// Pay the string a scan of Bob's phone read.
     Pay { uri: String, reply: Reply },
+    /// Save the last one-time request paid as a contact with this name. A
+    /// URI carries no name, so the user types one.
+    SaveContact { name: String, reply: Reply },
     /// Save Bob's contact string (the exchange only).
     AddContact { uri: String, reply: Reply },
     /// Pay the saved contact (the exchange only). With `reply_by` the payer
@@ -60,6 +63,8 @@ pub struct Payer {
     coins: Coins,
     contacts: Contacts,
     contact: Option<ContactUri>,
+    /// The one-time request paid last, until it is saved as a contact.
+    last_paid: Option<OneTimeUri>,
 }
 
 impl Payer {
@@ -71,6 +76,7 @@ impl Payer {
             coins,
             contacts: Contacts::default(),
             contact: None,
+            last_paid: None,
         }
     }
 
@@ -103,6 +109,7 @@ impl Payer {
                     let _ = reply.send(Ok(json!({})));
                     (self.pay(&uri).await, None)
                 }
+                Command::SaveContact { name, reply } => (self.save_contact(&name), Some(reply)),
                 Command::AddContact { uri, reply } => (self.add_contact(&uri), Some(reply)),
                 Command::PayContact { amount, reply_by, reply } => {
                     let _ = reply.send(Ok(json!({})));
@@ -205,12 +212,17 @@ impl Payer {
             Gate::BroadcastOriginal(_) => None,
         };
         let result = self.settle_silent(&uri.sp, &original, sending, PATIENCE).await?;
-        let contact = self.contacts.save_one_time("Bob", &uri);
+        self.last_paid = Some(uri);
+        Ok(result)
+    }
+
+    fn save_contact(&mut self, name: &str) -> Result<Value, Error> {
+        let uri = self.last_paid.take().ok_or("no request paid to save")?;
+        let contact = self.contacts.save_one_time(name, &uri);
         let saved =
             json!({ "name": contact.name, "sp": contact.sp.to_string(), "note": contact.note() });
-        self.pace().await;
-        self.emit("contact_saved", saved);
-        Ok(result)
+        self.emit("contact_saved", saved.clone());
+        Ok(saved)
     }
 
     fn add_contact(&mut self, uri: &str) -> Result<Value, Error> {
@@ -361,7 +373,7 @@ impl Payer {
             chain::broadcast(self.client(), tx)?;
         }
         let prevouts = chain::prevouts(self.client(), tx)?;
-        let link = owners.explorer_link(&self.shared.explorer, txid, tx);
+        let link = self.shared.explorer.as_ref().map(|e| owners.explorer_link(e, txid, tx));
         let payjoin = original.is_none();
         self.emit(
             "broadcast",

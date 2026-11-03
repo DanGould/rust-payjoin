@@ -4,14 +4,19 @@
 //! relay on localhost.
 //!
 //! ```text
-//! spj-web [--port N] [--explorer URL] [--pace-ms N] [--node-info PATH]
+//! spj-web [--port N] [--mailbox-host URL] [--explorer URL] [--pace-ms N]
+//!         [--node-info PATH]
 //! ```
 //!
 //! Each wallet runs as its own task and reaches the others only through the
 //! directory. The page sends what a user would tap, and gets every step back
-//! as an event. `--node-info` writes the node's RPC port and cookie file as
-//! JSON once the wallets are funded, for a mempool explorer to follow the
-//! chain. Everything binds to 127.0.0.1 and stops when the process does.
+//! as an event. URIs name the directory by `--mailbox-host` (default
+//! `https://payjo.in`), which the in-process mailroom answers for: no request
+//! leaves the machine. With `--explorer` the payers link each transaction to
+//! a mempool explorer, and `--node-info` writes the node's RPC port and
+//! cookie file as JSON once the wallets are funded, for that explorer to
+//! follow the chain. Everything binds to 127.0.0.1 and stops when the process
+//! does.
 
 mod bob;
 mod events;
@@ -44,13 +49,14 @@ use crate::events::Hub;
 pub struct Shared {
     pub regtest: Regtest,
     pub hub: Hub,
-    /// Where the payers' "view in explorer" links point.
-    pub explorer: String,
+    /// Where the payers' "view in explorer" links point, if anywhere.
+    pub explorer: Option<String>,
 }
 
 struct Options {
     port: u16,
-    explorer: String,
+    mailbox_host: String,
+    explorer: Option<String>,
     pace: Duration,
     node_info: Option<PathBuf>,
 }
@@ -58,7 +64,8 @@ struct Options {
 fn options() -> Result<Options, Error> {
     let mut options = Options {
         port: 3000,
-        explorer: "http://127.0.0.1:4200".into(),
+        mailbox_host: "https://payjo.in".into(),
+        explorer: None,
         pace: Duration::from_millis(1100),
         node_info: None,
     };
@@ -67,7 +74,8 @@ fn options() -> Result<Options, Error> {
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
             "--port" => options.port = value()?.parse()?,
-            "--explorer" => options.explorer = value()?.trim_end_matches('/').to_string(),
+            "--mailbox-host" => options.mailbox_host = value()?,
+            "--explorer" => options.explorer = Some(value()?.trim_end_matches('/').to_string()),
             "--pace-ms" => options.pace = Duration::from_millis(value()?.parse()?),
             "--node-info" => options.node_info = Some(value()?.into()),
             _ => return Err(format!("unknown argument {flag}").into()),
@@ -88,7 +96,8 @@ struct App {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Error> {
     let options = options()?;
-    let regtest = Regtest::start().await?;
+    let mut regtest = Regtest::start().await?;
+    regtest.mailroom.answer_as(&options.mailbox_host);
 
     let (mut one_time_coins, mut contact_coins) = bob::Bob::keychains();
     let mut alice = Keychain::new("alice", "alice", KeyKind::P2tr, 0);
@@ -140,6 +149,7 @@ async fn main() -> Result<(), Error> {
         .route("/api/bob/contact", post(bob_contact))
         .route("/api/bob/awake", post(bob_awake))
         .route("/api/{payer}/pay", post(pay))
+        .route("/api/alice/save-contact", post(alice_save_contact))
         .route("/api/exchange/contact", post(exchange_contact))
         .route("/api/exchange/pay-contact", post(exchange_pay_contact))
         .route("/", get(|| file("index.html".into())))
@@ -177,7 +187,12 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
 
 async fn state(State(app): State<App>) -> Json<Value> {
     let height = spj_demo::chain::height(app.shared.regtest.client()).unwrap_or_default();
-    Json(json!({ "explorer": app.shared.explorer, "height": height }))
+    let mailroom = &app.shared.regtest.mailroom;
+    Json(json!({
+        "explorer": app.shared.explorer,
+        "height": height,
+        "mailroom": { "host": mailroom.directory_url(), "requests": mailroom.requests() },
+    }))
 }
 
 /// Which payer's phone is on stage. Only the page cares.
@@ -248,6 +263,12 @@ async fn pay(
     };
     let uri = body["uri"].as_str().ok_or_else(|| failed("uri"))?.to_string();
     ask(to, |reply| payers::Command::Pay { uri, reply }).await
+}
+
+async fn alice_save_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
+    let name = body["name"].as_str().map(str::trim).filter(|name| !name.is_empty());
+    let name = name.ok_or_else(|| failed("a name"))?.to_string();
+    ask(&app.alice, |reply| payers::Command::SaveContact { name, reply }).await
 }
 
 async fn exchange_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
