@@ -744,7 +744,11 @@ await sleep(500);
 await park();
 await spot($("#uri .part.addr"), "An ordinary address");
 await sleep(1500);
-await spot($("#uri .part.sp"), "Bob's silent payment address");
+await spot(
+  $("#uri .part.sp"),
+  "Bob's silent payment address",
+  "On a fresh label, for this URI alone",
+);
 await sleep(1600);
 await spot($("#uri .part.pj"), "A payjoin mailbox");
 await hold("uri");
@@ -922,7 +926,13 @@ await spot(
   "No address",
   "Only the silent payment address and a mailbox",
 );
-await sleep(2400);
+await sleep(1600);
+await spot(
+  $("#uri .part.sp"),
+  "One label for the exchange",
+  "The same on every transfer from it",
+);
+await sleep(1800);
 await unspot();
 await frame(await box(PAYER), { pad: 20 });
 await click('#payer [data-act="scan"]');
