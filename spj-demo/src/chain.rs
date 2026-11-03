@@ -164,7 +164,8 @@ pub fn restore(
     let mut found = Vec::new();
     for entry in index {
         let keys: Vec<XOnlyPublicKey> = entry.outputs.iter().map(|(_, key, _)| *key).collect();
-        for hit in bip352::scan(secp, scan_secret, spend, &entry.tweak, &keys) {
+        for hit in bip352::scan(secp, scan_secret, spend, &entry.tweak, &keys, &Default::default())
+        {
             let (vout, _, value) = entry
                 .outputs
                 .iter()

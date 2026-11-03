@@ -1,13 +1,20 @@
-//! BIP 352 silent payments without labels.
+//! BIP 352 silent payments, with labels.
 //!
 //! A sender combines the keys of the inputs it spends with the
 //! receiver's scan key to derive fresh taproot outputs only the receiver
 //! can find and spend. The receiver repeats the derivation from the
 //! public input keys and its scan secret.
 //!
+//! A label `m` gives the receiver another address, `B_m = B_spend +
+//! hash_BIP0352/Label(b_scan || m)·G`, that shares its scan key. Senders
+//! pay a labelled address like any other; the receiver finds outputs on
+//! any of its labels in the same scan.
+//!
 //! Notation follows BIP 352: `a`/`A` are input secret/public keys,
 //! `b_scan`/`B_scan` and `b_spend`/`B_spend` the receiver's key pairs,
 //! and `t_k` the tweak of the receiver's k-th output in a transaction.
+
+use std::collections::HashMap;
 
 use bitcoin::bech32::primitives::decode::CheckedHrpstring;
 use bitcoin::bech32::primitives::iter::{ByteIterExt, Fe32IterExt};
@@ -332,40 +339,174 @@ pub fn sender_outputs<C: Signing + Verification>(
     Ok(outputs)
 }
 
+/// `hash_BIP0352/Label(ser256(b_scan) || ser32(m))`, the scalar label
+/// `m` adds to the spend key. Label 0 is reserved for change.
+pub fn label_tweak(scan_secret: &SecretKey, m: u32) -> Option<Scalar> {
+    let mut msg = scan_secret.secret_bytes().to_vec();
+    msg.extend_from_slice(&m.to_be_bytes());
+    Scalar::from_be_bytes(tagged_hash("BIP0352/Label", &msg)).ok()
+}
+
+/// The spend key of label `m`, `B_m = B_spend + label_tweak(m)·G`.
+pub fn labelled_spend<C: Verification>(
+    secp: &Secp256k1<C>,
+    scan_secret: &SecretKey,
+    spend: &PublicKey,
+    m: u32,
+) -> Option<PublicKey> {
+    spend.add_exp_tweak(secp, &label_tweak(scan_secret, m)?).ok()
+}
+
+impl SpAddress {
+    /// The address for label `m`. Only the receiver can make it, since
+    /// the label tweak commits to `b_scan`.
+    pub fn labelled<C: Signing + Verification>(
+        secp: &Secp256k1<C>,
+        scan_secret: &SecretKey,
+        spend: &PublicKey,
+        m: u32,
+    ) -> Option<Self> {
+        let spend = labelled_spend(secp, scan_secret, spend, m)?;
+        Some(SpAddress { scan: scan_secret.public_key(secp), spend })
+    }
+}
+
+/// The labels a receiver scans for, keyed by the point `label_tweak(m)·G`
+/// that separates `B_m` from `B_spend`.
+#[derive(Clone, Debug, Default)]
+pub struct Labels {
+    by_point: HashMap<PublicKey, (u32, Scalar)>,
+}
+
+impl Labels {
+    /// The table for labels `ms`.
+    pub fn new<C: Signing>(
+        secp: &Secp256k1<C>,
+        scan_secret: &SecretKey,
+        ms: impl IntoIterator<Item = u32>,
+    ) -> Self {
+        let mut labels = Self::default();
+        for m in ms {
+            labels.insert(secp, scan_secret, m);
+        }
+        labels
+    }
+
+    /// Add label `m`. Returns `false` only for a hash outside the scalar
+    /// range, which has negligible probability.
+    pub fn insert<C: Signing>(
+        &mut self,
+        secp: &Secp256k1<C>,
+        scan_secret: &SecretKey,
+        m: u32,
+    ) -> bool {
+        let Some(tweak) = label_tweak(scan_secret, m) else { return false };
+        let Ok(secret) = SecretKey::from_slice(&tweak.to_be_bytes()) else { return false };
+        self.by_point.insert(secret.public_key(secp), (m, tweak));
+        true
+    }
+
+    pub fn len(&self) -> usize { self.by_point.len() }
+
+    pub fn is_empty(&self) -> bool { self.by_point.is_empty() }
+
+    /// The largest label in the table.
+    pub fn highest(&self) -> Option<u32> { self.by_point.values().map(|(m, _)| *m).max() }
+
+    fn get(&self, point: &PublicKey) -> Option<(u32, Scalar)> { self.by_point.get(point).copied() }
+}
+
 /// One output a scan found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FoundOutput {
     pub output_key: XOnlyPublicKey,
-    /// `t_k`. The output's secret is `b_spend + t_k`, see [`spend_key`].
+    /// The output's secret is `b_spend + tweak`, see [`spend_key`]. For
+    /// an unlabelled output this is `t_k`; for label `m` it is `t_k +
+    /// label_tweak(m)`.
     pub tweak: Scalar,
     pub k: u32,
+    /// The label the output pays, or `None` for `B_spend` itself.
+    pub label: Option<u32>,
 }
 
-/// Find the outputs among `output_keys` that pay `B_spend`, given the
-/// transaction's [`public_tweak`]. Outputs for one scan key are found in
-/// `k` order and the scan stops at the first `k` with no match, so a
-/// match is removed from consideration before looking for the next.
+/// Find the outputs among `output_keys` that pay `B_spend` or one of
+/// `labels`, given the transaction's [`public_tweak`]. Outputs for one
+/// scan key are found in `k` order and the scan stops at the first `k`
+/// with no match, so a match is removed from consideration before
+/// looking for the next.
 pub fn scan<C: Verification>(
     secp: &Secp256k1<C>,
     scan_secret: &SecretKey,
     spend: &PublicKey,
     tweak: &PublicKey,
     output_keys: &[XOnlyPublicKey],
+    labels: &Labels,
 ) -> Vec<FoundOutput> {
     let Ok(shared) = tweak.mul_tweak(secp, &Scalar::from(*scan_secret)) else {
         return Vec::new();
     };
     let mut remaining = output_keys.to_vec();
+    let position = |remaining: &[XOnlyPublicKey], key: &PublicKey| {
+        let key = key.x_only_public_key().0;
+        remaining.iter().position(|candidate| *candidate == key)
+    };
     let mut found = Vec::new();
     for k in 0..K_MAX {
         let Some(t_k) = output_tweak(&shared, k) else { break };
         let Ok(p_k) = spend.add_exp_tweak(secp, &t_k) else { break };
-        let p_k = p_k.x_only_public_key().0;
-        let Some(position) = remaining.iter().position(|key| *key == p_k) else { break };
-        remaining.swap_remove(position);
-        found.push(FoundOutput { output_key: p_k, tweak: t_k, k });
+        let hit = position(&remaining, &p_k).map(|position| (position, None)).or_else(|| {
+            labelled_match(secp, &remaining, &p_k, labels, position)
+                .map(|(position, label)| (position, Some(label)))
+        });
+        let Some((position, label)) = hit else { break };
+        let (tweak, label) = match label {
+            None => (t_k, None),
+            Some((m, label_tweak)) => match add_scalars(&t_k, &label_tweak) {
+                Some(tweak) => (tweak, Some(m)),
+                None => break,
+            },
+        };
+        let output_key = remaining.swap_remove(position);
+        found.push(FoundOutput { output_key, tweak, k, label });
     }
     found
+}
+
+/// The remaining output that pays `P_k` plus one of `labels`, with its
+/// label. An output key is x-only, so the output may be `P_k + label·G`
+/// or its negation. BIP 352 looks up `output - P_k` and `-output - P_k`
+/// in the label table, two point additions per output. Adding each label
+/// to `P_k` and comparing x-coordinates finds the same match, and is
+/// cheaper whenever the table is smaller than the output list, as it is
+/// for a wallet with a few labels scanning a large transaction.
+fn labelled_match<C: Verification>(
+    secp: &Secp256k1<C>,
+    remaining: &[XOnlyPublicKey],
+    p_k: &PublicKey,
+    labels: &Labels,
+    position: impl Fn(&[XOnlyPublicKey], &PublicKey) -> Option<usize>,
+) -> Option<(usize, (u32, Scalar))> {
+    if labels.len() <= remaining.len() {
+        return labels.by_point.iter().find_map(|(point, label)| {
+            let candidate = p_k.combine(point).ok()?;
+            position(remaining, &candidate).map(|position| (position, *label))
+        });
+    }
+    let minus_p_k = p_k.negate(secp);
+    remaining.iter().enumerate().find_map(|(position, output)| {
+        let even = output.public_key(bitcoin::secp256k1::Parity::Even);
+        [even, even.negate(secp)]
+            .iter()
+            .filter_map(|candidate| candidate.combine(&minus_p_k).ok())
+            .find_map(|point| labels.get(&point))
+            .map(|label| (position, label))
+    })
+}
+
+/// `a + b` mod n, or `None` if the sum is zero.
+fn add_scalars(a: &Scalar, b: &Scalar) -> Option<Scalar> {
+    let sum = SecretKey::from_slice(&a.to_be_bytes()).ok()?.add_tweak(b).ok()?;
+    Some(Scalar::from(sum))
 }
 
 /// The secret key spending a found output.
@@ -434,7 +575,7 @@ mod tests {
             }],
         };
         let tweak = transaction_tweak(&secp, &tx, &[prevout]).unwrap();
-        let found = scan(&secp, &b_scan, &address.spend, &tweak, &[output]);
+        let found = scan(&secp, &b_scan, &address.spend, &tweak, &[output], &Labels::default());
         assert_eq!(found.len(), 1);
         let sk = spend_key(&b_spend, &found[0]).unwrap();
         assert_eq!(sk.x_only_public_key(&secp).0, output);

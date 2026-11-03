@@ -93,14 +93,21 @@ pub fn scan(
     let Some(tweak) = bip352::transaction_tweak(secp, tx, prevouts) else { return Vec::new() };
     let outputs = taproot_outputs(tx);
     let output_keys: Vec<_> = outputs.iter().map(|(_, key)| *key).collect();
-    bip352::scan(secp, &keys.scan, &keys.spend.public_key(secp), &tweak, &output_keys)
-        .into_iter()
-        .map(|hit| {
-            let (vout, _) =
-                outputs.iter().find(|(_, key)| *key == hit.output_key).expect("scanned key");
-            Found { vout: *vout, k: hit.k, value: tx.output[*vout].value }
-        })
-        .collect()
+    bip352::scan(
+        secp,
+        &keys.scan,
+        &keys.spend.public_key(secp),
+        &tweak,
+        &output_keys,
+        &Default::default(),
+    )
+    .into_iter()
+    .map(|hit| {
+        let (vout, _) =
+            outputs.iter().find(|(_, key)| *key == hit.output_key).expect("scanned key");
+        Found { vout: *vout, k: hit.k, value: tx.output[*vout].value }
+    })
+    .collect()
 }
 
 /// The receiver's outputs `k = 0..n` for a transaction spending `outpoints`

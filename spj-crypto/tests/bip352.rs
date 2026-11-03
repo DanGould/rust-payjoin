@@ -1,5 +1,4 @@
-//! The BIP 352 send and receive test vectors, except receiving with
-//! labels, which this crate does not implement.
+//! The BIP 352 send and receive test vectors.
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -11,7 +10,7 @@ use bitcoin::{OutPoint, ScriptBuf, Txid, Witness, XOnlyPublicKey};
 use serde_json::Value;
 use spj_crypto::bip352::{
     input_public_key, input_secret_key, input_secret_sum, public_tweak, scan, sender_outputs,
-    sender_shared_secret, spend_key, SpAddress,
+    sender_shared_secret, spend_key, Labels, SpAddress,
 };
 
 const VECTORS: &str = include_str!("vectors/send_and_receive_test_vectors.json");
@@ -59,7 +58,7 @@ fn vins(given: &Value) -> Vec<Vin> {
 struct Counts {
     send: usize,
     receive: usize,
-    receive_skipped_labels: usize,
+    receive_with_labels: usize,
 }
 
 #[test]
@@ -76,18 +75,23 @@ fn send_and_receive_vectors() {
         for test in case["receiving"].as_array().unwrap() {
             let labels = test["given"]["labels"].as_array().map_or(0, Vec::len);
             if labels > 0 {
-                counts.receive_skipped_labels += 1;
-                continue;
+                counts.receive_with_labels += 1;
             }
-            check_receiving(&secp, &test["given"], &test["expected"], comment);
+            // The scan looks a label up either per output or per label,
+            // whichever list is shorter. Unused labels and outputs paying
+            // no one must not change what it finds, and between them they
+            // send every case down both paths.
+            for (extra_labels, decoys) in [(0, 0), (16, 0), (0, 16)] {
+                check_receiving(&secp, test, extra_labels, decoys, comment);
+            }
             counts.receive += 1;
         }
     }
     eprintln!("{} cases: {counts:?}", cases.len());
     assert_eq!(cases.len(), 28);
     assert_eq!(counts.send, 28);
-    assert_eq!(counts.receive, 21);
-    assert_eq!(counts.receive_skipped_labels, 8);
+    assert_eq!(counts.receive, 29);
+    assert_eq!(counts.receive_with_labels, 8);
 }
 
 fn check_sending(
@@ -153,14 +157,27 @@ fn check_sending(
 
 fn check_receiving(
     secp: &Secp256k1<bitcoin::secp256k1::All>,
-    given: &Value,
-    expected: &Value,
+    test: &Value,
+    extra_labels: u32,
+    decoys: u8,
     comment: &str,
 ) {
+    let (given, expected) = (&test["given"], &test["expected"]);
     let b_scan = SecretKey::from_slice(&bytes(&given["key_material"]["scan_priv_key"])).unwrap();
     let b_spend = SecretKey::from_slice(&bytes(&given["key_material"]["spend_priv_key"])).unwrap();
     let address = SpAddress { scan: b_scan.public_key(secp), spend: b_spend.public_key(secp) };
-    assert_eq!(vec![address.encode("sp")], hex_list(&expected["addresses"]), "{comment}");
+    let ms: Vec<u32> = given["labels"]
+        .as_array()
+        .map(|labels| labels.iter().map(|m| m.as_u64().unwrap() as u32).collect())
+        .unwrap_or_default();
+    let unused = (0..extra_labels).map(|i| 7_000_000 + i);
+    let labels = Labels::new(secp, &b_scan, ms.iter().copied().chain(unused));
+    let mut addresses = vec![address.encode("sp")];
+    addresses.extend(
+        ms.iter()
+            .map(|&m| SpAddress::labelled(secp, &b_scan, &address.spend, m).unwrap().encode("sp")),
+    );
+    assert_eq!(addresses, hex_list(&expected["addresses"]), "{comment}: addresses");
 
     let vins = vins(given);
     let keys: Vec<PublicKey> = vins
@@ -171,10 +188,14 @@ fn check_receiving(
     let outpoints: Vec<OutPoint> = vins.iter().map(|vin| vin.outpoint).collect();
     // An output key that is not a curve point can never be a derived
     // key, so dropping it before the scan changes nothing.
-    let outputs: Vec<XOnlyPublicKey> = hex_list(&given["outputs"])
+    let mut outputs: Vec<XOnlyPublicKey> = hex_list(&given["outputs"])
         .iter()
         .filter_map(|hex| XOnlyPublicKey::from_slice(&Vec::<u8>::from_hex(hex).unwrap()).ok())
         .collect();
+    outputs.extend(
+        (0..decoys)
+            .map(|i| SecretKey::from_slice(&[0xd0 ^ i; 32]).unwrap().x_only_public_key(secp).0),
+    );
 
     let msg = Message::from_digest(sha256::Hash::hash(b"message").to_byte_array());
     let aux = sha256::Hash::hash(b"random auxiliary data").to_byte_array();
@@ -191,7 +212,7 @@ fn check_receiving(
             assert_eq!(tweak.serialize().to_vec(), bytes(&expected["tweak"]), "{comment}");
             let shared = tweak.mul_tweak(secp, &Scalar::from(b_scan)).unwrap();
             assert_eq!(shared.serialize().to_vec(), bytes(&expected["shared_secret"]), "{comment}");
-            scan(secp, &b_scan, &address.spend, &tweak, &outputs)
+            scan(secp, &b_scan, &address.spend, &tweak, &outputs, &labels)
                 .iter()
                 .map(|found| {
                     let keypair =
