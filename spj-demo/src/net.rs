@@ -8,8 +8,11 @@
 //! the admission hook and the storage all run their production code paths.
 //!
 //! The process's HTTP proxy settings are ignored, since every request stays
-//! on localhost.
+//! on localhost. A mailroom can also answer for a public host name (see
+//! [`Mailroom::answer_as`]), so URIs read like a deployment's while every
+//! request still goes to the local directory.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,7 +33,12 @@ const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(2);
 /// A running relay and directory.
 pub struct Mailroom {
     relay_url: String,
+    /// The directory's URL as URIs carry it.
     directory_url: String,
+    /// Where the directory actually listens.
+    local_directory_url: String,
+    /// Requests passed to the relay so far.
+    requests: AtomicU64,
     client: reqwest::Client,
     ohttp_keys: OhttpKeys,
     servers: Vec<AbortHandle>,
@@ -98,7 +106,9 @@ impl Mailroom {
         let servers = vec![directory.abort_handle(), relay.abort_handle()];
         Ok(Self {
             relay_url,
+            local_directory_url: directory_url.clone(),
             directory_url,
+            requests: AtomicU64::new(0),
             client,
             ohttp_keys,
             servers,
@@ -108,7 +118,21 @@ impl Mailroom {
 
     pub fn relay_url(&self) -> &str { &self.relay_url }
 
+    /// The directory's URL for URIs: its local one, or the public origin
+    /// given to [`Mailroom::answer_as`].
     pub fn directory_url(&self) -> &str { &self.directory_url }
+
+    /// Put `origin` (such as `https://payjo.in`) in every URI built from now
+    /// on in place of the local directory's URL. Requests addressed to it are
+    /// sent to the local directory by [`Mailroom::send`], so nothing leaves
+    /// the machine.
+    pub fn answer_as(&mut self, origin: &str) {
+        self.directory_url = origin.trim_end_matches('/').to_string();
+    }
+
+    /// How many requests [`Mailroom::send`] has passed to the relay. Every
+    /// one of them went to the local relay and on to the local directory.
+    pub fn requests(&self) -> u64 { self.requests.load(Ordering::SeqCst) }
 
     /// The directory's OHTTP gateway keys.
     pub fn ohttp_keys(&self) -> &OhttpKeys { &self.ohttp_keys }
@@ -116,10 +140,21 @@ impl Mailroom {
     /// Send a request built by the payjoin library and return the response
     /// body for its `process_response`. A status other than 200 from the
     /// relay is an error.
+    ///
+    /// The relay forwards to the directory named in the request's path. A
+    /// request naming the public origin is pointed at the local directory,
+    /// and one naming any other directory is refused before it is sent.
     pub async fn send(&self, request: &payjoin::Request) -> Result<Vec<u8>, Error> {
+        let url = local_route(
+            &request.url,
+            &self.relay_url,
+            &self.directory_url,
+            &self.local_directory_url,
+        )?;
+        self.requests.fetch_add(1, Ordering::SeqCst);
         let response = self
             .client
-            .post(&request.url)
+            .post(url)
             .header("Content-Type", request.content_type)
             .body(request.body.clone())
             .send()
@@ -130,6 +165,23 @@ impl Mailroom {
             return Err(Box::new(RelayStatus(status.as_u16())));
         }
         Ok(body)
+    }
+}
+
+/// The relay URL for a request to `url`, a relay URL whose path names the
+/// directory (RFC 9540), with `public` replaced by `local`. Any other relay
+/// or directory is an error. Origins compare without case, since a sender
+/// may copy the directory from an upper-case URI.
+fn local_route(url: &str, relay: &str, public: &str, local: &str) -> Result<String, Error> {
+    let gateway = url
+        .strip_prefix(relay)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .ok_or_else(|| format!("{url} is not for the local relay {relay}"))?;
+    let gateway = gateway.trim_end_matches('/');
+    if gateway.eq_ignore_ascii_case(local) || gateway.eq_ignore_ascii_case(public) {
+        Ok(format!("{relay}/{local}/"))
+    } else {
+        Err(format!("{gateway} is not this mailroom's directory").into())
     }
 }
 
@@ -154,3 +206,23 @@ impl std::fmt::Display for RelayStatus {
 }
 
 impl std::error::Error for RelayStatus {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RELAY: &str = "http://localhost:4100";
+    const LOCAL: &str = "https://localhost:4200";
+
+    #[test]
+    fn requests_for_the_public_origin_go_to_the_local_directory() {
+        let route = |url| local_route(url, RELAY, "https://payjo.in", LOCAL);
+        let local = "http://localhost:4100/https://localhost:4200/";
+        assert_eq!(route("http://localhost:4100/https://payjo.in/").unwrap(), local);
+        assert_eq!(route(local).unwrap(), local);
+        assert_eq!(route("http://localhost:4100/HTTPS://PAYJO.IN/").unwrap(), local);
+        assert!(route("http://localhost:4100/https://example.com/").is_err());
+        assert!(route("http://localhost:4100/https://payjo.in.example.com/").is_err());
+        assert!(route("https://payjo.in/https://payjo.in/").is_err());
+    }
+}
