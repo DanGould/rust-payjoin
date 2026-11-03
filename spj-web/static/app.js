@@ -142,6 +142,7 @@ function setTx(tx, status, cls = "") {
     checked: old?.checked ?? false,
     found: old?.found ?? false,
     rederived: old?.rederived ?? false,
+    label: old?.label ?? null,
     // The key Bob's output had in the payer's transaction, before Bob worked
     // it out again.
     firstKey: old?.firstKey ?? bobKey(tx),
@@ -199,7 +200,10 @@ async function apply({ kind, data }) {
           ? "Found my output in it by scanning"
           : "It pays my address",
       );
-      if (state.tx) state.tx.found = data.silent;
+      if (state.tx) {
+        state.tx.found = data.silent;
+        if (data.label != null) state.tx.label = data.label;
+      }
       return;
     case "bob.coin": {
       const steps = state.bob.steps;
@@ -248,7 +252,9 @@ async function apply({ kind, data }) {
         what: "Received",
         amount: data.amount,
         tag: tags,
-        sub: data.by_scan ? "Found by scanning" : "Paid to the URI's address",
+        sub: data.by_scan
+          ? `Found by scanning${data.label == null ? "" : labelChip(data.label, data.label_for)}`
+          : "Paid to the URI's address",
         fresh: moving,
       });
       state.bob.balance = data.balance;
@@ -284,6 +290,7 @@ async function apply({ kind, data }) {
       state.tx.checked = false;
       state.tx.found = false;
       state.tx.rederived = false;
+      state.tx.label = null;
       state.tx.firstKey = bobKey(state.tx);
       render();
       await post("#payer", "Transaction");
@@ -456,6 +463,13 @@ const payoutName = (payout) =>
   payout === "scheduled" ? "Scheduled payout to Bob" : "Bob's withdrawal";
 
 const tagHtml = ([cls, text]) => `<span class="tag ${cls}">${text}</span>`;
+
+// The BIP 352 label a silent payment address carries, and for a contact's
+// label, whose it is. A one-time URI's label needs no name: it is the URI's.
+function labelChip(m, contact) {
+  const text = contact ? `label ${m}, ${contact}` : `label ${m}`;
+  return `<span class="lbl">${esc(text)}</span>`;
+}
 
 function activity(rows, empty = "Nothing yet") {
   if (!rows.length) return `<div class="empty">${empty}</div>`;
@@ -713,7 +727,7 @@ function renderUri() {
         const contact = u.kind === "contact";
         return `<div class="uri-card"><div class="label">${contact ? "Bob's contact URI" : "Bob's one-time URI"}</div><div class="uri-parts">
       <div class="part addr ${p.address ? "" : "dim"}"><span class="name">Address</span><span class="val">${p.address ? esc(shortMid(p.address, 18, 8)) : "none"}</span></div>
-      <div class="part sp"><span class="name">sp=</span><span class="val">${esc(shortMid(p.sp, 22, 8))}</span></div>
+      <div class="part sp"><span class="name">sp=</span><span class="val">${esc(shortMid(p.sp, 22, 8))}${u.label == null ? "" : labelChip(u.label, u.contact)}</span></div>
       <div class="part pj"><span class="name">${p.pjKey}=</span><span class="val">${esc(shortMid(p.pj.toLowerCase(), 26, 6))}</span></div>
     </div></div>`;
       })()
@@ -732,7 +746,16 @@ function rowsHtml(list, side) {
       if (side === "in" && io.proof)
         chips.push(t.checked ? ["ok", "proof checked"] : ["proof", "proof"]);
       if (side === "out" && io.silent) {
-        chips.push(["sp", "silent payment"]);
+        // Bob's scan names the label it found; until then, the label in the
+        // URI the payer scanned.
+        const label =
+          io.owner === "bob"
+            ? (t.label ?? state.payers[state.payer]?.scan?.label)
+            : null;
+        chips.push([
+          "sp",
+          label == null ? "silent payment" : `silent payment, label ${label}`,
+        ]);
         if (io.owner === "bob" && t.checked)
           chips.push(["ok", `= ${payerName(state.payer)}'s`]);
         else if (io.owner === "bob" && t.rederived)
@@ -825,7 +848,7 @@ document.addEventListener("click", async (ev) => {
     }
     if (act === "share-contact") {
       el.disabled = true;
-      await api("/api/bob/contact");
+      await api("/api/bob/contact", { name: payerName(state.payer) });
     }
     if (act === "scan") {
       if (!state.uri) {

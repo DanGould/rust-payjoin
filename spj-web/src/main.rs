@@ -242,8 +242,10 @@ async fn bob_one_time(State(app): State<App>, Json(body): Json<Value>) -> ApiRes
     ask(&app.bob, |reply| bob::Command::OneTime { amount, reply }).await
 }
 
-async fn bob_contact(State(app): State<App>) -> ApiResult {
-    ask(&app.bob, |reply| bob::Command::Contact { reply }).await
+async fn bob_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
+    let name = body["name"].as_str().map(str::trim).filter(|name| !name.is_empty());
+    let name = name.ok_or_else(|| failed("a name"))?.to_string();
+    ask(&app.bob, |reply| bob::Command::Contact { name, reply }).await
 }
 
 async fn bob_awake(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {

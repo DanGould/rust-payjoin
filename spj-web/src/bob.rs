@@ -1,6 +1,7 @@
-//! Bob's phone: a silent payment wallet that hands out one-time requests
-//! and a contact URI, answers each Original that arrives with a coin and
-//! a proof, and finds what it received by scanning new blocks.
+//! Bob's phone: a silent payment wallet that hands out one-time URIs and
+//! a contact URI, each on its own label, answers each Original that
+//! arrives with a coin and a proof, and finds what it received by scanning
+//! new blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use spj_demo::chain;
 use spj_demo::contact::ContactLog;
 use spj_demo::derive::{self, SpKeys};
 use spj_demo::flow::{self, OneTime};
+use spj_demo::labels::Purpose;
 use spj_demo::net::Error;
 use spj_demo::persist::EventLog;
 use spj_demo::receiver::{Decline, SpReceiver};
@@ -29,8 +31,9 @@ pub type Reply = oneshot::Sender<Result<Value, String>>;
 pub enum Command {
     /// Show a one-time URI for this amount.
     OneTime { amount: Amount, reply: Reply },
-    /// Show Bob's contact URI, creating its log the first time.
-    Contact { reply: Reply },
+    /// Show Bob's contact URI for the contact named `name`, creating its log
+    /// the first time.
+    Contact { name: String, reply: Reply },
     /// Wake the phone, or put it to sleep. A sleeping phone reads no mailbox
     /// and scans no blocks.
     Awake { awake: bool, reply: Reply },
@@ -50,6 +53,9 @@ pub struct Bob {
     awake: bool,
     /// The last block scanned.
     scanned: u64,
+    /// Every block's tweak entries since Bob started, which a wallet
+    /// restored from his backup words would scan.
+    index: Vec<chain::TweakEntry>,
     /// What Bob holds besides his keychains' coins: outputs found by scanning
     /// and payments to a one-time URI's ordinary address.
     received: BTreeMap<OutPoint, Amount>,
@@ -68,6 +74,7 @@ impl Bob {
             contact: None,
             awake: true,
             scanned,
+            index: Vec::new(),
             received: BTreeMap::new(),
         }
     }
@@ -114,8 +121,8 @@ impl Bob {
             Command::OneTime { amount, reply } => {
                 let _ = reply.send(self.one_time(amount).map_err(|e| e.to_string()));
             }
-            Command::Contact { reply } => {
-                let _ = reply.send(self.contact().await.map_err(|e| e.to_string()));
+            Command::Contact { name, reply } => {
+                let _ = reply.send(self.contact(&name).await.map_err(|e| e.to_string()));
             }
             Command::Awake { awake, reply } => {
                 self.awake = awake;
@@ -127,16 +134,22 @@ impl Bob {
 
     fn one_time(&mut self, amount: Amount) -> Result<Value, Error> {
         let body = self.one_time_coins.address();
-        let one_time =
-            flow::one_time(&self.shared.regtest.mailroom, self.receiver.address(), body, amount)?;
+        let (label, sp) = self.receiver.next_one_time();
+        let one_time = flow::one_time(&self.shared.regtest.mailroom, sp, body, amount)?;
         let uri = one_time.uri.to_string();
-        let data = json!({ "uri": uri, "amount": amount.to_sat(), "qr": qr_svg(&uri) });
+        self.receiver.record_one_time(label, uri.clone());
+        let data = json!({
+            "uri": uri,
+            "amount": amount.to_sat(),
+            "qr": qr_svg(&uri),
+            "label": label,
+        });
         self.one_time = Some(one_time);
         self.emit("bob.one_time", data.clone());
         Ok(data)
     }
 
-    async fn contact(&mut self) -> Result<Value, Error> {
+    async fn contact(&mut self, name: &str) -> Result<Value, Error> {
         let mailroom = &self.shared.regtest.mailroom;
         if self.contact.is_none() {
             let log = ContactLog::new(
@@ -147,9 +160,10 @@ impl Bob {
             log.create(mailroom).await?;
             self.contact = Some(log);
         }
+        let (label, sp) = self.receiver.contact_address(name);
         let log = self.contact.as_ref().expect("created above");
-        let uri = log.uri(self.receiver.address(), mailroom).to_string();
-        let data = json!({ "uri": uri, "qr": qr_svg(&uri) });
+        let uri = log.uri(sp, mailroom).to_string();
+        let data = json!({ "uri": uri, "qr": qr_svg(&uri), "label": label, "contact": name });
         self.emit("bob.contact", data.clone());
         Ok(data)
     }
@@ -196,6 +210,7 @@ impl Bob {
 
         let mut mine: Vec<ScriptBuf> = body.iter().cloned().collect();
         let mut silent = Vec::new();
+        let mut label = None;
         if let Some(prevouts) = &prevouts {
             for found in derive::scan(
                 &self.secp,
@@ -205,6 +220,7 @@ impl Bob {
                 prevouts,
             ) {
                 let script = original_tx.output[found.vout].script_pubkey.clone();
+                label = label.or(found.label);
                 mine.push(script.clone());
                 silent.push(script);
             }
@@ -219,7 +235,12 @@ impl Bob {
                 .sum();
             self.emit(
                 "bob.found",
-                json!({ "tx": owners.tx(&original_tx, prevouts), "paid": paid, "silent": !silent.is_empty() }),
+                json!({
+                    "tx": owners.tx(&original_tx, prevouts),
+                    "paid": paid,
+                    "silent": !silent.is_empty(),
+                    "label": label,
+                }),
             );
             self.pace().await;
         }
@@ -266,9 +287,11 @@ impl Bob {
         Ok(())
     }
 
-    /// Scan blocks since the last scan, the way a restore would: each
-    /// taproot output against Bob's scan key, plus payments to a one-time
-    /// URI's ordinary address.
+    /// Scan blocks since the last scan: each taproot output against Bob's
+    /// scan key and the labels he handed out, plus payments to a one-time
+    /// URI's ordinary address. Each silent transfer found is also looked
+    /// for the way a wallet restored from his backup words would, knowing
+    /// no labels, over every block so far.
     async fn scan(&mut self) -> Result<(), Error> {
         let client = self.shared.regtest.client();
         let height = chain::height(client)?;
@@ -278,11 +301,21 @@ impl Bob {
         let keys = self.receiver.keys;
         let spend = keys.spend.public_key(&self.secp);
         let index = chain::tweak_index(&self.secp, client, self.scanned + 1, height)?;
-        let found = chain::restore(&self.secp, &keys.scan, &spend, &index);
-        let mut by_tx: BTreeMap<Txid, (u64, u64, bool)> = BTreeMap::new();
+        let labels = self.receiver.labels.table();
+        let found = chain::scan_index(&self.secp, &keys.scan, &spend, labels, &index);
+        self.index.extend(index);
+        let restored: BTreeSet<OutPoint> =
+            chain::restore(&self.secp, &keys.scan, &spend, &self.index)
+                .into_iter()
+                .map(|r| r.outpoint)
+                .collect();
+        let mut by_tx: BTreeMap<Txid, Received> = BTreeMap::new();
         for f in &found {
-            by_tx.entry(f.outpoint.txid).or_default().0 += f.value.to_sat();
-            by_tx.entry(f.outpoint.txid).or_default().2 = true;
+            let entry = by_tx.entry(f.outpoint.txid).or_default();
+            entry.gross += f.value.to_sat();
+            entry.by_scan = true;
+            entry.label = entry.label.or(f.label);
+            entry.restored = Some(entry.restored.unwrap_or(true) && restored.contains(&f.outpoint));
             self.received.insert(f.outpoint, f.value);
         }
         for h in self.scanned + 1..=height {
@@ -306,11 +339,11 @@ impl Bob {
                     if self.one_time_coins.owns(&out.script_pubkey) {
                         let outpoint = OutPoint { txid, vout: vout as u32 };
                         self.received.insert(outpoint, out.value);
-                        by_tx.entry(txid).or_default().0 += out.value.to_sat();
+                        by_tx.entry(txid).or_default().gross += out.value.to_sat();
                     }
                 }
                 if spent > 0 {
-                    by_tx.entry(txid).or_default().1 += spent;
+                    by_tx.entry(txid).or_default().spent += spent;
                 }
                 // A payment received is never offered as a payjoin coin:
                 // the next payer would learn of it.
@@ -319,17 +352,24 @@ impl Bob {
             }
         }
         self.scanned = height;
-        for (txid, (gross, spent, by_scan)) in by_tx {
-            if gross == 0 {
+        for (txid, received) in by_tx {
+            if received.gross == 0 {
                 continue;
             }
+            let label_for = received.label.and_then(|m| match self.receiver.labels.purpose(m)? {
+                Purpose::Contact(name) => Some(name.clone()),
+                _ => None,
+            });
             self.emit(
                 "bob.received",
                 json!({
                     "txid": txid.to_string(),
-                    "amount": gross.saturating_sub(spent),
-                    "payjoin": spent > 0,
-                    "by_scan": by_scan,
+                    "amount": received.gross.saturating_sub(received.spent),
+                    "payjoin": received.spent > 0,
+                    "by_scan": received.by_scan,
+                    "label": received.label,
+                    "label_for": label_for,
+                    "restored": received.restored,
                     "height": height,
                     "balance": self.balance(),
                 }),
@@ -337,4 +377,18 @@ impl Bob {
         }
         Ok(())
     }
+}
+
+/// What one transaction brought Bob.
+#[derive(Default)]
+struct Received {
+    gross: u64,
+    /// Bob's own coins it spent.
+    spent: u64,
+    by_scan: bool,
+    /// The label its silent payment output pays.
+    label: Option<u32>,
+    /// Whether a restore from Bob's backup words finds every silent payment
+    /// output in it. `None` when it has none.
+    restored: Option<bool>,
 }

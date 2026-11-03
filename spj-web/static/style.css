@@ -919,6 +919,21 @@ body[data-payer="exchange"] .stage {
 .part.dim {
   opacity: 0.35;
 }
+/* The label a silent payment address carries. */
+.lbl {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: var(--ui);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  word-break: normal;
+  background: var(--white);
+  color: var(--silent);
+  box-shadow: inset 0 0 0 1.5px var(--silent-logo);
+}
 
 .card {
   background: var(--white);
