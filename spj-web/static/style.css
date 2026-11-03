@@ -1,7 +1,10 @@
 /* Silent payjoin stage.
    A payer's phone, Bob's phone, and the transaction they build between
-   them. Each wallet has its own colour; violet marks what belongs to a
-   silent payment, and green marks a check that passed. */
+   them. Each wallet has its own colour. Violet, from the silent payments
+   logo, marks what belongs to a silent payment; pink, from the payjoin
+   logo, marks what belongs to payjoin; green marks a check that passed.
+   The logo hues mark borders and bars; text uses darker shades of them
+   that keep a 4.5:1 contrast on white and on their tints. */
 
 :root {
   --mist: #dde3ea;
@@ -16,8 +19,13 @@
   --alice: #2b50e8;
   --carol: #d9480f;
   --exchange: #34495e;
-  --silent: #7c4dcc;
-  --silent-tint: #efe7fb;
+  --silent: #6145c4;
+  --silent-logo: #7961db;
+  --silent-tint: #efebfd;
+  --payjoin: #b8215f;
+  --payjoin-logo: #f75394;
+  --payjoin-tint: #fde6f0;
+  --both: linear-gradient(90deg, var(--silent), var(--payjoin));
   --ok: #1f8a4c;
   --ok-tint: #dff3e6;
   --note: #f2c94c;
@@ -76,16 +84,46 @@ button {
   align-items: center;
   gap: 10px;
 }
-.mark {
-  width: 26px;
-  height: 26px;
+/* The payjoin logo times the silent payments logo. The silent payments
+   logo is a disc on a square canvas; the frame shows only the disc. */
+.logomark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  --size: 24px;
+}
+.logomark .logo {
+  width: var(--size);
+  height: var(--size);
+  display: block;
+}
+.logomark .disc {
+  width: var(--size);
+  height: var(--size);
   border-radius: 50%;
-  background: conic-gradient(var(--silent) 0 50%, var(--bob) 50% 100%);
+  overflow: hidden;
+  position: relative;
+}
+.logomark .disc img {
+  position: absolute;
+  width: calc(var(--size) * 460 / 410);
+  left: calc(var(--size) * -24.5 / 410);
+  top: calc(var(--size) * -23 / 410);
+}
+.logomark .times {
+  color: var(--muted);
+  font-weight: 500;
 }
 .wordmark {
   font-weight: 800;
   font-size: 21px;
   letter-spacing: -0.03em;
+}
+.wordmark .w-sp {
+  color: var(--silent);
+}
+.wordmark .w-pj {
+  color: var(--payjoin);
 }
 .height {
   color: var(--ink-2);
@@ -332,15 +370,15 @@ button {
   white-space: nowrap;
 }
 .tag.pj {
-  background: #fde3ef;
-  color: #8c1450;
+  background: var(--payjoin-tint);
+  color: var(--payjoin);
 }
 .tag.sp {
   background: var(--silent-tint);
   color: var(--silent);
 }
 .tag.spj {
-  background: var(--silent);
+  background: var(--both);
   color: var(--white);
 }
 
@@ -403,7 +441,7 @@ button {
   color: var(--silent);
 }
 .uri-mini .p-pj {
-  color: #b3306f;
+  color: var(--payjoin);
 }
 
 .finder {
@@ -793,6 +831,15 @@ body[data-payer="exchange"] .stage {
   box-shadow: inset 0 0 0 2px var(--ink-2);
   background: rgba(255, 255, 255, 0.9);
 }
+.node.directory {
+  box-shadow: inset 0 0 0 1.5px var(--payjoin-logo);
+}
+.node.directory .node-name {
+  color: var(--payjoin);
+}
+.node.directory.lit {
+  box-shadow: inset 0 0 0 2.5px var(--payjoin-logo);
+}
 .middle {
   flex: 1;
   display: flex;
@@ -844,15 +891,17 @@ body[data-payer="exchange"] .stage {
 }
 .part.sp {
   background: var(--silent-tint);
+  box-shadow: inset 3px 0 0 var(--silent-logo);
 }
 .part.sp .name {
   color: var(--silent);
 }
 .part.pj {
-  background: #fdebf3;
+  background: var(--payjoin-tint);
+  box-shadow: inset 3px 0 0 var(--payjoin-logo);
 }
 .part.pj .name {
-  color: #b3306f;
+  color: var(--payjoin);
 }
 .part.dim {
   opacity: 0.35;
@@ -1014,7 +1063,7 @@ body[data-payer="exchange"] .stage {
   font-weight: 400;
   background: var(--white);
   color: var(--silent);
-  box-shadow: inset 0 0 0 1.5px var(--silent);
+  box-shadow: inset 0 0 0 1.5px var(--silent-logo);
 }
 
 /* What travels */

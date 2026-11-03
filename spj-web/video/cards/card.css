@@ -36,6 +36,8 @@ body {
   font-weight: 500;
   color: #c9d1db;
   margin: 0 0 16px;
+  max-width: 1040px;
+  text-wrap: balance;
 }
 .lines .aside {
   font-size: 25px;
@@ -69,13 +71,21 @@ body {
   color: #a9b8c9;
   font-weight: 700;
 }
+/* The hues of the silent payments and payjoin logos. Both keep 6:1 on
+   the card background. */
 .sp {
-  color: #b893f5;
+  color: #9579ff;
   font-weight: 700;
 }
 .pj {
-  color: #ff7ab8;
+  color: #f75394;
   font-weight: 700;
+}
+.spj {
+  background: linear-gradient(90deg, #9579ff, #f75394);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .bad {
   color: #ff6b5a;
@@ -99,10 +109,36 @@ body {
     transform: none;
   }
 }
-.mark {
-  width: 64px;
-  height: 64px;
+/* The payjoin logo times the silent payments logo. The silent payments
+   logo is a disc on a square canvas; the frame shows only the disc. */
+.logomark {
+  --size: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--size) * 0.28);
+  margin: 0 0 28px;
+}
+.logomark .logo,
+.logomark .disc {
+  width: var(--size);
+  height: var(--size);
+  display: block;
+}
+.logomark .disc {
   border-radius: 50%;
-  background: conic-gradient(#b893f5 0 50%, #33c7a2 50% 100%);
-  margin: 0 auto 24px;
+  overflow: hidden;
+  position: relative;
+}
+.logomark .disc img {
+  position: absolute;
+  width: calc(var(--size) * 460 / 410);
+  left: calc(var(--size) * -24.5 / 410);
+  top: calc(var(--size) * -23 / 410);
+}
+.logomark .times {
+  font-size: calc(var(--size) * 0.55);
+  font-weight: 400;
+  color: #8e9aab;
+  line-height: 1;
 }
