@@ -59,7 +59,8 @@ pub enum Decline {
     NotV2,
     /// No coin the receiver can prove a share for.
     NoCoin,
-    /// The coin the receiver would add is a silent payment output.
+    /// The coin the receiver would add to a Silent Payjoin is a silent
+    /// payment output.
     SilentPaymentCoin(OutPoint),
     /// The finished proposal failed the receiver's own check.
     SelfCheck(SelfCheckError),
@@ -113,7 +114,7 @@ pub struct SpReceiver {
     /// Inputs of every Original received, across all of this receiver's URIs.
     seen: BTreeSet<OutPoint>,
     /// Silent payment outputs the receiver holds, which it never adds to a
-    /// payjoin.
+    /// Silent Payjoin.
     silent_coins: BTreeSet<OutPoint>,
     /// The fee rates the receiver accepts paying for its own input.
     pub fee_range: (FeeRate, FeeRate),
@@ -135,7 +136,8 @@ impl SpReceiver {
     pub fn address(&self) -> SpAddress { self.keys.address(&self.secp) }
 
     /// Record that `outpoint` is a silent payment output paying this
-    /// receiver, so that [`Self::propose`] refuses to add it.
+    /// receiver, so that [`Self::propose`] refuses to add it to a Silent
+    /// Payjoin.
     pub fn record_silent_coin(&mut self, outpoint: OutPoint) { self.silent_coins.insert(outpoint); }
 
     /// The address and label of the contact named `name`, the same each
@@ -209,7 +211,7 @@ impl SpReceiver {
         if log.from_v2_sender() != Some(true) {
             return Err(Decline::NotV2);
         }
-        let coin = pick_coin(coins, &self.silent_coins)?;
+        let coin = pick_coin(coins, &self.silent_coins, !found.is_empty())?;
         let coin_secret = coins.bip352_secret(&coin.txout.script_pubkey).ok_or(Decline::NoCoin)?;
 
         // The coin is chosen, so the final input set is known: re-derive each
@@ -291,11 +293,13 @@ impl SpReceiver {
     }
 }
 
-/// The coin to add to a payjoin from `coins`, refusing one in `silent`.
-fn pick_coin(coins: &Keychain, silent: &BTreeSet<OutPoint>) -> Result<Coin, Decline> {
+/// The coin to add to a payjoin from `coins`. When the coin's share goes
+/// to the payer (`shares`), it refuses one in `silent`. An ordinary payjoin
+/// sends no share and may add any coin.
+fn pick_coin(coins: &Keychain, silent: &BTreeSet<OutPoint>, shares: bool) -> Result<Coin, Decline> {
     let coin = coins.spendable().into_iter().next().ok_or(Decline::NoCoin)?;
     // A payer who knows a silent payment coin's tweak learns b_scan·B_spend from its share.
-    if silent.contains(&coin.outpoint) {
+    if shares && silent.contains(&coin.outpoint) {
         return Err(Decline::SilentPaymentCoin(coin.outpoint));
     }
     Ok(coin)
@@ -474,7 +478,7 @@ mod tests {
     use crate::wallet::KeyKind;
 
     #[test]
-    fn a_silent_payment_coin_is_never_added() {
+    fn a_silent_payment_coin_is_added_only_without_a_share() {
         let mut coins = Keychain::new("test", "pick coin test", KeyKind::P2tr, 0);
         let funding = Transaction {
             version: transaction::Version::TWO,
@@ -489,11 +493,12 @@ mod tests {
         let coin = coins.coins()[0].clone();
 
         let mut receiver = SpReceiver::new(SpKeys::from_seed("pick coin test"));
-        assert_eq!(pick_coin(&coins, &receiver.silent_coins).ok(), Some(coin.clone()));
+        assert_eq!(pick_coin(&coins, &receiver.silent_coins, true).ok(), Some(coin.clone()));
         receiver.record_silent_coin(coin.outpoint);
         assert!(matches!(
-            pick_coin(&coins, &receiver.silent_coins),
+            pick_coin(&coins, &receiver.silent_coins, true),
             Err(Decline::SilentPaymentCoin(op)) if op == coin.outpoint
         ));
+        assert_eq!(pick_coin(&coins, &receiver.silent_coins, false).ok(), Some(coin));
     }
 }
