@@ -5,14 +5,15 @@
 //! silent payment wallets: for every transaction a scan could match, the
 //! public tweak `input_hash·A` and its taproot outputs. A wallet restored
 //! from its seed checks each entry with its scan key and spend key alone,
-//! which is how the demo decides whether a restore finds a payment.
+//! and the labels it searches for, which is how the demo decides whether
+//! a restore finds a payment.
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin::secp256k1::{All, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::{Address, Amount, BlockHash, OutPoint, Transaction, TxOut, Txid};
 use payjoin_test_utils::bitcoind;
 use serde_json::{json, Value};
-use spj_crypto::bip352;
+use spj_crypto::bip352::{self, Labels};
 
 use crate::derive;
 
@@ -152,20 +153,58 @@ pub struct Restored {
     pub outpoint: OutPoint,
     pub value: Amount,
     pub k: u32,
+    /// The label it pays, or `None` for the unlabelled address.
+    pub label: Option<u32>,
 }
 
+/// How many labels past the highest one found a restore searches for.
+///
+/// Backup words hold the keys, not how many labels the wallet handed out,
+/// and a restore only finds outputs on labels it searches for. 20 is BIP
+/// 44's address gap limit, with the same trade-off: after more than 20
+/// URIs in a row that are never paid, a restore misses what the next ones
+/// receive. A full-node scan pays at most one point addition per label
+/// per transaction, but a light client tests one candidate key per label
+/// against block filters, and pays per label in downloads and false
+/// positives, which is what keeps the number small.
+pub const LABEL_LOOKAHEAD: u32 = 20;
+
 /// What a wallet restored from `scan_secret` and `spend` finds in `index`.
+///
+/// It searches labels `0..=LABEL_LOOKAHEAD`, and each time it finds one
+/// higher than any before, widens the search to that label plus
+/// [`LABEL_LOOKAHEAD`] and scans again.
 pub fn restore(
     secp: &Secp256k1<All>,
     scan_secret: &SecretKey,
     spend: &PublicKey,
     index: &[TweakEntry],
 ) -> Vec<Restored> {
+    let mut searched = LABEL_LOOKAHEAD;
+    loop {
+        let labels = Labels::new(secp, scan_secret, 0..=searched);
+        let found = scan_index(secp, scan_secret, spend, &labels, index);
+        let highest = found.iter().filter_map(|f| f.label).max().unwrap_or(0);
+        match highest.checked_add(LABEL_LOOKAHEAD) {
+            Some(wider) if wider > searched => searched = wider,
+            _ => return found,
+        }
+    }
+}
+
+/// What a wallet holding `scan_secret` and `spend` and searching for
+/// `labels` finds in `index`.
+pub fn scan_index(
+    secp: &Secp256k1<All>,
+    scan_secret: &SecretKey,
+    spend: &PublicKey,
+    labels: &Labels,
+    index: &[TweakEntry],
+) -> Vec<Restored> {
     let mut found = Vec::new();
     for entry in index {
         let keys: Vec<XOnlyPublicKey> = entry.outputs.iter().map(|(_, key, _)| *key).collect();
-        for hit in bip352::scan(secp, scan_secret, spend, &entry.tweak, &keys, &Default::default())
-        {
+        for hit in bip352::scan(secp, scan_secret, spend, &entry.tweak, &keys, labels) {
             let (vout, _, value) = entry
                 .outputs
                 .iter()
@@ -175,8 +214,49 @@ pub fn restore(
                 outpoint: OutPoint { txid: entry.txid, vout: *vout },
                 value: *value,
                 k: hit.k,
+                label: hit.label,
             });
         }
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin::hashes::Hash;
+    use bitcoin::secp256k1::Scalar;
+
+    use super::*;
+    use crate::derive::SpKeys;
+
+    /// One transaction paying `keys` on label `m` at `k = 0`.
+    fn paying(secp: &Secp256k1<All>, keys: &SpKeys, n: u8, m: u32) -> TweakEntry {
+        let tweak = SecretKey::from_slice(&[n; 32]).unwrap().public_key(secp);
+        let ecdh = tweak.mul_tweak(secp, &Scalar::from(keys.scan)).unwrap();
+        let t_0 = bip352::output_tweak(&ecdh, 0).unwrap();
+        let output = keys.spend_for(secp, Some(m)).unwrap().add_exp_tweak(secp, &t_0).unwrap();
+        TweakEntry {
+            height: n.into(),
+            txid: Txid::from_byte_array([n; 32]),
+            tweak,
+            outputs: vec![(0, output.x_only_public_key().0, Amount::from_sat(1_000))],
+        }
+    }
+
+    /// A restore finds labels within the lookahead of the highest one it
+    /// has found, however far that has climbed, and none beyond.
+    #[test]
+    fn restore_searches_past_each_label_it_finds() {
+        let secp = Secp256k1::new();
+        let keys = SpKeys::from_seed("restore test");
+        let spend = keys.spend.public_key(&secp);
+        let reach = LABEL_LOOKAHEAD;
+        let index: Vec<TweakEntry> = [(1, reach), (2, 2 * reach), (3, 3 * reach + 1)]
+            .into_iter()
+            .map(|(n, m)| paying(&secp, &keys, n, m))
+            .collect();
+        let labels: Vec<_> =
+            restore(&secp, &keys.scan, &spend, &index).iter().map(|f| f.label).collect();
+        assert_eq!(labels, [Some(reach), Some(2 * reach)]);
+    }
 }

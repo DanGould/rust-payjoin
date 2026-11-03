@@ -460,7 +460,7 @@ pub fn rederive(inputs: &[&In]) -> ScriptBuf {
     let keys: Vec<PublicKey> =
         inputs.iter().filter_map(|i| i.bip352_secret().map(|s| s.public_key(&secp))).collect();
     let outpoints: Vec<OutPoint> = inputs.iter().map(|i| i.outpoint).collect();
-    spj_demo::derive::receiver_outputs(&secp, &bob().keys, &keys, &outpoints, 1)
+    spj_demo::derive::receiver_outputs(&secp, &bob().keys, &keys, &outpoints, &[None])
         .expect("derivable")
         .remove(0)
 }

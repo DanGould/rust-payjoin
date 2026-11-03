@@ -197,7 +197,13 @@ impl Bob {
         let mut mine: Vec<ScriptBuf> = body.iter().cloned().collect();
         let mut silent = Vec::new();
         if let Some(prevouts) = &prevouts {
-            for found in derive::scan(&self.secp, &self.receiver.keys, &original_tx, prevouts) {
+            for found in derive::scan(
+                &self.secp,
+                &self.receiver.keys,
+                self.receiver.labels.table(),
+                &original_tx,
+                prevouts,
+            ) {
                 let script = original_tx.output[found.vout].script_pubkey.clone();
                 mine.push(script.clone());
                 silent.push(script);

@@ -10,7 +10,7 @@
 //!    inputs against its own node (unspent, not seen in an earlier Original);
 //! 2. picks the coin it will add before touching the outputs, then re-derives
 //!    each of its outputs over the Original's inputs plus that coin, keeping
-//!    each output's `k`;
+//!    each output's `k` and label;
 //! 3. attaches a BIP 375 share `a·B_scan` and a BIP 374 proof for the coin, so
 //!    the sender can derive the same outputs without trusting the receiver;
 //! 4. scans the finished proposal as a restore would and runs the sender's
@@ -33,6 +33,7 @@ use spj_crypto::{bip352, carriage};
 use crate::chain;
 pub use crate::derive::SpKeys;
 use crate::derive::{self, scan, Found};
+use crate::labels::{LabelBook, Purpose};
 use crate::persist::EventLog;
 use crate::sp_address::SpAddress;
 use crate::wallet::{Coin, Keychain};
@@ -103,6 +104,8 @@ pub struct Proposal {
 pub struct SpReceiver {
     secp: Secp256k1<All>,
     pub keys: SpKeys,
+    /// The labels handed out, which the receiver scans for.
+    pub labels: LabelBook,
     /// Inputs of every Original received, across all of this receiver's URIs.
     seen: BTreeSet<OutPoint>,
     /// The fee rates the receiver accepts paying for its own input.
@@ -111,8 +114,10 @@ pub struct SpReceiver {
 
 impl SpReceiver {
     pub fn new(keys: SpKeys) -> Self {
+        let secp = Secp256k1::new();
         Self {
-            secp: Secp256k1::new(),
+            labels: LabelBook::new(&secp, &keys),
+            secp,
             keys,
             seen: BTreeSet::new(),
             fee_range: (FeeRate::BROADCAST_MIN, FeeRate::from_sat_per_vb_u32(2)),
@@ -120,6 +125,26 @@ impl SpReceiver {
     }
 
     pub fn address(&self) -> SpAddress { self.keys.address(&self.secp) }
+
+    /// The address for the next one-time URI, on a label no other URI has.
+    /// Record the URI with [`Self::record_one_time`] once it is made.
+    pub fn next_one_time(&self) -> (u32, SpAddress) {
+        let m = self.labels.next();
+        (m, self.keys.labelled_address(&self.secp, m).expect("label tweaks are valid scalars"))
+    }
+
+    /// Scan for label `m` from now on, as the label of one-time URI `uri`.
+    pub fn record_one_time(&mut self, m: u32, uri: String) {
+        self.labels.record(&self.secp, &self.keys, m, Purpose::OneTime(uri));
+    }
+
+    /// The address and label of the contact named `name`, the same each
+    /// time it is asked for.
+    pub fn contact_address(&mut self, name: &str) -> (u32, SpAddress) {
+        self.labels
+            .contact_address(&self.secp, &self.keys, name)
+            .expect("label tweaks are valid scalars")
+    }
 
     /// Answer an Original with a coin from `coins`. `body` is the URI's
     /// ordinary address, if it has one, which a sender without silent
@@ -137,7 +162,7 @@ impl SpReceiver {
         let prevouts = chain::unspent_prevouts(node, &original_tx)
             .map_err(session)?
             .ok_or(Decline::InputsUnavailable)?;
-        let found = scan(secp, &self.keys, &original_tx, &prevouts);
+        let found = scan(secp, &self.keys, self.labels.table(), &original_tx, &prevouts);
         let found_scripts: Vec<ScriptBuf> =
             found.iter().map(|f| original_tx.output[f.vout].script_pubkey.clone()).collect();
         let pays_body = body
@@ -188,7 +213,9 @@ impl SpReceiver {
         let coin_secret = coins.bip352_secret(&coin.txout.script_pubkey).ok_or(Decline::NoCoin)?;
 
         // The coin is chosen, so the final input set is known: re-derive each
-        // output paying the receiver over it, in the order its `k` was found.
+        // output paying the receiver over it, in the order its `k` was found
+        // and on the label it was paid to, so it stays with that URI.
+        let labels: Vec<Option<u32>> = found.iter().map(|f| f.label).collect();
         let mut derived = Vec::new();
         let outputs = if found.is_empty() {
             checked
@@ -198,9 +225,8 @@ impl SpReceiver {
             let mut outpoints: Vec<OutPoint> =
                 original_tx.input.iter().map(|input| input.previous_output).collect();
             outpoints.push(coin.outpoint);
-            derived =
-                derive::receiver_outputs(secp, &self.keys, &keys, &outpoints, found.len() as u32)
-                    .ok_or_else(|| session("no shared secret over the final inputs"))?;
+            derived = derive::receiver_outputs(secp, &self.keys, &keys, &outpoints, &labels)
+                .ok_or_else(|| session("no shared secret over the final inputs"))?;
             let mut replacements: Vec<TxOut> = found
                 .iter()
                 .map(|f| TxOut { value: f.value, script_pubkey: derived[f.k as usize].clone() })
@@ -248,8 +274,16 @@ impl SpReceiver {
                     carriage::set_share_and_proof(&mut psbt.inputs[index], &scan, &share, &proof);
                 })
                 .map_err(session)?;
-            self_check(secp, &self.keys, &original_tx, &prevouts, receiver.psbt(), &derived)
-                .map_err(Decline::SelfCheck)?;
+            self_check(
+                secp,
+                &self.keys,
+                &original_tx,
+                &prevouts,
+                receiver.psbt(),
+                &derived,
+                &labels,
+            )
+            .map_err(Decline::SelfCheck)?;
             (receiver, Some(share))
         };
         coins.reserve(coin.outpoint);
@@ -314,7 +348,7 @@ impl fmt::Display for SelfCheckError {
 /// key, the shares must add up to `b_scan` times those keys, and the outputs
 /// derived from them must each appear once. That catches a share made with
 /// the wrong key, such as a BIP 86 coin's internal key instead of its
-/// tweaked one.
+/// tweaked one. `labels` holds the label each of `derived` pays.
 pub fn self_check(
     secp: &Secp256k1<All>,
     keys: &SpKeys,
@@ -322,6 +356,7 @@ pub fn self_check(
     original_prevouts: &[TxOut],
     proposal: &Psbt,
     derived: &[ScriptBuf],
+    labels: &[Option<u32>],
 ) -> Result<(), SelfCheckError> {
     let from_original: BTreeMap<OutPoint, (&bitcoin::TxIn, &TxOut)> = original
         .input
@@ -350,7 +385,8 @@ pub fn self_check(
         }
     }
 
-    let found = scan(secp, keys, &view, &prevouts);
+    let table = keys.labels(secp, labels.iter().flatten().copied());
+    let found = scan(secp, keys, &table, &view, &prevouts);
     if bip352::transaction_tweak(secp, &view, &prevouts).is_none() {
         return Err(SelfCheckError::Unscannable);
     }
@@ -406,7 +442,9 @@ pub fn self_check(
         .and_then(|a| bip352::input_hash(&outpoints, &a))
         .and_then(|input_hash| derive::sum(&partial)?.mul_tweak(secp, &input_hash).ok())
         .and_then(|ecdh| {
-            derive::output_scripts(secp, &ecdh, &keys.spend.public_key(secp), derived.len() as u32)
+            let spends: Vec<PublicKey> =
+                labels.iter().map(|label| keys.spend_for(secp, *label)).collect::<Option<_>>()?;
+            derive::labelled_output_scripts(secp, &ecdh, &spends)
         })
         .ok_or(SelfCheckError::SenderMisses)?;
     let once = |script: &ScriptBuf| {

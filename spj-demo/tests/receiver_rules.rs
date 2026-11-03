@@ -27,7 +27,15 @@ fn self_check(contrib: &[In], derive_over: &[In], attach: &[Attach]) -> Result<(
     let proposal = proposal_psbt(&s, contrib, &outputs, attach);
     let original_tx = signed_tx(&s, &orig);
     let prevouts: Vec<_> = s.iter().map(|i| i.prevout.clone()).collect();
-    receiver::self_check(&secp(), &bob().keys, &original_tx, &prevouts, &proposal, &[derived])
+    receiver::self_check(
+        &secp(),
+        &bob().keys,
+        &original_tx,
+        &prevouts,
+        &proposal,
+        &[derived],
+        &[None],
+    )
 }
 
 fn honest(inputs: &[In], tag: &str) -> Vec<Attach> {
@@ -181,6 +189,68 @@ async fn s9e_silent_payjoin_on_regtest_is_found_from_the_tweak_index() -> Result
     assert_eq!(found[0].outpoint.txid, txid);
     assert_eq!(payjoin.output[found[0].outpoint.vout as usize].script_pubkey, proposal.derived[0]);
     assert!(found[0].value > amount, "the payee output carries the receiver's coin too");
+    Ok(())
+}
+
+/// R1 with a label: Bob's one-time URI carries his address on a fresh label.
+/// His scan of the Original finds the output on that label, he re-derives it
+/// on the same label, Alice's check derives it from the labelled `sp=` in
+/// the URI, and a restore from Bob's seed finds the confirmed payjoin there.
+#[tokio::test(flavor = "multi_thread")]
+async fn r1_labelled_one_time_uri() -> Result<(), Error> {
+    let Cast { regtest, mut bob, mut bob_coins, mut alice } = cast(1, 1).await?;
+    let secp = secp();
+    let amount = Amount::from_sat(50_000);
+    let start = chain::height(regtest.client())?;
+    for earlier in ["first", "second"] {
+        let (m, _) = bob.next_one_time();
+        bob.record_one_time(m, earlier.into());
+    }
+    let (m, sp) = bob.next_one_time();
+    assert_eq!(m, 3, "label 0 is change and two URIs came before");
+    assert_ne!(sp, bob.address());
+    let body = bob_coins.address();
+    let one_time = flow::one_time(&regtest.mailroom, sp, body.clone(), amount)?;
+    bob.record_one_time(m, one_time.uri.to_string());
+    let original = flow::sp_original(&secp, &mut alice, &one_time.uri.sp, amount)?;
+    let sending = flow::post_original(
+        &regtest.mailroom,
+        &original.psbt,
+        &flow::one_time_param(&one_time.uri)?,
+        &original.payee_address(),
+        amount,
+        false,
+    )
+    .await?;
+
+    let received = flow::poll_original(&regtest.mailroom, one_time.session, &one_time.log)
+        .await?
+        .ok_or("the Original should be waiting")?;
+    let proposal = bob.propose(
+        regtest.client(),
+        received,
+        &one_time.log,
+        &mut bob_coins,
+        Some(&body.script_pubkey()),
+    )?;
+    let labels: Vec<_> = proposal.found.iter().map(|f| f.label).collect();
+    assert_eq!(labels, [Some(m)], "the Original pays the URI's label");
+    flow::post_proposal(&regtest.mailroom, &proposal.receiver, &one_time.log).await?;
+
+    let mut psbt = flow::poll_proposal(&regtest.mailroom, &sending).await?.ok_or("a proposal")?;
+    let accepted =
+        sender::check_proposal(&secp, &one_time.uri.sp, &original.psbt, &original.own, &psbt)?;
+    assert_eq!(accepted.shares_verified, 1);
+    alice.sign(&mut psbt)?;
+    let payjoin: Transaction = wallet::extract(&psbt);
+    let txid = chain::broadcast(regtest.client(), &payjoin)?;
+    let height = regtest.confirm(&[txid])?;
+
+    let index = chain::tweak_index(&secp, regtest.client(), start + 1, height)?;
+    let found = chain::restore(&secp, &bob.keys.scan, &bob.keys.spend.public_key(&secp), &index);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].outpoint.txid, found[0].label), (txid, Some(m)));
+    assert_eq!(payjoin.output[found[0].outpoint.vout as usize].script_pubkey, proposal.derived[0]);
     Ok(())
 }
 

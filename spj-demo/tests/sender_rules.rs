@@ -110,7 +110,7 @@ fn s9e_honest_proposal_is_found_from_the_tweak() {
         tweak.to_string(),
         "02841776b5f464162de42f31fdddd084e6d931e1b415523996929eea5b46ed9b8b"
     );
-    let found = spj_demo::derive::scan(&secp(), &bob().keys, &tx, &prevouts);
+    let found = spj_demo::derive::scan(&secp(), &bob().keys, &Default::default(), &tx, &prevouts);
     assert_eq!(found.len(), 1);
     assert_eq!(tx.output[found[0].vout].script_pubkey, payee);
 }

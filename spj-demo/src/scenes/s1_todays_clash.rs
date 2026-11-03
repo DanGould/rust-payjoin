@@ -23,8 +23,13 @@ pub async fn run(demo: &mut Demo) -> Result<(), Error> {
     let original = flow::sp_original(&demo.secp, &mut demo.alice, &one_time.uri.sp, AMOUNT)?;
     let original_tx = original.tx();
     let prevouts = chain::prevouts(demo.client(), &original_tx)?;
-    let found_in_original =
-        crate::derive::scan(&demo.secp, &demo.bob.keys, &original_tx, &prevouts);
+    let found_in_original = crate::derive::scan(
+        &demo.secp,
+        &demo.bob.keys,
+        demo.bob.labels.table(),
+        &original_tx,
+        &prevouts,
+    );
     demo.n.say(
         "Alice",
         &format!(

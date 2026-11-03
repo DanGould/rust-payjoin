@@ -8,6 +8,7 @@ pub mod contact;
 pub mod contacts;
 pub mod derive;
 pub mod flow;
+pub mod labels;
 pub mod narrate;
 pub mod net;
 pub mod persist;

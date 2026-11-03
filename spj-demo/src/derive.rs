@@ -5,6 +5,7 @@
 use bitcoin::key::TweakedPublicKey;
 use bitcoin::secp256k1::{All, PublicKey, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::{Amount, Network, OutPoint, ScriptBuf, Transaction, TxOut};
+use spj_crypto::bip352::Labels;
 use spj_crypto::{bip352, tagged_hash};
 
 use crate::sp_address::SpAddress;
@@ -23,13 +24,7 @@ pub fn output_scripts(
     spend: &PublicKey,
     n: u32,
 ) -> Option<Vec<ScriptBuf>> {
-    (0..n)
-        .map(|k| {
-            let t_k = bip352::output_tweak(ecdh, k)?;
-            let key = spend.add_exp_tweak(secp, &t_k).ok()?;
-            Some(p2tr_script(key.x_only_public_key().0))
-        })
-        .collect()
+    labelled_output_scripts(secp, ecdh, &vec![*spend; n as usize])
 }
 
 /// The x-only keys of a transaction's taproot outputs, with their indices.
@@ -73,6 +68,27 @@ impl SpKeys {
     pub fn address(&self, secp: &Secp256k1<All>) -> SpAddress {
         SpAddress::new(self.scan.public_key(secp), self.spend.public_key(secp), Network::Regtest)
     }
+
+    /// The spend key an output on `label` pays: `B_spend` itself, or
+    /// `B_m` for label `m`.
+    pub fn spend_for(&self, secp: &Secp256k1<All>, label: Option<u32>) -> Option<PublicKey> {
+        let spend = self.spend.public_key(secp);
+        match label {
+            None => Some(spend),
+            Some(m) => bip352::labelled_spend(secp, &self.scan, &spend, m),
+        }
+    }
+
+    /// The address for label `m`, which shares the scan key.
+    pub fn labelled_address(&self, secp: &Secp256k1<All>, m: u32) -> Option<SpAddress> {
+        let spend = self.spend_for(secp, Some(m))?;
+        Some(SpAddress::new(self.scan.public_key(secp), spend, Network::Regtest))
+    }
+
+    /// The scan table for labels `ms`.
+    pub fn labels(&self, secp: &Secp256k1<All>, ms: impl IntoIterator<Item = u32>) -> Labels {
+        Labels::new(secp, &self.scan, ms)
+    }
 }
 
 /// An output of the Original that pays the receiver.
@@ -80,49 +96,66 @@ impl SpKeys {
 pub struct Found {
     pub vout: usize,
     pub k: u32,
+    /// The label it pays, or `None` for the unlabelled address.
+    pub label: Option<u32>,
     pub value: Amount,
 }
 
-/// The outputs of `tx` that pay `keys`, by the same scan a restore runs.
+/// The outputs of `tx` that pay `keys` or one of `labels`, by the same scan
+/// a restore runs.
 pub fn scan(
     secp: &Secp256k1<All>,
     keys: &SpKeys,
+    labels: &Labels,
     tx: &Transaction,
     prevouts: &[TxOut],
 ) -> Vec<Found> {
     let Some(tweak) = bip352::transaction_tweak(secp, tx, prevouts) else { return Vec::new() };
     let outputs = taproot_outputs(tx);
     let output_keys: Vec<_> = outputs.iter().map(|(_, key)| *key).collect();
-    bip352::scan(
-        secp,
-        &keys.scan,
-        &keys.spend.public_key(secp),
-        &tweak,
-        &output_keys,
-        &Default::default(),
-    )
-    .into_iter()
-    .map(|hit| {
-        let (vout, _) =
-            outputs.iter().find(|(_, key)| *key == hit.output_key).expect("scanned key");
-        Found { vout: *vout, k: hit.k, value: tx.output[*vout].value }
-    })
-    .collect()
+    bip352::scan(secp, &keys.scan, &keys.spend.public_key(secp), &tweak, &output_keys, labels)
+        .into_iter()
+        .map(|hit| {
+            let (vout, _) =
+                outputs.iter().find(|(_, key)| *key == hit.output_key).expect("scanned key");
+            Found { vout: *vout, k: hit.k, label: hit.label, value: tx.output[*vout].value }
+        })
+        .collect()
 }
 
-/// The receiver's outputs `k = 0..n` for a transaction spending `outpoints`
-/// whose eligible inputs have keys `input_keys`: `B_spend + t_k·G` from
-/// `b_scan·input_hash·A`.
+/// The scripts paying `spends[k]` at each `k` under shared secret `ecdh`.
+/// Outputs on different labels of one scan key share a `k` sequence.
+pub fn labelled_output_scripts(
+    secp: &Secp256k1<All>,
+    ecdh: &PublicKey,
+    spends: &[PublicKey],
+) -> Option<Vec<ScriptBuf>> {
+    (0..)
+        .zip(spends)
+        .map(|(k, spend)| {
+            let t_k = bip352::output_tweak(ecdh, k)?;
+            let key = spend.add_exp_tweak(secp, &t_k).ok()?;
+            Some(p2tr_script(key.x_only_public_key().0))
+        })
+        .collect()
+}
+
+/// The receiver's outputs for a transaction spending `outpoints` whose
+/// eligible inputs have keys `input_keys`, one per entry of `labels` with
+/// `k` its index: `B_m + t_k·G` from `b_scan·input_hash·A`, where `B_m` is
+/// `B_spend` for `None`.
 pub fn receiver_outputs(
     secp: &Secp256k1<All>,
     keys: &SpKeys,
     input_keys: &[PublicKey],
     outpoints: &[OutPoint],
-    n: u32,
+    labels: &[Option<u32>],
 ) -> Option<Vec<ScriptBuf>> {
     let tweak = bip352::public_tweak(secp, outpoints, input_keys)?;
     let ecdh = tweak.mul_tweak(secp, &Scalar::from(keys.scan)).ok()?;
-    output_scripts(secp, &ecdh, &keys.spend.public_key(secp), n)
+    let spends: Vec<PublicKey> =
+        labels.iter().map(|label| keys.spend_for(secp, *label)).collect::<Option<_>>()?;
+    labelled_output_scripts(secp, &ecdh, &spends)
 }
 
 #[cfg(test)]
@@ -146,7 +179,7 @@ mod tests {
         let sent =
             bip352::sender_outputs(&secp, &[bip352_input], &[outpoint], &[recipient]).unwrap();
         let derived =
-            receiver_outputs(&secp, &keys, &[bip352_input.public_key(&secp)], &[outpoint], 1)
+            receiver_outputs(&secp, &keys, &[bip352_input.public_key(&secp)], &[outpoint], &[None])
                 .unwrap();
         assert_eq!(derived, vec![p2tr_script(sent[0])]);
 
@@ -168,8 +201,8 @@ mod tests {
             }],
         };
         assert_eq!(
-            scan(&secp, &keys, &tx, &[prevout]),
-            vec![Found { vout: 0, k: 0, value: Amount::from_sat(9_000) }]
+            scan(&secp, &keys, &Labels::default(), &tx, &[prevout]),
+            vec![Found { vout: 0, k: 0, label: None, value: Amount::from_sat(9_000) }]
         );
     }
 }
