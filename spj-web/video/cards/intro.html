@@ -5,21 +5,129 @@
     <title>Silent Payjoin</title>
     <link rel="stylesheet" href="../../static/fonts/fonts.css" />
     <link rel="stylesheet" href="card.css" />
+    <style>
+      /* Bob's two settings. Silent payments start on; when the voice says
+         "turn one on", payjoin switches on and silent payments switch off. */
+      .toggles {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        margin: 0 0 40px;
+        text-align: left;
+      }
+      .toggle {
+        display: grid;
+        grid-template-columns: 74px 1fr;
+        gap: 4px 22px;
+        align-items: center;
+        padding: 16px 26px;
+        border-radius: 16px;
+        background: #111723;
+        box-shadow: inset 0 0 0 1.5px #232c3b;
+        width: 720px;
+      }
+      .toggle b {
+        font-size: 30px;
+      }
+      .toggle small {
+        grid-column: 2;
+        font-size: 22px;
+        color: #8e9aab;
+      }
+      .switch {
+        grid-row: span 2;
+        width: 74px;
+        height: 40px;
+        border-radius: 999px;
+        background: #2c3545;
+        position: relative;
+        animation-fill-mode: forwards;
+        animation-duration: 0.35s;
+      }
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 5px;
+        left: 5px;
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        background: #c9d1db;
+        animation: inherit;
+      }
+      .switch.sp-on {
+        background: #7961db;
+      }
+      .switch.sp-on::after {
+        transform: translateX(34px);
+        background: #fff;
+      }
+      .go .switch.flip-on {
+        animation-name: switch-on;
+        animation-delay: calc(var(--i, 0) * 1s + 0.3s);
+      }
+      .go .switch.flip-on::after {
+        animation-name: knob-on;
+      }
+      .go .switch.flip-off {
+        animation-name: switch-off;
+        animation-delay: calc(var(--i, 0) * 1s + 0.9s);
+      }
+      .go .switch.flip-off::after {
+        animation-name: knob-off;
+      }
+      @keyframes switch-on {
+        to {
+          background: #f75394;
+        }
+      }
+      @keyframes knob-on {
+        to {
+          transform: translateX(34px);
+          background: #fff;
+        }
+      }
+      @keyframes switch-off {
+        to {
+          background: #2c3545;
+        }
+      }
+      @keyframes knob-off {
+        to {
+          transform: none;
+          background: #c9d1db;
+        }
+      }
+      .say {
+        font-size: 34px;
+        font-weight: 600;
+        color: #fff;
+        margin: 0 0 12px;
+      }
+    </style>
   </head>
   <body>
-    <p class="title rise">Bob wants both. His wallet makes him pick.</p>
-    <ul class="lines">
-      <li class="rise" data-at="silent payments">
-        <span class="sp">Silent payments</span>: one address, and nobody can
-        link the transactions to it
-      </li>
-      <li class="rise" data-at="and payjoin">
-        <span class="pj">Payjoin</span>: Bob adds a coin, so the transaction is
-        hard to read
-      </li>
-      <li class="rise" data-at="today wallets toggle">
-        Wallets today toggle between the two, never both at once
-      </li>
-    </ul>
+    <p class="title rise">
+      Bob wants <span class="sp">silent payments</span> and
+      <span class="pj">payjoin</span>
+    </p>
+    <div class="toggles rise" data-at="today his wallet">
+      <div class="toggle">
+        <span class="switch sp-on flip-off" data-at="turn one on"></span>
+        <b class="sp">Silent payments</b>
+        <small>One address, and nobody can link the transactions to it</small>
+      </div>
+      <div class="toggle">
+        <span class="switch flip-on" data-at="turn one on"></span>
+        <b class="pj">Payjoin</b>
+        <small>Bob adds a coin, so the transaction is hard to read</small>
+      </div>
+    </div>
+    <p class="say rise" data-at="today his wallet">
+      Today, his wallet makes him toggle between them
+    </p>
+    <p class="say rise" data-at="turn one on">
+      Turn one on, and the other turns off
+    </p>
   </body>
 </html>

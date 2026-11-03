@@ -824,7 +824,7 @@ await next("bob.coin", 2);
 await spot(
   $('#tx .row.bob[data-key^="in-"]'),
   "Bob's coin, with a proof",
-  "",
+  "So Alice can check his math before she signs",
   CARD,
 );
 await sleep(2600);
@@ -859,6 +859,12 @@ await next("alice.confirmed", 1);
 await release();
 await waitFor(count("bob.received", 2));
 await spot($("#bob .list li"), "Found by scanning");
+await untilPhrase("confirmed", "and if bob");
+await spot(
+  $("#bob .list li"),
+  "Found by scanning",
+  "A wallet restored from Bob's backup words finds it the same way",
+);
 await hold("confirmed");
 await unspot();
 
@@ -870,6 +876,7 @@ await frame(await box(PAYER), {
 });
 await click("#contact-name", { follow: false });
 await evaluate(`${$("#contact-name")}.focus()`);
+await say("A URI carries no name, so Alice types one", "", "top");
 await sleep(300);
 for (const key of "Bob") {
   await cdp.send("Input.insertText", { text: key });
@@ -878,6 +885,7 @@ for (const key of "Bob") {
 await sleep(400);
 await click('#payer [data-act="save-contact"]');
 await waitFor(count("alice.contact_saved", 1));
+await hush();
 await park();
 await sleep(600);
 await spot($("#payer .contact .note"), "");
