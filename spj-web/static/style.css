@@ -375,13 +375,13 @@ button {
 .qr.small svg {
   width: 110px;
 }
-.request-amount {
+.uri-amount {
   text-align: center;
   font-size: 24px;
   font-weight: 700;
   margin: 10px 0 2px;
 }
-.request-kind {
+.uri-kind {
   text-align: center;
   font-size: 13px;
   color: var(--muted);

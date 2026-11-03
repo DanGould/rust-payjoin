@@ -49,7 +49,7 @@ const state = {
     balance: 0,
     activity: [],
     steps: [],
-    request: null,
+    oneTime: null,
     contact: null,
     awake: true,
     status: "",
@@ -168,8 +168,8 @@ async function apply({ kind, data }) {
     case "bob.ready":
       state.bob.balance = data.balance;
       return;
-    case "bob.request":
-      Object.assign(state.bob, { screen: "request", request: data, steps: [] });
+    case "bob.one_time":
+      Object.assign(state.bob, { screen: "receive", oneTime: data, steps: [] });
       state.uri = { kind: "one_time", ...data };
       state.tx = null;
       return;
@@ -517,13 +517,13 @@ function miniUri(uri) {
 function bobView() {
   const b = state.bob;
   switch (b.screen) {
-    case "request": {
-      const r = b.request;
+    case "receive": {
+      const r = b.oneTime;
       return `<div class="view">
         <div class="head"><h2>Receive</h2></div>
         <div class="qr">${r.qr ?? ""}</div>
-        <div class="request-amount">${sats(r.amount)}</div>
-        <div class="request-kind">One-time URI</div>
+        <div class="uri-amount">${sats(r.amount)}</div>
+        <div class="uri-kind">One-time URI</div>
         ${miniUri(r.uri)}
         ${statusLine("Waiting to be paid")}
       </div>`;
@@ -533,7 +533,7 @@ function bobView() {
       return `<div class="view">
         <div class="head"><h2>My contact</h2></div>
         <div class="qr">${c.qr ?? ""}</div>
-        <div class="request-kind" style="margin-top:10px">Reusable. Share it with anyone you transact with again and again</div>
+        <div class="uri-kind" style="margin-top:10px">Reusable. Share it with anyone you transact with again and again</div>
         ${miniUri(c.uri)}
         <div class="spacer"></div>
         ${activity(b.activity)}
@@ -550,7 +550,7 @@ function bobView() {
         ${who("bob")}
         ${balance(b.balance)}
         <div class="actions">
-          <button class="btn primary" data-act="request" type="button">Receive</button>
+          <button class="btn primary" data-act="receive" type="button">Receive</button>
           <button class="btn soft" data-act="share-contact" type="button">My contact</button>
         </div>
         <div class="section-title">Activity</div>
@@ -616,7 +616,7 @@ function payerView(name) {
       return `<div class="view">
         <div class="head"><h2>Scan</h2></div>
         <div class="finder">${scanned?.qr ? `<div class="shot">${scanned.qr}</div>` : ""}<div class="scanline"></div></div>
-        <div class="request-kind">Point the camera at Bob's code</div>
+        <div class="uri-kind">Point the camera at Bob's code</div>
       </div>`;
     case "review": {
       const u = uriParts(scanned.uri);
@@ -805,7 +805,7 @@ document.addEventListener("click", async (ev) => {
   const name = state.payer;
   const p = state.payers[name];
   try {
-    if (act === "request") {
+    if (act === "receive") {
       el.disabled = true;
       await api("/api/bob/one-time", { amount: state.amount });
     }

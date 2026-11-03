@@ -1,5 +1,5 @@
 //! Bob's phone: a silent payment wallet that hands out one-time requests
-//! and a contact string, answers each Original that arrives with a coin and
+//! and a contact URI, answers each Original that arrives with a coin and
 //! a proof, and finds what it received by scanning new blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,9 +27,9 @@ use crate::Shared;
 pub type Reply = oneshot::Sender<Result<Value, String>>;
 
 pub enum Command {
-    /// Show a one-time request for this amount.
+    /// Show a one-time URI for this amount.
     OneTime { amount: Amount, reply: Reply },
-    /// Show Bob's contact string, creating its log the first time.
+    /// Show Bob's contact URI, creating its log the first time.
     Contact { reply: Reply },
     /// Wake the phone, or put it to sleep. A sleeping phone reads no mailbox
     /// and scans no blocks.
@@ -43,15 +43,15 @@ pub struct Bob {
     /// Coins added to payments of one-time requests, whose payers Bob chose.
     one_time_coins: Keychain,
     /// A separate BIP 86 account whose coins are added to payments of the
-    /// contact string, so a regular payer learns nothing of the others.
+    /// contact URI, so a regular payer learns nothing of the others.
     contact_coins: Keychain,
-    request: Option<OneTime>,
+    one_time: Option<OneTime>,
     contact: Option<ContactLog>,
     awake: bool,
     /// The last block scanned.
     scanned: u64,
     /// What Bob holds besides his keychains' coins: outputs found by scanning
-    /// and payments to a request's ordinary address.
+    /// and payments to a one-time URI's ordinary address.
     received: BTreeMap<OutPoint, Amount>,
 }
 
@@ -64,7 +64,7 @@ impl Bob {
             receiver: SpReceiver::new(SpKeys::from_seed("bob")),
             one_time_coins,
             contact_coins,
-            request: None,
+            one_time: None,
             contact: None,
             awake: true,
             scanned,
@@ -127,12 +127,12 @@ impl Bob {
 
     fn one_time(&mut self, amount: Amount) -> Result<Value, Error> {
         let body = self.one_time_coins.address();
-        let request =
+        let one_time =
             flow::one_time(&self.shared.regtest.mailroom, self.receiver.address(), body, amount)?;
-        let uri = request.uri.to_string();
+        let uri = one_time.uri.to_string();
         let data = json!({ "uri": uri, "amount": amount.to_sat(), "qr": qr_svg(&uri) });
-        self.request = Some(request);
-        self.emit("bob.request", data.clone());
+        self.one_time = Some(one_time);
+        self.emit("bob.one_time", data.clone());
         Ok(data)
     }
 
@@ -159,12 +159,12 @@ impl Bob {
             return Ok(());
         }
         let mailroom = &self.shared.regtest.mailroom;
-        if let Some(request) = &self.request {
-            let session = request.session.clone();
-            if let Some(original) = flow::poll_original(mailroom, session, &request.log).await? {
-                let request = self.request.take().expect("checked above");
-                let body = request.uri.address.script_pubkey();
-                self.answer(original, &request.log, Some(body), false).await?;
+        if let Some(one_time) = &self.one_time {
+            let session = one_time.session.clone();
+            if let Some(original) = flow::poll_original(mailroom, session, &one_time.log).await? {
+                let one_time = self.one_time.take().expect("checked above");
+                let body = one_time.uri.address.script_pubkey();
+                self.answer(original, &one_time.log, Some(body), false).await?;
             }
         }
         let next = match self.contact.as_mut() {
@@ -261,8 +261,8 @@ impl Bob {
     }
 
     /// Scan blocks since the last scan, the way a restore would: each
-    /// taproot output against Bob's scan key, plus payments to a request's
-    /// ordinary address.
+    /// taproot output against Bob's scan key, plus payments to a one-time
+    /// URI's ordinary address.
     async fn scan(&mut self) -> Result<(), Error> {
         let client = self.shared.regtest.client();
         let height = chain::height(client)?;

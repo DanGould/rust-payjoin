@@ -1,6 +1,6 @@
 //! The payers' phones: Carol, whose wallet knows payjoin but not silent
 //! payments; Alice, a silent payment wallet; and an exchange paying its
-//! user Bob through his contact string.
+//! user Bob through his contact URI.
 //!
 //! Each gets the string it pays the way a phone does, from a scan of what
 //! Bob's phone shows, and reaches Bob only through the payjoin directory.
@@ -34,10 +34,10 @@ use crate::Shared;
 pub enum Command {
     /// Pay the string a scan of Bob's phone read.
     Pay { uri: String, reply: Reply },
-    /// Save the last one-time request paid as a contact with this name. A
+    /// Save the last one-time URI paid as a contact with this name. A
     /// URI carries no name, so the user types one.
     SaveContact { name: String, reply: Reply },
-    /// Save Bob's contact string (the exchange only).
+    /// Save Bob's contact URI (the exchange only).
     AddContact { uri: String, reply: Reply },
     /// Pay the saved contact (the exchange only). With `reply_by` the payer
     /// waits that long for Bob's proposal before sending its Original as it
@@ -63,7 +63,7 @@ pub struct Payer {
     coins: Coins,
     contacts: Contacts,
     contact: Option<ContactUri>,
-    /// The one-time request paid last, until it is saved as a contact.
+    /// The one-time URI paid last, until it is saved as a contact.
     last_paid: Option<OneTimeUri>,
 }
 
@@ -217,7 +217,7 @@ impl Payer {
     }
 
     fn save_contact(&mut self, name: &str) -> Result<Value, Error> {
-        let uri = self.last_paid.take().ok_or("no request paid to save")?;
+        let uri = self.last_paid.take().ok_or("no URI paid to save")?;
         let contact = self.contacts.save_one_time(name, &uri);
         let saved =
             json!({ "name": contact.name, "sp": contact.sp.to_string(), "note": contact.note() });
