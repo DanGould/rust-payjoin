@@ -42,6 +42,9 @@ const state = {
   payer: "carol",
   amount: 40000,
   replyBy: 60,
+  // What starts the exchange's next transfer to Bob: Bob, withdrawing from
+  // his wallet, or the exchange's own schedule.
+  payout: "withdrawal",
   height: 0,
   explorer: "",
   bob: {
@@ -157,6 +160,7 @@ async function apply({ kind, data }) {
       if (data.payer) state.payer = data.payer;
       if (data.amount) state.amount = data.amount;
       if (data.reply_by) state.replyBy = data.reply_by;
+      if (data.payout) state.payout = data.payout;
       if (data.clear) {
         state.tx = null;
         state.uri = null;
@@ -264,6 +268,7 @@ async function apply({ kind, data }) {
         steps: [],
         status: "Paying Bob",
         amount: data.amount,
+        payout: state.payout,
       });
       return;
     case "original_sent": {
@@ -337,7 +342,7 @@ async function apply({ kind, data }) {
       state.height = Math.max(state.height, data.height);
       p.balance = data.balance;
       p.activity.unshift({
-        what: who === "exchange" ? "Payout to Bob" : "Paid Bob",
+        what: who === "exchange" ? payoutName(p.payout) : "Paid Bob",
         amount: -data.amount,
         tag,
         sub: `Block ${data.height}`,
@@ -447,6 +452,9 @@ function balance(sat) {
   return `<div class="balance-label">Balance</div><div class="balance">${fmt(sat)}<span class="unit">sats</span></div>`;
 }
 
+const payoutName = (payout) =>
+  payout === "scheduled" ? "Scheduled payout to Bob" : "Bob's withdrawal";
+
 const tagHtml = ([cls, text]) => `<span class="tag ${cls}">${text}</span>`;
 
 function activity(rows, empty = "Nothing yet") {
@@ -536,7 +544,7 @@ function bobView() {
         <div class="uri-kind" style="margin-top:10px">Reusable. Share it with anyone you transact with again and again</div>
         ${miniUri(c.uri)}
         <div class="spacer"></div>
-        ${activity(b.activity)}
+        <button class="btn soft block" data-act="bob-home" type="button">Done</button>
       </div>`;
     }
     case "incoming":
@@ -553,10 +561,20 @@ function bobView() {
           <button class="btn primary" data-act="receive" type="button">Receive</button>
           <button class="btn soft" data-act="share-contact" type="button">My contact</button>
         </div>
+        ${exchangeAccount()}
         <div class="section-title">Activity</div>
         ${activity(b.activity)}
       </div>`;
   }
+}
+
+// Bob's account at the exchange, once it has his contact URI: he
+// withdraws from his wallet, which is open to answer.
+function exchangeAccount() {
+  if (state.payer !== "exchange" || !state.payers.exchange.contacts[0])
+    return "";
+  return `<div class="section-title">Exchange account</div>
+    <button class="btn primary block" data-act="withdraw" type="button">Withdraw ${fmt(state.amount)} sats</button>`;
 }
 
 // A URI carries no name, so the payer names the contact before saving it.
@@ -583,20 +601,22 @@ function exchangeView(p) {
     </div>`;
   } else if (p.screen === "progress") {
     main = `<div class="panel wide">
-      <div class="section-title">Payout to Bob, ${sats(state.amount)}</div>
+      <div class="section-title">${payoutName(p.payout)}, ${sats(state.amount)}</div>
       ${statusLine(p.status)}
       ${steps(p.steps)}
     </div>`;
   } else {
-    const act = contact
-      ? `<button class="btn primary" data-act="pay-bob" type="button">Pay Bob ${fmt(state.amount)} sats</button>`
-      : '<button class="btn primary" data-act="scan" type="button">Add contact</button>';
+    const act = !contact
+      ? '<button class="btn primary" data-act="scan" type="button">Add contact</button>'
+      : state.payout === "scheduled"
+        ? `<div class="scheduled"><span>Scheduled payout to Bob, ${sats(state.amount)}, every week</span><span class="status mempool">Due now</span></div>`
+        : "";
     main = `<div class="panel">
         <div class="section-title">Saved contact</div>
         ${contact ? contactCard(contact) : '<div class="empty">No contacts yet</div>'}
       </div>
       <div class="panel">
-        <div class="section-title">Payouts</div>
+        <div class="section-title">Transfers out</div>
         ${activity(p.activity)}
       </div>
       <div class="console-actions">${act}</div>`;
@@ -657,18 +677,12 @@ function payerView(name) {
     }
     default: {
       const contact = p.contacts[0];
-      const act =
-        name === "exchange"
-          ? contact
-            ? '<button class="btn primary" data-act="pay-bob" type="button">Pay Bob</button>'
-            : '<button class="btn primary" data-act="scan" type="button">Add contact</button>'
-          : '<button class="btn primary" data-act="scan" type="button">Scan to pay</button>';
       return `<div class="view">
         ${who(name)}
         ${balance(p.balance)}
-        <div class="actions">${act}</div>
+        <div class="actions"><button class="btn primary" data-act="scan" type="button">Scan to pay</button></div>
         ${contact ? `<div class="section-title">Contact</div>${contactCard(contact)}` : ""}
-        <div class="section-title">${name === "exchange" ? "Payouts" : "Activity"}</div>
+        <div class="section-title">Activity</div>
         ${activity(p.activity)}
       </div>`;
     }
@@ -676,7 +690,7 @@ function payerView(name) {
 }
 
 function browserbar() {
-  return `<div class="browserbar"><span class="dots"><i></i><i></i><i></i></span><span class="url">backoffice.exchange.example/payouts</span></div>`;
+  return `<div class="browserbar"><span class="dots"><i></i><i></i><i></i></span><span class="url">backoffice.exchange.example/transfers</span></div>`;
 }
 
 function renderPhone(id, html, screenKey) {
@@ -845,10 +859,13 @@ document.addEventListener("click", async (ev) => {
       el.disabled = true;
       await api("/api/alice/save-contact", { name: field.value });
     }
-    if (act === "pay-bob") {
-      el.disabled = true;
-      Object.assign(p, { screen: "progress", steps: [], status: "Preparing" });
+    if (act === "bob-home") {
+      state.bob.screen = "home";
       render();
+    }
+    if (act === "withdraw") {
+      el.disabled = true;
+      await fly("#bob", "#payer", `Withdraw ${fmt(state.amount)} sats`);
       await api("/api/exchange/pay-contact", {
         amount: state.amount,
         reply_by: state.replyBy,

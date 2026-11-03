@@ -894,8 +894,14 @@ await unspot();
 // 4. A contact URI, for someone Bob transacts with again and again.
 await showCard("contact.html", "contact", 8);
 
-// 5. An exchange pays Bob's contact URI.
-await stage({ payer: "exchange", amount: 100000, reply_by: 60, clear: true });
+// 5. Bob withdraws from his exchange, which has his contact URI.
+await stage({
+  payer: "exchange",
+  amount: 100000,
+  reply_by: 60,
+  payout: "withdrawal",
+  clear: true,
+});
 await toWallets();
 seg("exchange-contact");
 await frame(await box(LANE, BOB), { pad: 8, cy: 310 });
@@ -917,19 +923,36 @@ await park();
 await spot($("#payer .contact"), "Saved once");
 await hold("exchange-contact");
 await unspot();
+await wide(1.1);
+await click('#bob [data-act="bob-home"]');
+await park();
+// Bob's home screen slides in; measure it once it is still.
+await sleep(900);
 
-seg("exchange-pay");
-await click('#payer [data-act="pay-bob"]');
+seg("withdraw");
+const withdraw = await box($('#bob [data-act="withdraw"]'));
+await frame(await box(BOB), { pad: 20, cy: withdraw.top - 20, d: 1.1 });
+await spot($('#bob [data-act="withdraw"]'), "Bob withdraws from his exchange");
+await sleep(1600);
+await unspot();
+await click('#bob [data-act="withdraw"]');
 // The transaction was shown in full for Alice; this one moves faster.
 await pace({ held: true, ms: 400 });
 await park();
 await wide(1.2);
+await say(
+  "Bob's wallet is open, so the withdrawal is a Silent Payjoin",
+  "",
+  "top",
+);
 await next("exchange.original_sent", 1);
 await next("bob.coin", 3);
+await untilPhrase("withdraw", "bob's coin comes");
+await hush();
 await spot(
   $('#tx .row.bob[data-key^="in-"]'),
   "A coin from a separate account",
-  "",
+  "So the exchange can't trace Bob's other transactions",
   CARD,
 );
 await sleep(2000);
@@ -937,14 +960,14 @@ await unspot();
 await next("exchange.confirmed", 1);
 await release();
 await waitFor(count("bob.received", 3));
-await hold("exchange-pay");
+await hold("withdraw");
 
-// Two more payouts, faster.
+// Two more withdrawals, faster.
 await pace({ held: false, ms: 250 });
 fastForward(4);
 await evaluate(`window.__ff(true, ${zoom})`);
 for (const n of [2, 3]) {
-  await click('#payer [data-act="pay-bob"]');
+  await click('#bob [data-act="withdraw"]');
   await park();
   await waitFor(count("exchange.confirmed", n), 120000);
   await waitFor(count("bob.received", n + 2), 120000);
@@ -953,17 +976,25 @@ for (const n of [2, 3]) {
 await evaluate(`window.__ff(false, ${zoom})`);
 normalSpeed();
 await pace({ held: true, ms: 700 });
-seg("exchange-more");
+seg("withdraw-more");
 await frame(await box(PAYER), { pad: 16 });
-await spot($("#payer .list"), "Three Silent Payjoins");
-await hold("exchange-more");
+await spot(
+  $("#payer .list"),
+  "Three Silent Payjoins",
+  "All found by Bob's scan",
+);
+await hold("withdraw-more");
 await unspot();
 
-// 6. What can go wrong: a stolen mailbox key, and Bob offline.
-await stage({ reply_by: 4, clear: true });
+// 6. What can go wrong: a stolen mailbox key, and Bob offline when the
+// exchange's schedule pays him.
+await stage({ reply_by: 4, payout: "scheduled", clear: true });
 await pace({ held: false, ms: 900 });
 await wide(1.2);
 seg("offline");
+await say("Two things can go wrong", "", "top");
+await untilPhrase("offline", "if someone steals");
+await hush();
 await say(
   "A stolen mailbox key can't redirect the money",
   "The payer only signs for the output it worked out",
@@ -971,12 +1002,24 @@ await say(
 );
 await untilPhrase("offline", "and if bob is offline");
 await hush();
+await say(
+  "Bob is offline",
+  "A scheduled payout he didn't start doesn't wait for him",
+  "top",
+);
 // The phone goes to sleep on "like now".
 await untilPhrase("offline", "like now");
 await post("/api/bob/awake", { awake: false });
 await sleep(1200);
-await click('#payer [data-act="pay-bob"]');
-await park();
+await spot($("#payer .scheduled"), "Due now");
+await sleep(1400);
+await unspot();
+await hush();
+// The exchange's schedule starts it, not a click.
+const scheduled = post("/api/exchange/pay-contact", {
+  amount: 100000,
+  reply_by: 4,
+});
 await waitFor(seen("exchange.fallback"), 60000);
 await spot(
   $("#tx .card"),
@@ -985,6 +1028,7 @@ await spot(
   CARD,
 );
 await waitFor(count("exchange.confirmed", 4), 60000);
+await scheduled;
 await hold("offline");
 await unspot();
 // Bob's phone reads the mailbox as he wakes: close in on its steps.
