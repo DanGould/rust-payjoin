@@ -955,16 +955,6 @@ await say(
 );
 await next("exchange.original_sent", 1);
 await next("bob.coin", 3);
-await untilPhrase("withdraw", "bob's coin comes");
-await hush();
-await spot(
-  $('#tx .row.bob[data-key^="in-"]'),
-  "A coin from a separate account",
-  "So the exchange can't trace Bob's other transactions",
-  CARD,
-);
-await sleep(2000);
-await unspot();
 await next("exchange.confirmed", 1);
 await release();
 await waitFor(count("bob.received", 3));
