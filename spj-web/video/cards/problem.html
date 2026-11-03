@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="card.css" />
     <style>
       /* Two transactions side by side in time: a silent payment, then the
-       same payment with Bob's coin added. Each step rises in when the
+       same transaction with Bob's coin added. Each step rises in when the
        narration reaches it. */
       .pick {
         display: flex;
@@ -101,6 +101,11 @@
         color: #ff6b5a;
         box-shadow: inset 0 0 0 1.5px #ff6b5a;
       }
+      .mailbox {
+        font-size: 24px;
+        color: #c9d1db;
+        margin: 40px 0 0;
+      }
       .inputs {
         display: flex;
         flex-direction: column;
@@ -109,13 +114,13 @@
     </style>
   </head>
   <body>
-    <p class="kicker rise">Today</p>
-    <div class="pick rise" style="--i: 0.6">
+    <p class="kicker rise">Naively</p>
+    <div class="pick rise" data-at="it can't work">
       <span class="opt sp">Silent payments</span><span class="or">or</span
       ><span class="opt pj">Payjoin</span>
     </div>
     <div class="rows">
-      <div class="row rise" style="--i: 3">
+      <div class="row rise" data-at="the onchain address">
         <div class="label">
           A silent payment: Alice works out Bob's output from her inputs
         </div>
@@ -125,19 +130,21 @@
           >Bob's output <span class="key">key 4b7a…</span></span
         >
         <span class="restore"
-          ><span class="rise" style="--i: 4.5"
+          ><span class="rise" data-at="bob's wallet redoes"
             >Bob's wallet, recovered from his seed, does the same math:
             <span class="key">key 4b7a…</span></span
-          ><b class="found rise" style="--i: 6.5">same key, finds it</b></span
+          ><b class="found rise" data-at="to find his money"
+            >same key, finds it</b
+          ></span
         >
       </div>
-      <div class="row rise" style="--i: 7.5">
+      <div class="row rise" data-at="in a payjoin">
         <div class="label">
           Add a payjoin: Bob adds a coin, and his output keeps its old key
         </div>
         <div class="inputs">
           <span class="box">Alice's coin</span
-          ><span class="box rise" style="--i: 8.5"
+          ><span class="box rise" data-at="adds a coin"
             ><span class="coin">+ Bob's coin</span></span
           >
         </div>
@@ -146,14 +153,18 @@
           >Bob's output <span class="key">key 4b7a…</span></span
         >
         <span class="restore"
-          ><span class="rise" style="--i: 11"
+          ><span class="rise" data-at="and the math points"
             >Bob's wallet does the math over these inputs:
             <span class="key other">key 9e03…</span></span
-          ><b class="lost rise" style="--i: 13"
+          ><b class="lost rise" data-at="his wallet can't see"
             >different key, can't find it</b
           ></span
         >
       </div>
     </div>
+    <p class="mailbox rise" data-at="and a payjoin mailbox">
+      And a payjoin mailbox is one-time, while a silent payment address is
+      reused
+    </p>
   </body>
 </html>

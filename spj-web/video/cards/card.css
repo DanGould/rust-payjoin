@@ -37,6 +37,14 @@ body {
   color: #c9d1db;
   margin: 0 0 16px;
 }
+.lines .aside {
+  font-size: 25px;
+  color: #8e9aab;
+  margin-top: 30px;
+}
+.kicker.later {
+  margin-top: 36px;
+}
 .kicker {
   font-size: 22px;
   font-weight: 700;

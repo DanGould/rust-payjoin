@@ -26,6 +26,18 @@ from kokoro import KPipeline
 
 RATE = 24000
 
+# Kokoro's G2P reads "payjoin" as one word with an unstressed "jin". Its
+# "join" is the English word, as in coinjoin, so give it the stress misaki
+# gives "join" on its own (ʤˈYn). misaki takes `[word](/phonemes/)` inline.
+PAYJOIN = re.compile(r"\b([Pp]ayjoin)(s?)\b")
+
+
+def pronounce(text):
+    """The text with misaki phoneme overrides for words Kokoro misreads."""
+    return PAYJOIN.sub(
+        lambda m: f"[{m[1]}{m[2]}](/pˈAʤˈYn{'z' if m[2] else ''}/)", text
+    )
+
 
 def segments(text):
     """The (id, text) blocks of a narration script, in order."""
@@ -45,19 +57,32 @@ def main():
     ap.add_argument("--voice", default="am_michael")
     ap.add_argument("--speed", type=float, default=1.0)
     ap.add_argument("--only", nargs="*")
+    ap.add_argument(
+        "--phonemes",
+        action="store_true",
+        help="print each segment's phonemes instead of voicing it",
+    )
     args = ap.parse_args()
 
     out = pathlib.Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    pipeline = KPipeline(
+        lang_code="a", repo_id="hexgrad/Kokoro-82M", model=not args.phonemes
+    )
     for seg_id, text in segments(pathlib.Path(args.narration).read_text()):
         if args.only and seg_id not in args.only:
+            continue
+        if args.phonemes:
+            print(f"{seg_id}: {pipeline.g2p(pronounce(text))[0]}")
             continue
         # Kokoro splits on sentences; a short pause between them reads as a
         # person explaining rather than a run-on.
         pieces = []
         for _, _, audio in pipeline(
-            text, voice=args.voice, speed=args.speed, split_pattern=r"(?<=[.!?])\s+"
+            pronounce(text),
+            voice=args.voice,
+            speed=args.speed,
+            split_pattern=r"(?<=[.!?])\s+",
         ):
             pieces.append(np.asarray(audio))
             pieces.append(np.zeros(int(RATE * 0.18), dtype=np.float32))

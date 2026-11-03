@@ -8,7 +8,7 @@
 // VO_DIR (narration audio, `<id>.wav`), NARRATION (the script, for segments
 // with no audio yet), WORK (scratch directory), CDP_PORT.
 //
-// A headless Chromium plays the take: cards, the wallets, and the explorer.
+// A headless Chromium plays the take: cards and the wallets.
 // A drawn cursor moves to each button before it is pressed. The page is
 // captured at twice its CSS size, and a camera that follows the action is
 // applied afterwards with ffmpeg's zoompan, so close ups stay sharp.
@@ -62,14 +62,34 @@ const scriptText =
   NARRATION && fs.existsSync(NARRATION)
     ? fs.readFileSync(NARRATION, "utf8")
     : "";
-function words(id) {
+/** A segment's words, lower case and without punctuation. */
+function segWords(id) {
   const m = scriptText
     .split(/^## +/m)
     .find((block) => block.startsWith(`${id}\n`) || block.startsWith(`${id} `));
+  if (!m) return [];
   return m
-    ? m.split("\n").slice(1).join(" ").trim().split(/\s+/).filter(Boolean)
-        .length
-    : 0;
+    .split("\n")
+    .slice(1)
+    .join(" ")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9'-]/g, ""))
+    .filter(Boolean);
+}
+const words = (id) => segWords(id).length;
+
+/**
+ * How far into segment `id` the voice reaches `phrase`, as a fraction,
+ * counting words. A read keeps roughly even pace within a segment, so this
+ * holds for any voice.
+ */
+function phraseAt(id, phrase) {
+  const all = segWords(id);
+  const want = phrase.toLowerCase().split(/\s+/);
+  for (let i = 0; i + want.length <= all.length; i++)
+    if (want.every((w, j) => all[i + j] === w)) return i / all.length;
+  throw new Error(`"${phrase}" is not in segment ${id}`);
 }
 
 /** A segment's length: its audio file's, or a reading-speed guess. */
@@ -267,9 +287,15 @@ function seg(id) {
 }
 
 /** Wait until segment `id`'s audio has played, plus a breath. */
-async function hold(id, breath = 0.35) {
+async function hold(id, breath = 0.6) {
   const end = started[id] + duration(id) + breath;
   const wait = end - takeTime();
+  if (wait > 0) await sleep(wait * 1000);
+}
+
+/** Wait until the voice reaches `phrase` in segment `id`. */
+async function untilPhrase(id, phrase) {
+  const wait = started[id] + duration(id) * phraseAt(id, phrase) - takeTime();
   if (wait > 0) await sleep(wait * 1000);
 }
 
@@ -346,16 +372,40 @@ function look(cx, cy, z, d) {
 // With `cy`, only the width has to fit: the camera looks at that height
 // and may cut the top and bottom, so a phone beside the box stays out of
 // the frame instead of showing half its screen.
-function frame(rect, { pad = 24, maxZoom = 2.2, d = 1.1, cy = null } = {}) {
-  const fitW = W / (rect.width + 2 * pad);
-  const z = Math.min(
-    cy === null ? Math.min(fitW, H / (rect.height + 2 * pad)) : fitW,
-    maxZoom,
+//
+// No device is ever cut by the left or right edge of the frame: one the
+// view would cut is added to what has to fit.
+async function frame(
+  rect,
+  { pad = 24, maxZoom = 2.2, d = 1.1, cy = null } = {},
+) {
+  const fit = (r) => {
+    const fitW = W / (r.width + 2 * pad);
+    const z = cy === null ? Math.min(fitW, H / (r.height + 2 * pad)) : fitW;
+    return Math.min(Math.max(z, 1), maxZoom);
+  };
+  const devices = await evaluate(
+    `[...document.querySelectorAll('.stage .phone')].map((e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right }; })`,
   );
+  for (;;) {
+    // The view's edges, placed as look() places them.
+    const hw = W / fit(rect) / 2;
+    const cx = Math.min(Math.max(rect.left + rect.width / 2, hw), W - hw);
+    const cut = devices.find(
+      (e) =>
+        e.left < cx + hw &&
+        e.right > cx - hw &&
+        (e.left < cx - hw - 0.5 || e.right > cx + hw + 0.5),
+    );
+    if (!cut) break;
+    const left = Math.min(rect.left, cut.left);
+    const right = Math.max(rect.left + rect.width, cut.right);
+    rect = { ...rect, left, width: right - left };
+  }
   return look(
     rect.left + rect.width / 2,
     cy ?? rect.top + rect.height / 2,
-    z,
+    fit(rect),
     d,
   );
 }
@@ -529,7 +579,7 @@ const park = () =>
     `document.getElementById('rec-cursor').style.transform = 'translate(${W * 0.5}px, ${H + 60}px)'`,
   );
 // A caption stays up at least this long, however soon the take moves on.
-const DWELL = 1800;
+const DWELL = 2500;
 let spotAt = 0;
 const spot = async (expression, text, note = "", above = null) => {
   spotAt = Date.now();
@@ -568,6 +618,20 @@ const cursor = (on) =>
 const card = (name) => `file://${path.join(HERE, "cards", name)}`;
 const cardReady = `document.fonts.status === 'loaded'`;
 
+// A card line marked `data-at="phrase"` rises when the voice reaches that
+// phrase of the segment, whatever the read's length.
+async function timeCard(id) {
+  const lines = await evaluate(
+    `[...document.querySelectorAll('[data-at]')].map((e) => e.dataset.at)`,
+  );
+  const at = lines.map((phrase) =>
+    Math.max(0, duration(id) * phraseAt(id, phrase) - 0.2),
+  );
+  await evaluate(
+    `[...document.querySelectorAll('[data-at]')].forEach((e, i) => e.style.setProperty('--i', ${JSON.stringify(at)}[i]))`,
+  );
+}
+
 /** Show a card for a narration segment, at least `min` seconds. */
 async function showCard(name, id, min = 6) {
   await fadeOut();
@@ -577,6 +641,7 @@ async function showCard(name, id, min = 6) {
     cardReady,
     `${coverNow}; document.getElementById('rec-cursor').style.opacity = 0`,
   );
+  await timeCard(id);
   await fadeIn();
   const t0 = takeTime();
   seg(id);
@@ -612,18 +677,21 @@ await goto(
   cardReady,
   `document.getElementById('rec-cursor').style.opacity = 0`,
 );
+await timeCard("intro");
 seg("intro");
 await evaluate(`document.body.classList.add('go')`);
 await hold("intro");
 await sleep(1200);
 
-// 1. The problem.
+// 1. The problem, and the two ways the video shows.
 await showCard("problem.html", "problem", 9);
+await showCard("overview.html", "overview", 6);
 
-// 2. A one-time request, paid by a wallet without silent payments.
+// 2. A one-time URI, paid by a wallet without silent payments.
+await showCard("onetime.html", "one-time", 4);
 await stage({ payer: "carol", amount: 40000, clear: true });
 await toWallets();
-seg("request");
+seg("uri");
 await frame(await box(LANE, BOB), { pad: 8, cy: 310 });
 await click('#bob [data-act="request"]');
 await waitFor(`${$("#uri .part.sp")}`);
@@ -634,7 +702,7 @@ await sleep(1500);
 await spot($("#uri .part.sp"), "Bob's silent payment address");
 await sleep(1600);
 await spot($("#uri .part.pj"), "A payjoin mailbox");
-await hold("request");
+await hold("uri");
 await unspot();
 
 seg("carol");
@@ -665,7 +733,7 @@ await waitFor(count("bob.received", 1));
 await hold("carol");
 await sleep(500);
 
-// 3. A one-time request, paid by a silent payment wallet.
+// 3. A one-time URI, paid by a silent payment wallet.
 await stage({ payer: "alice", amount: 50000, clear: true });
 await sleep(400);
 seg("alice-scan");
@@ -750,78 +818,38 @@ await hold("confirmed");
 await unspot();
 
 seg("contact-note");
-await next("alice.contact_saved", 1);
-await frame(await box(PAYER), { pad: 16 });
-await sleep(800);
-await spot($("#payer .contact"), "");
+// A URI carries no name: Alice types one, a key at a time.
+await frame(await box(PAYER), {
+  pad: 16,
+  cy: (await box($("#payer .save-contact"))).top + 40,
+});
+await click("#contact-name", { follow: false });
+await evaluate(`${$("#contact-name")}.focus()`);
+await sleep(300);
+for (const key of "Bob") {
+  await cdp.send("Input.insertText", { text: key });
+  await sleep(220);
+}
+await sleep(400);
+await click('#payer [data-act="save-contact"]');
+await waitFor(count("alice.contact_saved", 1));
+await park();
+await sleep(600);
+await spot($("#payer .contact .note"), "");
+await untilPhrase("contact-note", "she can scan");
+await spot(
+  $("#payer .note-scan"),
+  "Scan Bob's contact URI",
+  "For reusable payjoin",
+  $("#payer .contact"),
+);
 await hold("contact-note");
 await unspot();
 
-// 4. The same transaction in the explorer.
-const href = await evaluate(`${$("#view-explorer")}.href`);
-// The explorer shows BTC; its captions repeat the wallets' amounts in sats
-// so the two can be matched by eye.
-const amounts = await evaluate(
-  `Object.fromEntries([...document.querySelectorAll('#tx .row')].map((r) => [r.dataset.key, r.querySelector('.value').textContent.trim()]))`,
-);
-const satsOf = (prefix) => {
-  const key = Object.keys(amounts).find((k) => k.startsWith(prefix));
-  return key ? `${amounts[key]} sats` : "";
-};
-await cursor(true);
-await click("#view-explorer", { follow: false });
-await sleep(300);
-await fadeOut();
-look(W / 2, H / 2, 1, 0);
-const explorerReady = `${$("app-transactions-list .payjoin-owner")} && ${$("app-transactions-list .silent-payment")} && /confirmation/i.test(document.body.innerText)`;
-await goto(
-  href,
-  explorerReady,
-  `(() => { ${coverNow}; document.getElementById('rec-cursor').style.opacity = 0; const h = [...document.querySelectorAll('h2')].find((e) => /Inputs/.test(e.textContent)); if (h) window.scrollTo({ top: h.getBoundingClientRect().top + scrollY - 70, behavior: 'instant' }); })()`,
-);
-await fadeIn();
-const badge = (name, side) =>
-  `[...document.querySelectorAll('app-transactions-list .payjoin-owner')].filter((b) => b.textContent.trim() === ${JSON.stringify(name)}).map((b) => b.closest('td'))${side === "in" ? "[0]" : ".at(-1)"}`;
-const rowOf = (expr) =>
-  `(() => { const td = ${expr}; return td && [td, td.nextElementSibling].filter(Boolean); })()`;
-const ioTable = `document.querySelector('app-transactions-list')`;
-await frame(await box(ioTable), { pad: 16, maxZoom: 1.6, d: 1.2 });
-seg("explorer");
-await sleep(1500);
-await spot(rowOf(badge("Alice", "in")), "Alice's input", satsOf("in-alice"));
-await hold("explorer");
-seg("explorer-bob-in");
-await spot(rowOf(badge("Bob", "in")), "Bob's input", satsOf("in-bob"));
-await hold("explorer-bob-in");
-seg("explorer-bob-out");
-await spot(
-  rowOf(`${$("app-transactions-list .silent-payment")}.closest('td')`),
-  "A silent payment output, found by scanning",
-  satsOf("out-bob"),
-);
-await hold("explorer-bob-out");
-seg("explorer-change");
-await spot(rowOf(badge("Alice", "out")), "Alice's change", satsOf("out-alice"));
-await sleep(2400);
-await unspot();
-// The labels come from the wallets, not the chain: take them away and the
-// transaction is all an observer sees.
-await evaluate(
-  `document.querySelectorAll('app-transactions-list .payjoin-owner, app-transactions-list .silent-payment').forEach((b) => { b.style.transition = 'opacity .5s'; b.style.opacity = 0; })`,
-);
-await say(
-  "Without the labels, nothing says who paid whom",
-  "And the 50,000 she paid appears nowhere",
-  "top",
-);
-await hold("explorer-change");
-await hush();
-await sleep(400);
+// 4. A contact URI, for someone Bob transacts with again and again.
+await showCard("contact.html", "contact", 8);
 
-// 5. Reusable contact strings.
-await showCard("reusable.html", "reusable", 8);
-
-// 6. An exchange pays Bob's contact string.
+// 5. An exchange pays Bob's contact URI.
 await stage({ payer: "exchange", amount: 100000, reply_by: 60, clear: true });
 await toWallets();
 seg("exchange-contact");
@@ -847,7 +875,7 @@ await unspot();
 
 seg("exchange-pay");
 await click('#payer [data-act="pay-bob"]');
-// The payment itself was shown in full for Alice; this one moves faster.
+// The transaction was shown in full for Alice; this one moves faster.
 await pace({ held: true, ms: 400 });
 await park();
 await wide(1.2);
@@ -882,23 +910,24 @@ normalSpeed();
 await pace({ held: true, ms: 700 });
 seg("exchange-more");
 await frame(await box(PAYER), { pad: 16 });
-await spot($("#payer .list"), "Three silent payjoins");
+await spot($("#payer .list"), "Three Silent Payjoins");
 await hold("exchange-more");
 await unspot();
 
-// 7. What can go wrong: a stolen mailbox key, and Bob offline.
+// 6. What can go wrong: a stolen mailbox key, and Bob offline.
 await stage({ reply_by: 4, clear: true });
 await pace({ held: false, ms: 900 });
 await wide(1.2);
 seg("offline");
 await say(
-  "A stolen mailbox key can't redirect a payment",
+  "A stolen mailbox key can't redirect the money",
   "The payer only signs for the output it worked out",
   "top",
 );
-await sleep(8600);
+await untilPhrase("offline", "and if bob is offline");
 await hush();
-// "And if Bob is offline, like now": the phone goes to sleep on the line.
+// The phone goes to sleep on "like now".
+await untilPhrase("offline", "like now");
 await post("/api/bob/awake", { awake: false });
 await sleep(1200);
 await click('#payer [data-act="pay-bob"]');
@@ -907,19 +936,30 @@ await waitFor(seen("exchange.fallback"), 60000);
 await spot(
   $("#tx .card"),
   "No answer from Bob",
-  "The payment goes out as it is, a plain silent payment",
+  "The transaction goes out as it is, a plain silent payment",
   CARD,
 );
 await waitFor(count("exchange.confirmed", 4), 60000);
 await hold("offline");
 await unspot();
+// Bob's phone reads the mailbox as he wakes: close in on its steps.
+const bobPhone = await box(BOB);
+await frame(bobPhone, { pad: 20, cy: bobPhone.top + 190, d: 1.2 });
+await sleep(1200);
 seg("offline-wake");
 await post("/api/bob/awake", { awake: true });
 await waitFor(count("bob.received", 6), 60000);
 await sleep(600);
-await spot($("#bob .list li"), "Found by scanning", "A plain silent payment");
+await spot(
+  $("#bob .steps"),
+  "Read from the mailbox, found by scanning",
+  "A plain silent payment",
+);
 await hold("offline-wake");
 await unspot();
+
+// 7. What the video showed, and why not one open mailbox.
+await showCard("recap.html", "recap", 10);
 
 // 8. The end card.
 await showCard("endcard.html", "end", 6);

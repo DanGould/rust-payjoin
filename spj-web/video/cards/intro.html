@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Silent payjoin</title>
+    <title>Silent Payjoin</title>
     <link rel="stylesheet" href="../../static/fonts/fonts.css" />
     <link rel="stylesheet" href="card.css" />
   </head>
@@ -10,18 +10,17 @@
     <div class="mark rise"></div>
     <p class="title rise">Bob wants both. His wallet makes him pick.</p>
     <ul class="lines">
-      <li class="rise" style="--i: 1">
+      <li class="rise" data-at="silent payments">
         <span class="sp">Silent payments</span>: one address, and nobody can
-        link the payments to it
+        link the transactions to it
       </li>
-      <li class="rise" style="--i: 2.4">
-        <span class="pj">Payjoin</span>: Bob adds a coin, so the payment is hard
-        to read
+      <li class="rise" data-at="and payjoin">
+        <span class="pj">Payjoin</span>: Bob adds a coin, so the transaction is
+        hard to read
       </li>
-      <li class="rise" style="--i: 5.2">
-        Here, three wallets pay him on a test network
+      <li class="rise" data-at="today wallets toggle">
+        Wallets today toggle between the two, never both at once
       </li>
-      <li class="rise" style="--i: 7.6">None of them makes him pick</li>
     </ul>
   </body>
 </html>
