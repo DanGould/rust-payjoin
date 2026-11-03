@@ -90,8 +90,26 @@ WORK="$work/take" WALLETS_URL="http://127.0.0.1:$wallet_port" CHROME=chromium \
     "$(dirname "$out")/thumbnail.png" | tee "$work/record.log"
 # URIs name a public mailbox host, which the wallets' mailroom answers for
 # locally. Its count of requests shows they all went there.
-curl -sf "http://127.0.0.1:$wallet_port/api/state" | python3 -c \
-    'import json,sys; m = json.load(sys.stdin)["mailroom"]; print("mailroom {}: {} requests, all to the local directory".format(m["host"], m["requests"]))'
+curl -sf "http://127.0.0.1:$wallet_port/api/state" >"$work/state.json"
+python3 -c 'import json,sys; m = json.load(sys.stdin)["mailroom"]; print("mailroom {}: {} requests, all to the local directory".format(m["host"], m["requests"]))' <"$work/state.json"
+# Each transfer Bob found by scanning, the label it paid, and whether a
+# wallet restored from his backup words, knowing no labels, finds it too.
+# A silent transfer the restore misses fails the take.
+python3 -c '
+import json, sys
+received = json.load(sys.stdin)["received"]
+missed = 0
+for r in received:
+    if not r["by_scan"]:
+        print("received {}: {} sats to the address".format(r["txid"][:12], r["amount"]))
+        continue
+    print("received {}: {} sats on label {}{}, restore {}".format(
+        r["txid"][:12], r["amount"], r["label"],
+        " ({})".format(r["label_for"]) if r["label_for"] else "",
+        "finds it" if r["restored"] else "MISSES it"))
+    missed += not r["restored"]
+sys.exit(1 if missed else 0)
+' <"$work/state.json"
 node "$here/subs.mjs" "$narration" "$work/marks.json" "${out%.mp4}.srt" "${out%.mp4}.vtt"
 node "$here/mux.mjs" "$work/take.mp4" "$work/marks.json" "$vo" "$out" "${out%.mp4}.srt"
 cp "$work/marks.json" "${out%.mp4}.marks.json"

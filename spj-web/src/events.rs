@@ -105,6 +105,16 @@ impl Hub {
         let _ = self.tx.send(event);
     }
 
+    /// The data of every `kind` event so far.
+    pub fn data_of(&self, kind: &str) -> Vec<Value> {
+        let history = self.history.lock().expect("not poisoned");
+        history
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .map(|event| event["data"].clone())
+            .collect()
+    }
+
     /// The history so far and a receiver for what follows. The receiver is
     /// created first so no event falls between the two; the page drops
     /// duplicates by sequence number.

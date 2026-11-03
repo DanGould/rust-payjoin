@@ -192,6 +192,7 @@ async fn state(State(app): State<App>) -> Json<Value> {
         "explorer": app.shared.explorer,
         "height": height,
         "mailroom": { "host": mailroom.directory_url(), "requests": mailroom.requests() },
+        "received": app.shared.hub.data_of("bob.received"),
     }))
 }
 
