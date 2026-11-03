@@ -2,13 +2,14 @@
 // Record one take of the silent payjoin demo as a silent MP4, plus the time
 // each narration segment starts in it.
 //
-//   node record.mjs OUT.mp4 MARKS.json
+//   node record.mjs OUT.mp4 MARKS.json [THUMBNAIL.png]
 //
 // Environment: WALLETS_URL (the spj-web page), CHROME (a Chromium binary),
 // VO_DIR (narration audio, `<id>.wav`), NARRATION (the script, for segments
 // with no audio yet), WORK (scratch directory), CDP_PORT.
 //
-// A headless Chromium plays the take: cards and the wallets.
+// A headless Chromium plays the take: cards and the wallets. Its first frame
+// is the title card, which is also saved as THUMBNAIL.png at 1280x720.
 // A drawn cursor moves to each button before it is pressed. The page is
 // captured at twice its CSS size, and a camera that follows the action is
 // applied afterwards with ffmpeg's zoompan, so close ups stay sharp.
@@ -26,6 +27,7 @@ import path from "node:path";
 const HERE = import.meta.dirname;
 const OUT = path.resolve(process.argv[2] ?? "take.mp4");
 const MARKS = path.resolve(process.argv[3] ?? "marks.json");
+const THUMBNAIL = process.argv[4] ? path.resolve(process.argv[4]) : null;
 const WORK = path.resolve(process.env.WORK ?? path.join(HERE, ".work"));
 const FRAMES = path.join(WORK, "frames");
 const WALLETS = process.env.WALLETS_URL ?? "http://127.0.0.1:3000";
@@ -246,6 +248,8 @@ let recording = false;
 let skipped = 0;
 let lastRaw = null;
 let cutPending = false;
+// Frames left to record before pausing on its own; for a single still.
+let budget = Infinity;
 
 cdp.on("Page.screencastFrame", ({ data, sessionId }) => {
   cdp.send("Page.screencastFrameAck", { sessionId }).catch(() => {});
@@ -262,6 +266,10 @@ cdp.on("Page.screencastFrame", ({ data, sessionId }) => {
   );
   fs.writeFileSync(file, Buffer.from(data, "base64"));
   frames.push({ file, t: t - skipped });
+  if (--budget === 0) {
+    budget = Infinity;
+    pause();
+  }
 });
 
 function pause() {
@@ -670,6 +678,22 @@ await cdp.send("Page.startScreencast", {
   everyNthFrame: 1,
 });
 await pace({ held: true, ms: 700 });
+
+// The title card: one frame, so it is what a player shows before playing.
+budget = 1;
+await goto(
+  card("title.html"),
+  cardReady,
+  `document.getElementById('rec-cursor').style.opacity = 0`,
+);
+while (recording) await sleep(20);
+if (THUMBNAIL) {
+  const { data } = await cdp.send("Page.captureScreenshot", {
+    format: "png",
+    clip: { x: 0, y: 0, width: W, height: H, scale: 1 / DPR },
+  });
+  fs.writeFileSync(THUMBNAIL, Buffer.from(data, "base64"));
+}
 
 // 0. What the video shows.
 await goto(

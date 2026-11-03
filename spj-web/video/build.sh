@@ -81,7 +81,8 @@ wait_for "the wallets" 240 curl -sf "http://127.0.0.1:$wallet_port/api/state"
 
 WORK="$work/take" WALLETS_URL="http://127.0.0.1:$wallet_port" CHROME=chromium \
     CDP_PORT="$(free_port)" VO_DIR="$vo" NARRATION="$narration" \
-    node "$here/record.mjs" "$work/take.mp4" "$work/marks.json" | tee "$work/record.log"
+    node "$here/record.mjs" "$work/take.mp4" "$work/marks.json" \
+    "$(dirname "$out")/thumbnail.png" | tee "$work/record.log"
 # URIs name a public mailbox host, which the wallets' mailroom answers for
 # locally. Its count of requests shows they all went there.
 curl -sf "http://127.0.0.1:$wallet_port/api/state" | python3 -c \
