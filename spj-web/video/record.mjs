@@ -744,11 +744,7 @@ await sleep(500);
 await park();
 await spot($("#uri .part.addr"), "An ordinary address");
 await sleep(1500);
-await spot(
-  $("#uri .part.sp"),
-  "Bob's silent payment address",
-  "Labelled for this URI",
-);
+await spot($("#uri .part.sp"), "His silent payment address");
 await sleep(1600);
 await spot($("#uri .part.pj"), "A payjoin mailbox");
 await hold("uri");

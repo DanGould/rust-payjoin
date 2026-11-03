@@ -24,7 +24,7 @@ First, a one-time Silent Payjoin URI.
 
 ## uri
 
-Bob asks for forty thousand sats. His URI carries an ordinary address, his silent payment address with a label for this URI, and a payjoin mailbox.
+Bob asks for forty thousand sats. His URI carries an ordinary address, his silent payment address, and a payjoin mailbox.
 
 ## carol
 
