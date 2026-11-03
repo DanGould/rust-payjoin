@@ -3,6 +3,10 @@
 #
 #   build.sh OUT.mp4 NARRATION.md VO_DIR
 #
+# Next to OUT.mp4 it writes the take's marks (OUT.marks.json), subtitles
+# from the narration (OUT.srt, OUT.vtt, and a track in OUT.mp4 that players
+# show only when asked) and thumbnail.png, the title card.
+#
 # Starts the wallets (spj-web, with its own regtest bitcoind and payjoin
 # mailroom), records one take in headless Chromium with record.mjs, and lays
 # the audio files in VO_DIR
@@ -30,6 +34,7 @@ narration=$(realpath "${2:?narration script}")
 vo=$(realpath "${3:?audio directory}")
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 work=$(mktemp -d "${TMPDIR:-/tmp}/spjw.XXXXXX")
+mkdir -p "$(dirname "$out")"
 groups=()
 
 cleanup() {
@@ -87,7 +92,7 @@ WORK="$work/take" WALLETS_URL="http://127.0.0.1:$wallet_port" CHROME=chromium \
 # locally. Its count of requests shows they all went there.
 curl -sf "http://127.0.0.1:$wallet_port/api/state" | python3 -c \
     'import json,sys; m = json.load(sys.stdin)["mailroom"]; print("mailroom {}: {} requests, all to the local directory".format(m["host"], m["requests"]))'
-mkdir -p "$(dirname "$out")"
-node "$here/mux.mjs" "$work/take.mp4" "$work/marks.json" "$vo" "$out"
+node "$here/subs.mjs" "$narration" "$work/marks.json" "${out%.mp4}.srt" "${out%.mp4}.vtt"
+node "$here/mux.mjs" "$work/take.mp4" "$work/marks.json" "$vo" "$out" "${out%.mp4}.srt"
 cp "$work/marks.json" "${out%.mp4}.marks.json"
 echo "wrote $out"
