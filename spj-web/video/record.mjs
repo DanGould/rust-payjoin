@@ -357,9 +357,12 @@ async function next(kind, n) {
 // The camera
 //
 // A keyframe says where the camera looks, in CSS pixels, how close, and how
-// long the move takes. ffmpeg interpolates between them with an ease.
+// long the move takes. ffmpeg interpolates between them with an ease. It
+// eases the view's centre and half width, not the zoom, so each edge of the
+// view moves steadily one way: anything inside the view at both ends of a
+// move stays inside it all the way through.
 
-const camera = [{ t: -Infinity, z: 1, cx: W / 2, cy: H / 2, d: 0 }];
+const camera = [{ t: -Infinity, z: 1, hw: W / 2, cx: W / 2, cy: H / 2, d: 0 }];
 let view = { left: 0, top: 0, right: W, bottom: H };
 let zoom = 1;
 
@@ -369,7 +372,7 @@ function look(cx, cy, z, d) {
   const hh = H / z / 2;
   cx = Math.min(Math.max(cx, hw), W - hw);
   cy = Math.min(Math.max(cy, hh), H - hh);
-  camera.push({ t: takeTime(), z, cx, cy, d });
+  camera.push({ t: takeTime(), z, hw, cx, cy, d });
   zoom = z;
   view = { left: cx - hw, top: cy - hh, right: cx + hw, bottom: cy + hh };
   return evaluate(
@@ -381,8 +384,11 @@ function look(cx, cy, z, d) {
 // and may cut the top and bottom, so a phone beside the box stays out of
 // the frame instead of showing half its screen.
 //
-// No device is ever cut by the left or right edge of the frame: one the
-// view would cut is added to what has to fit.
+// Nothing on the stage (a device, the transaction, the URI, the mailbox or
+// network node) is ever cut by the left or right edge of the frame. The view
+// slides off one beside what it frames if that still shows all of it, and
+// otherwise widens to take the cut one in.
+const WHOLE = ".stage .phone, #tx .card, #uri .uri-card, #lane .node";
 async function frame(
   rect,
   { pad = 24, maxZoom = 2.2, d = 1.1, cy = null } = {},
@@ -392,30 +398,45 @@ async function frame(
     const z = cy === null ? Math.min(fitW, H / (r.height + 2 * pad)) : fitW;
     return Math.min(Math.max(z, 1), maxZoom);
   };
-  const devices = await evaluate(
-    `[...document.querySelectorAll('.stage .phone')].map((e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right }; })`,
+  const whole = await evaluate(
+    `[...document.querySelectorAll(${JSON.stringify(WHOLE)})].map((e) => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right }; })`,
   );
-  for (;;) {
+  let cx = null;
+  for (let tries = 0; ; tries++) {
     // The view's edges, placed as look() places them.
     const hw = W / fit(rect) / 2;
-    const cx = Math.min(Math.max(rect.left + rect.width / 2, hw), W - hw);
-    const cut = devices.find(
+    const centre = cx ?? rect.left + rect.width / 2;
+    cx = Math.min(Math.max(centre, hw), W - hw);
+    const cut = whole.find(
       (e) =>
         e.left < cx + hw &&
         e.right > cx - hw &&
         (e.left < cx - hw - 0.5 || e.right > cx + hw + 0.5),
     );
     if (!cut) break;
+    if (tries > 12) return wide(d);
+    const right = rect.left + rect.width;
+    const slid =
+      cut.left >= right
+        ? cut.left - 1 - hw
+        : cut.right <= rect.left
+          ? cut.right + 1 + hw
+          : null;
+    if (
+      slid !== null &&
+      slid - hw >= 0 &&
+      slid + hw <= W &&
+      slid - hw <= rect.left &&
+      slid + hw >= right
+    ) {
+      cx = slid;
+      continue;
+    }
     const left = Math.min(rect.left, cut.left);
-    const right = Math.max(rect.left + rect.width, cut.right);
-    rect = { ...rect, left, width: right - left };
+    rect = { ...rect, left, width: Math.max(right, cut.right) - left };
+    cx = null;
   }
-  return look(
-    rect.left + rect.width / 2,
-    cy ?? rect.top + rect.height / 2,
-    fit(rect),
-    d,
-  );
+  return look(cx, cy ?? rect.top + rect.height / 2, fit(rect), d);
 }
 
 const wide = (d = 1.1) => look(W / 2, H / 2, 1, d);
@@ -1050,7 +1071,7 @@ function track(key) {
   return e;
 }
 const zoompan = [
-  `zoompan=z='${track("z")}'`,
+  `zoompan=z='${W / 2}/(${track("hw")})'`,
   `x='clip((${track("cx")})*${scale}-iw/zoom/2,0,iw-iw/zoom)'`,
   `y='clip((${track("cy")})*${scale}-ih/zoom/2,0,ih-ih/zoom)'`,
   `d=1:s=${OUT_SIZE}:fps=${FPS}`,
