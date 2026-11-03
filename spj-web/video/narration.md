@@ -16,35 +16,19 @@ Naively, the two don't work together. The onchain address derived from a silent 
 
 ## overview
 
-This video shows two ways to get both. A one-time URI, and a contact URI, for someone Bob transacts with again and again. There's not one open donation address and mailbox for everyone. More on that at the end.
+This video shows how one URI gets him both. A one-time URI is an ordinary payjoin that also tells the payer Bob has a silent payment address. A contact URI, for someone Bob transacts with again and again, is where Silent Payjoin happens. There's not one open donation address and mailbox for everyone. More on that at the end.
 
 ## one-time
 
-First, a one-time Silent Payjoin URI.
+First, a one-time URI.
 
 ## uri
 
 Bob asks for forty thousand sats. His URI carries an ordinary address, his silent payment address, and a payjoin mailbox.
 
-## carol
+## alice
 
-Carol's wallet knows payjoin, but not silent payments. It pays the address, Bob adds a coin, and it's an ordinary payjoin.
-
-## alice-scan
-
-Alice's wallet speaks silent payments. She scans Bob's next URI.
-
-## alice-send
-
-Alice works out Bob's output from her coin and his silent payment address, signs, and drops it in his mailbox.
-
-## bob-adds
-
-Bob finds it by scanning, and adds a coin. That changes the inputs, so he works out his output again. And he attaches a short proof, so Alice can check his math before she signs.
-
-## alice-checks
-
-Alice checks the proof, and works out Bob's output herself. It matches, and it pays him at least fifty thousand sats. Then she signs.
+Alice scans it. Her wallet speaks both, but Bob already gave her a fresh address, so the silent payment address adds nothing here. She pays the address, Bob adds a coin, and it's an ordinary payjoin, the same one any payjoin wallet makes.
 
 ## confirmed
 
@@ -52,7 +36,7 @@ Confirmed. And if Bob ever loses this phone, a fresh wallet from his backup word
 
 ## contact-note
 
-Alice saves Bob as a contact. The URI carries no name, so she types one. Her wallet notes there's no reusable payjoin yet. She can scan Bob's contact URI to get it.
+What the silent payment address does tell Alice is that Bob has one. She saves him as a contact, so next time she can pay him without asking for a URI.
 
 ## contact
 
@@ -60,11 +44,19 @@ Second, a Silent Payjoin contact URI, for someone Bob transacts with again and a
 
 ## exchange-contact
 
-Bob shows his contact URI. The exchange saves it once.
+The exchange already knows Bob has a silent payment address, so it asks for his contact URI. Bob shows it once.
 
 ## withdraw
 
 Bob withdraws from his exchange. His wallet is open, so each withdrawal is a Silent Payjoin.
+
+## bob-adds
+
+Bob finds it by scanning, and adds a coin. That changes the inputs, so he works out his output again. And he attaches a short proof, so the exchange can check his math before it signs.
+
+## exchange-checks
+
+The exchange checks the proof, and works out Bob's output itself. It matches, and it pays him at least a hundred thousand sats. Then it signs.
 
 ## withdraw-more
 

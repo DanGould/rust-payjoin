@@ -728,13 +728,13 @@ await evaluate(`document.body.classList.add('go')`);
 await hold("intro");
 await sleep(1200);
 
-// 1. The problem, and the two ways the video shows.
+// 1. The problem, and how one URI gets Bob both.
 await showCard("problem.html", "problem", 9);
 await showCard("overview.html", "overview", 6);
 
-// 2. A one-time URI, paid by a wallet without silent payments.
+// 2. A one-time URI, paid as an ordinary payjoin.
 await showCard("onetime.html", "one-time", 4);
-await stage({ payer: "carol", amount: 40000, clear: true });
+await stage({ payer: "alice", amount: 40000, clear: true });
 await toWallets();
 seg("uri");
 await frame(await box(LANE, BOB), { pad: 8, cy: 310 });
@@ -750,159 +750,87 @@ await spot($("#uri .part.pj"), "A payjoin mailbox");
 await hold("uri");
 await unspot();
 
-seg("carol");
+seg("alice");
 await frame(await box(PAYER), { pad: 20 });
 await click('#payer [data-act="scan"]');
 await waitFor(`${$('#payer [data-act="send"]')}`);
 await sleep(300);
+await untilPhrase("alice", "but bob already");
 await spot(
-  $("#payer .sees"),
-  "Carol's wallet skips sp=",
-  "It pays the address, as a payjoin",
+  $("#payer .sees .pays"),
+  "A fresh address from Bob",
+  "So the silent payment address adds nothing here",
 );
-await sleep(1700);
+await untilPhrase("alice", "she pays the address");
 await unspot();
 await click('#payer [data-act="send"]');
-// Carol's payjoin is the ordinary kind; its steps go by quickly.
+// An ordinary payjoin: its steps go by quickly.
 await pace({ held: true, ms: 400 });
 await park();
 await wide(1.3);
-await next("carol.original_sent", 1);
+await next("alice.original_sent", 1);
 await next("bob.coin", 1);
 await spot($('#tx .row.bob[data-key^="in-"]'), "Bob adds a coin", "", CARD);
 await sleep(1600);
-await unspot();
-await next("carol.confirmed", 1);
-await release();
-await waitFor(count("bob.received", 1));
-await hold("carol");
-await sleep(500);
-
-// 3. A one-time URI, paid by a silent payment wallet.
-await stage({ payer: "alice", amount: 50000, clear: true });
-await sleep(400);
-seg("alice-scan");
-await pace({ held: true, ms: 700 });
-await frame(await box(BOB), { pad: 20 });
-await click('#bob [data-act="receive"]');
-await waitFor(`${$("#bob .qr svg")}`);
-await sleep(600);
-await frame(await box(PAYER), { pad: 20 });
-await click('#payer [data-act="scan"]');
-await waitFor(`${$('#payer [data-act="send"]')}`);
-await sleep(300);
-await spot(
-  $("#payer .sees"),
-  "Alice's wallet reads sp=",
-  "A silent payment, with payjoin",
-);
-await hold("alice-scan");
-await unspot();
-
-seg("alice-send");
-await click('#payer [data-act="send"]');
-await park();
-await frame(await box(PAYER, LANE), { pad: 8, d: 1.3, cy: 310 });
-await next("alice.original_sent", 1);
-await spot(
-  $('#tx .row.bob[data-key^="out-"]'),
-  "Bob's output, worked out by Alice",
-  "From her inputs and his silent payment address",
-  CARD,
-);
-await waitFor(count("bob.original", 2));
-await hold("alice-send");
-await unspot();
-
-seg("bob-adds");
-await frame(await box(LANE, BOB), { pad: 8, d: 1.3, cy: 310 });
-await next("bob.found", 2);
-await say("Bob finds it by scanning", "", "top");
-await sleep(1800);
-await hush();
-await next("bob.coin", 2);
-await spot(
-  $('#tx .row.bob[data-key^="in-"]'),
-  "Bob's coin, with a proof",
-  "So Alice can check his math before she signs",
-  CARD,
-);
-await sleep(2600);
-await spot(
-  $('#tx .row.bob[data-key^="out-"]'),
-  "His output, worked out again",
-  "Over all the inputs, his coin included",
-  CARD,
-);
-await hold("bob-adds");
-await unspot();
-
-seg("alice-checks");
-await frame(await box(PAYER, LANE), { pad: 8, d: 1.3, cy: 310 });
 await next("alice.proposal", 1);
-await next("alice.checked", 1);
-await spot($('#tx .row.bob[data-key^="in-"]'), "Proof checked", "", CARD);
-await sleep(2000);
 await spot(
-  $('#tx .row.bob[data-key^="out-"]'),
-  "Alice gets the same key",
-  "And it pays Bob at least 50,000 sats",
-  CARD,
+  $("#tx .card"),
+  "An ordinary payjoin",
+  "The same one any payjoin wallet makes",
 );
-await hold("alice-checks");
+await hold("alice");
 await unspot();
 
 seg("confirmed");
-await wide(1.3);
 await next("alice.broadcast", 1);
 await next("alice.confirmed", 1);
 await release();
-await waitFor(count("bob.received", 2));
-await spot($("#bob .list li"), "Found by scanning");
+await waitFor(count("bob.received", 1));
+await spot($("#bob .list li"), "Paid to his fresh address");
 await untilPhrase("confirmed", "and if bob");
 await spot(
   $("#bob .list li"),
-  "Found by scanning",
-  "A wallet restored from Bob's backup words finds it the same way",
+  "Paid to his fresh address",
+  "A wallet restored from Bob's backup words finds it on the same path",
 );
 await hold("confirmed");
 await unspot();
 
 seg("contact-note");
-// A URI carries no name: Alice types one, a key at a time.
+await pace({ held: true, ms: 700 });
 await frame(await box(PAYER), {
   pad: 16,
   cy: (await box($("#payer .save-contact"))).top + 40,
 });
+await say("Bob has a silent payment address", "The URI told Alice", "top");
+await untilPhrase("contact-note", "she saves him");
+// A URI carries no name: Alice types one, a key at a time.
 await click("#contact-name", { follow: false });
 await evaluate(`${$("#contact-name")}.focus()`);
-await say("A URI carries no name, so Alice types one", "", "top");
 await sleep(300);
 for (const key of "Bob") {
   await cdp.send("Input.insertText", { text: key });
   await sleep(220);
 }
-await sleep(400);
+await sleep(300);
 await click('#payer [data-act="save-contact"]');
 await waitFor(count("alice.contact_saved", 1));
 await hush();
 await park();
-await sleep(600);
-await spot($("#payer .contact .note"), "");
-await untilPhrase("contact-note", "she can scan");
+await sleep(400);
 await spot(
-  $("#payer .note-scan"),
-  "Scan Bob's contact URI",
-  "For reusable payjoin",
+  $("#payer .contact .note"),
+  "Next time, no URI needed",
+  "Alice pays his silent payment address",
   $("#payer .contact"),
 );
 await hold("contact-note");
 await unspot();
 
-// 4. A contact URI, for someone Bob transacts with again and again.
+// 3. A contact URI, for someone Bob transacts with again and again.
 await showCard("contact.html", "contact", 8);
 
-// 5. Bob withdraws from his exchange, which has his contact URI.
+// 4. The exchange asks for Bob's contact URI.
 await stage({
   payer: "exchange",
   amount: 100000,
@@ -912,10 +840,23 @@ await stage({
 });
 await toWallets();
 seg("exchange-contact");
-await frame(await box(LANE, BOB), { pad: 8, cy: 310 });
+await frame(await box(PAYER), { pad: 16 });
+await spot(
+  $("#payer .customer"),
+  "Bob has a silent payment address",
+  "The exchange has it on file",
+);
+await untilPhrase("exchange-contact", "so it asks");
+await unspot();
+await click('#payer [data-act="ask-contact"]');
+await park();
+await waitFor(seen("exchange.asked"));
+await frame(await box(BOB), { pad: 20 });
+await sleep(600);
 await click('#bob [data-act="share-contact"]');
 await waitFor(`${$("#uri .part.sp")}`);
 await park();
+await frame(await box(LANE, BOB), { pad: 8, cy: 310 });
 await sleep(400);
 await spot(
   $("#uri .part.addr"),
@@ -943,6 +884,8 @@ await park();
 // Bob's home screen slides in; measure it once it is still.
 await sleep(900);
 
+// 5. Bob withdraws: a Silent Payjoin, with his proof and the exchange's
+// check.
 seg("withdraw");
 const withdraw = await box($('#bob [data-act="withdraw"]'));
 await frame(await box(BOB), { pad: 20, cy: withdraw.top - 20, d: 1.1 });
@@ -950,8 +893,6 @@ await spot($('#bob [data-act="withdraw"]'), "Bob withdraws from his exchange");
 await sleep(1600);
 await unspot();
 await click('#bob [data-act="withdraw"]');
-// The transaction was shown in full for Alice; this one moves faster.
-await pace({ held: true, ms: 400 });
 await park();
 await wide(1.2);
 await say(
@@ -960,11 +901,51 @@ await say(
   "top",
 );
 await next("exchange.original_sent", 1);
-await next("bob.coin", 3);
+await hold("withdraw");
+await hush();
+
+seg("bob-adds");
+await frame(await box(LANE, BOB), { pad: 8, d: 1.3, cy: 310 });
+await next("bob.found", 2);
+await say("Bob finds it by scanning", "", "top");
+await sleep(1800);
+await hush();
+await next("bob.coin", 2);
+await spot(
+  $('#tx .row.bob[data-key^="in-"]'),
+  "Bob's coin, with a proof",
+  "So the exchange can check his math before it signs",
+  CARD,
+);
+await sleep(2600);
+await spot(
+  $('#tx .row.bob[data-key^="out-"]'),
+  "His output, worked out again",
+  "Over all the inputs, his coin included",
+  CARD,
+);
+await hold("bob-adds");
+await unspot();
+
+seg("exchange-checks");
+await frame(await box(PAYER, LANE), { pad: 8, d: 1.3, cy: 310 });
+await next("exchange.proposal", 1);
+await next("exchange.checked", 1);
+await spot($('#tx .row.bob[data-key^="in-"]'), "Proof checked", "", CARD);
+await sleep(2000);
+await spot(
+  $('#tx .row.bob[data-key^="out-"]'),
+  "The exchange gets the same key",
+  "And it pays Bob at least 100,000 sats",
+  CARD,
+);
+await untilPhrase("exchange-checks", "then it signs");
+await unspot();
+await wide(1.2);
 await next("exchange.confirmed", 1);
 await release();
-await waitFor(count("bob.received", 3));
-await hold("withdraw");
+await waitFor(count("bob.received", 2));
+await hold("exchange-checks");
 
 // Two more withdrawals, faster.
 await pace({ held: false, ms: 250 });
@@ -974,7 +955,7 @@ for (const n of [2, 3]) {
   await click('#bob [data-act="withdraw"]');
   await park();
   await waitFor(count("exchange.confirmed", n), 120000);
-  await waitFor(count("bob.received", n + 2), 120000);
+  await waitFor(count("bob.received", n + 1), 120000);
   await sleep(600);
 }
 await evaluate(`window.__ff(false, ${zoom})`);
@@ -1041,7 +1022,7 @@ await frame(bobPhone, { pad: 20, cy: bobPhone.top + 190, d: 1.2 });
 await sleep(1200);
 seg("offline-wake");
 await post("/api/bob/awake", { awake: true });
-await waitFor(count("bob.received", 6), 60000);
+await waitFor(count("bob.received", 5), 60000);
 await sleep(600);
 await spot(
   $("#bob .steps"),

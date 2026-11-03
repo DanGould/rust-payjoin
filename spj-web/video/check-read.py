@@ -26,7 +26,7 @@ import tempfile
 here = os.path.dirname(os.path.abspath(__file__))
 model, vo = sys.argv[1], sys.argv[2]
 # Spelling hints for words a general English model gets wrong.
-hint = "Silent Payjoin, payjoin, silent payments, URI, sats, Bob, Alice, Carol"
+hint = "Silent Payjoin, payjoin, silent payments, URI, sats, Bob, Alice"
 
 
 def words(s):
