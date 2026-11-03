@@ -1,8 +1,8 @@
 # Silent Payjoin demo
 
-Silent payments and payjoin from one URI. This crate runs four wallets in a
-browser on a regtest node: Bob's silent payment wallet, Carol's payjoin wallet,
-Alice's silent payment wallet, and an exchange. They reach each other only
+Silent payments and payjoin from one URI. This crate runs three wallets in a
+browser on a regtest node: Bob's silent payment wallet, Alice's wallet with
+payjoin and silent payments, and an exchange. They reach each other only
 through a payjoin directory and OHTTP relay that run in the same process on
 127.0.0.1. Nothing leaves the machine.
 

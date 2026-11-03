@@ -17,7 +17,6 @@
   --bob: #0e9f7e;
   --bob-tint: #daf2ea;
   --alice: #2b50e8;
-  --carol: #d9480f;
   --exchange: #34495e;
   --silent: #6145c4;
   --silent-logo: #7961db;
@@ -237,9 +236,6 @@ button {
 [data-who="alice"] .avatar {
   background: var(--alice);
 }
-[data-who="carol"] .avatar {
-  background: var(--carol);
-}
 [data-who="exchange"] .avatar {
   background: var(--exchange);
 }
@@ -287,9 +283,6 @@ button {
 }
 [data-who="alice"] .btn.primary {
   background: var(--alice);
-}
-[data-who="carol"] .btn.primary {
-  background: var(--carol);
 }
 [data-who="exchange"] .btn.primary {
   background: var(--exchange);
@@ -380,6 +373,10 @@ button {
 .tag.spj {
   background: var(--both);
   color: var(--white);
+}
+.tag.plain {
+  background: #e6eaef;
+  color: var(--ink-2);
 }
 
 .head {
@@ -649,16 +646,32 @@ button {
   align-items: center;
   gap: 8px;
 }
-.note-scan {
+.note > span {
+  flex: 1;
+}
+.note small {
+  display: block;
+  font-size: 11.5px;
+  opacity: 0.8;
+}
+.note-pay {
   flex: none;
-  width: 36px;
-  height: 36px;
-  border: 0;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  background: var(--note);
-  color: var(--ink);
+  padding: 7px 14px;
+  font-size: 13px;
+}
+/* Bob's phone, asked for his contact URI. */
+.contact.asked p {
+  margin: 8px 0 2px;
+  font-weight: 600;
+  font-size: 15px;
+}
+.contact.asked small {
+  display: block;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.contact.asked .c-head .avatar {
+  background: var(--exchange);
 }
 
 /* Naming a contact: a URI carries no name. */
@@ -1039,12 +1052,6 @@ body[data-payer="exchange"] .stage {
 }
 .row.alice .owner {
   color: var(--alice);
-}
-.row.carol .bar-owner {
-  background: var(--carol);
-}
-.row.carol .owner {
-  color: var(--carol);
 }
 .row.exchange .bar-owner {
   background: var(--exchange);

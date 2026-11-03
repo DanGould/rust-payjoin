@@ -1,6 +1,9 @@
-//! Bob's phone: a silent payment wallet that hands out one-time URIs on
-//! his unlabelled address and a contact URI on the contact's own label,
-//! answers each Original that arrives with a coin and a proof, and finds
+//! Bob's phone: a silent payment wallet that hands out one-time URIs, each
+//! with a fresh ordinary address and his unlabelled silent payment address,
+//! and a contact URI on the contact's own label. It answers each Original
+//! that arrives with a coin: an Original to a one-time URI's address becomes
+//! an ordinary payjoin, and one to his silent payment address a Silent
+//! Payjoin, with the output re-derived and a proof for the coin. It finds
 //! what it received by scanning new blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,7 +54,8 @@ pub struct Bob {
     shared: Arc<Shared>,
     secp: Secp256k1<All>,
     receiver: SpReceiver,
-    /// Coins added to payments of one-time requests, whose payers Bob chose.
+    /// The account whose fresh addresses go in one-time URIs, and whose
+    /// coins Bob adds to their payjoins.
     one_time_coins: Keychain,
     /// A separate BIP 86 account whose coins are added to payments of the
     /// contact URI, so a regular payer learns nothing of the others.
@@ -198,9 +202,10 @@ impl Bob {
         self.scan().await
     }
 
-    /// Answer an Original: find the payment in it by scanning, add a coin,
-    /// re-derive the output over the final inputs, prove the coin's share,
-    /// and post the proposal to the payer's reply mailbox.
+    /// Answer an Original: find what pays Bob in it, add a coin, and post
+    /// the proposal to the payer's reply mailbox. An output to his silent
+    /// payment address is re-derived over the final inputs, with a proof of
+    /// the coin's share.
     async fn answer(
         &mut self,
         original: Receiver<UncheckedOriginalPayload>,

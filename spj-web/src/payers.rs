@@ -1,6 +1,5 @@
-//! The payers' phones: Carol, whose wallet knows payjoin but not silent
-//! payments; Alice, a silent payment wallet; and an exchange paying its
-//! user Bob through his contact URI.
+//! The payers: Alice, whose wallet does payjoin and silent payments, and an
+//! exchange paying its user Bob through his contact URI.
 //!
 //! Each gets the string it pays the way a phone does, from a scan of what
 //! Bob's phone shows, and reaches Bob only through the payjoin directory.
@@ -11,20 +10,18 @@ use std::time::{Duration, Instant};
 
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::{All, Secp256k1};
-use bitcoin::{Amount, FeeRate, Network, OutPoint, ScriptBuf, Transaction};
-use payjoin::send::v2::SenderBuilder;
-use payjoin::PjParam;
-use payjoin_test_utils::bitcoind;
+use bitcoin::{Amount, Network, OutPoint, ScriptBuf, Transaction, TxOut};
+use payjoin::{PjParam, PjUri};
 use serde_json::{json, Value};
+use spj_demo::chain;
 use spj_demo::contact::ContactUri;
 use spj_demo::contacts::Contacts;
 use spj_demo::flow::{self, Sending, SpOriginal};
 use spj_demo::net::Error;
-use spj_demo::sender::{self, attempt_gate, Broadcast, Change, Gate, Payment};
+use spj_demo::sender::{self, Broadcast};
 use spj_demo::sp_address::SpAddress;
 use spj_demo::uri::OneTimeUri;
 use spj_demo::wallet::{self, Keychain};
-use spj_demo::{chain, regtest};
 use tokio::sync::mpsc;
 
 use crate::bob::Reply;
@@ -32,50 +29,51 @@ use crate::shape::Owners;
 use crate::Shared;
 
 pub enum Command {
-    /// Pay the string a scan of Bob's phone read.
-    Pay { uri: String, reply: Reply },
+    /// Pay the one-time URI a scan of Bob's phone read: its ordinary
+    /// address, as a BIP 77 payjoin. With `silent_only` the payer acts as a
+    /// wallet without payjoin, which pays the URI's `sp=` as a plain silent
+    /// payment.
+    Pay { uri: String, silent_only: bool, reply: Reply },
     /// Save the last one-time URI paid as a contact with this name. A
     /// URI carries no name, so the user types one.
     SaveContact { name: String, reply: Reply },
+    /// Note that Bob has this silent payment address on file and ask him
+    /// for his contact URI (the exchange only).
+    AskContact { sp: String, reply: Reply },
     /// Save Bob's contact URI (the exchange only).
     AddContact { uri: String, reply: Reply },
-    /// Pay the saved contact (the exchange only). With `reply_by` the payer
-    /// waits that long for Bob's proposal before sending its Original as it
-    /// is.
+    /// Pay the saved contact: as a Silent Payjoin through its contact URI,
+    /// or as a plain silent payment to a contact saved from a one-time URI.
+    /// With `reply_by` the payer waits that long for Bob's proposal before
+    /// sending its Original as it is.
     PayContact { amount: Amount, reply_by: Duration, reply: Reply },
 }
 
 /// How long a payer waits for a proposal when nothing says otherwise.
 const PATIENCE: Duration = Duration::from_secs(60);
 
-/// A payer's coins: a Bitcoin Core wallet for Carol, an in-process keychain
-/// for the silent payment wallets.
-pub enum Coins {
-    Core(bitcoind::Client),
-    Keys(Keychain),
-}
-
 pub struct Payer {
     shared: Arc<Shared>,
-    /// `carol`, `alice` or `exchange`, the prefix of every event it emits.
+    /// `alice` or `exchange`, the prefix of every event it emits.
     name: &'static str,
     secp: Secp256k1<All>,
-    coins: Coins,
+    keys: Keychain,
     contacts: Contacts,
-    contact: Option<ContactUri>,
+    /// The silent payment address of the contact saved for Bob.
+    bob: Option<SpAddress>,
     /// The one-time URI paid last, until it is saved as a contact.
     last_paid: Option<OneTimeUri>,
 }
 
 impl Payer {
-    pub fn new(shared: Arc<Shared>, name: &'static str, coins: Coins) -> Self {
+    pub fn new(shared: Arc<Shared>, name: &'static str, keys: Keychain) -> Self {
         Self {
             shared,
             name,
             secp: Secp256k1::new(),
-            coins,
+            keys,
             contacts: Contacts::default(),
-            contact: None,
+            bob: None,
             last_paid: None,
         }
     }
@@ -86,30 +84,21 @@ impl Payer {
 
     async fn pace(&self) { self.shared.hub.pace().await }
 
-    fn client(&self) -> &bitcoind::Client { self.shared.regtest.client() }
+    fn client(&self) -> &payjoin_test_utils::bitcoind::Client { self.shared.regtest.client() }
 
-    fn balance(&self) -> u64 {
-        match &self.coins {
-            Coins::Keys(keys) => keys.balance().to_sat(),
-            Coins::Core(core) => core
-                .call::<f64>("getbalance", &[])
-                .ok()
-                .and_then(|btc| Amount::from_btc(btc).ok())
-                .map(Amount::to_sat)
-                .unwrap_or_default(),
-        }
-    }
+    fn balance(&self) -> u64 { self.keys.balance().to_sat() }
 
     pub async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
         self.emit("ready", json!({ "balance": self.balance() }));
         while let Some(command) = commands.recv().await {
             let (result, reply) = match command {
-                Command::Pay { uri, reply } => {
-                    // Answer at once: the payment plays out in events.
+                Command::Pay { uri, silent_only, reply } => {
+                    // Answer at once: the transfer plays out in events.
                     let _ = reply.send(Ok(json!({})));
-                    (self.pay(&uri).await, None)
+                    (self.pay(&uri, silent_only).await, None)
                 }
                 Command::SaveContact { name, reply } => (self.save_contact(&name), Some(reply)),
+                Command::AskContact { sp, reply } => (self.ask_contact(&sp), Some(reply)),
                 Command::AddContact { uri, reply } => (self.add_contact(&uri), Some(reply)),
                 Command::PayContact { amount, reply_by, reply } => {
                     let _ = reply.send(Ok(json!({})));
@@ -129,130 +118,154 @@ impl Payer {
         }
     }
 
-    async fn pay(&mut self, uri: &str) -> Result<Value, Error> {
-        match self.name {
-            "carol" => self.pay_without_silent_payments(uri).await,
-            _ => self.pay_one_time(uri).await,
-        }
+    async fn pay(&mut self, uri: &str, silent_only: bool) -> Result<Value, Error> {
+        let uri = OneTimeUri::parse(uri, Network::Regtest)?;
+        let amount = uri.amount.ok_or("an amount")?;
+        let result = match &uri.payjoin {
+            Some(pj_uri) if !silent_only => self.pay_address(pj_uri, amount).await?,
+            _ => self.pay_silent(&uri.sp, amount).await?,
+        };
+        self.last_paid = Some(uri);
+        Ok(result)
     }
 
-    /// Carol's wallet: a stock BIP 21 parser and PDK's BIP 77 sender. It
-    /// skips `sp=`, which it doesn't know, and pays the address.
-    async fn pay_without_silent_payments(&mut self, uri: &str) -> Result<Value, Error> {
-        let Coins::Core(core) = &self.coins else { return Err("Carol pays from Core".into()) };
-        let pj_uri = payjoin::Uri::try_from(uri)?
-            .require_network(Network::Regtest)?
-            .check_pj_supported()
-            .map_err(|_| "a BIP 77 URI")?;
-        let PjParam::V2(pj_param) = pj_uri.extras().pj_param() else {
+    /// Pay a one-time URI's ordinary address as a BIP 77 payjoin, with
+    /// ordinary change. The address is fresh, which already keeps the
+    /// transfer apart from Bob's others, so the URI's `sp=` adds nothing.
+    async fn pay_address(&mut self, uri: &PjUri, amount: Amount) -> Result<Value, Error> {
+        let PjParam::V2(pj_param) = uri.extras().pj_param() else {
             return Err("a BIP 77 endpoint".into());
         };
-        let amount = pj_uri.amount().ok_or("an amount")?;
-        let address = pj_uri.address().clone();
+        let address = uri.address().clone();
         self.emit(
             "scanned",
             json!({ "amount": amount.to_sat(), "address": address.to_string(), "silent": false }),
         );
         self.pace().await;
-        let original = regtest::original_psbt(core, &address, amount)?;
-        let persister = Default::default();
-        let session = SenderBuilder::from_parts(original.clone(), pj_param, &address, Some(amount))
-            .build_recommended(FeeRate::BROADCAST_MIN)?
-            .save(&persister)?;
-        let mailroom = &self.shared.regtest.mailroom;
-        let (request, context) = session.create_v2_post_request(mailroom.relay_url())?;
-        let response = mailroom.send(&request).await?;
-        let session = session.process_response(&response, context).save(&persister)?;
-        let sending = Sending { session, persister };
         let payee = vec![address.script_pubkey()];
+        let coins = self
+            .keys
+            .select(amount + Amount::from_sat(2_000))
+            .ok_or_else(|| format!("{} can't fund {amount}", self.keys.name))?;
+        let payment = TxOut { value: amount, script_pubkey: address.script_pubkey() };
+        let original = self.keys.original(&coins, vec![payment], flow::ORIGINAL_FEE_RATE)?;
+        let original_tx = wallet::extract(&original);
+        let sending = flow::post_original(
+            &self.shared.regtest.mailroom,
+            &original,
+            pj_param,
+            &address,
+            amount,
+            false,
+        )
+        .await?;
         let none = BTreeSet::new();
         let owners =
             Owners { payer: self.name, bob_inputs: &none, bob_outputs: &payee, silent: &[] };
-        self.emit("original_sent", json!({ "tx": owners.psbt(self.client(), &original) }));
+        self.emit(
+            "original_sent",
+            json!({ "tx": owners.psbt(self.client(), &original), "silent": false }),
+        );
 
-        let Some(proposal) = self.wait_for_proposal(&sending, PATIENCE).await? else {
-            return Err("no proposal arrived".into());
+        let Some(mut proposal) = self.wait_for_proposal(&sending, PATIENCE).await? else {
+            self.emit("fallback", json!({ "reason": "Bob didn't answer in time" }));
+            self.pace().await;
+            return self.settle(&original_tx, &owners, false, amount).await;
         };
         let theirs = receiver_inputs(&original, &proposal);
-        let owners =
+        let joined =
             Owners { payer: self.name, bob_inputs: &theirs, bob_outputs: &payee, silent: &[] };
         self.emit(
             "proposal",
-            json!({ "tx": owners.psbt(self.client(), &proposal), "checks": "bip78" }),
+            json!({ "tx": joined.psbt(self.client(), &proposal), "checks": "bip78" }),
         );
         self.pace().await;
-        let Coins::Core(core) = &self.coins else { unreachable!() };
-        let payjoin = regtest::sign_proposal(core, proposal)?;
-        self.settle(&payjoin, &owners, None, amount).await
+        self.keys.sign(&mut proposal)?;
+        let payjoin = wallet::extract(&proposal);
+        match sender::broadcast(self.client(), &payjoin, &original_tx)? {
+            Broadcast::Payjoin(_) => self.settle(&payjoin, &joined, true, amount).await,
+            Broadcast::Original { refused, .. } => {
+                let why = format!("the node refused it: {refused}");
+                self.emit("fallback", json!({ "reason": why }));
+                self.settle(&original_tx, &owners, false, amount).await
+            }
+        }
     }
 
-    /// Alice's wallet: reads `sp=` and pays the URI as a silent payjoin.
-    async fn pay_one_time(&mut self, uri: &str) -> Result<Value, Error> {
-        let uri = OneTimeUri::parse(uri, Network::Regtest)?;
-        let amount = uri.amount.ok_or("an amount")?;
+    /// Pay `sp` as a plain silent payment, the way a wallet without payjoin
+    /// pays a one-time URI's `sp=`, and any wallet pays a contact saved from
+    /// one.
+    async fn pay_silent(&mut self, sp: &SpAddress, amount: Amount) -> Result<Value, Error> {
         self.emit(
             "scanned",
-            json!({ "amount": amount.to_sat(), "sp": uri.sp.to_string(), "silent": true }),
+            json!({ "amount": amount.to_sat(), "sp": sp.to_string(), "silent": true }),
         );
         self.pace().await;
-        let gate = attempt_gate(&uri.sp, &[Payment::SilentPayment(uri.sp)], Change::Ordinary);
-        let original = self.sp_original(&uri.sp, amount)?;
-        let sending = match gate {
-            Gate::AttemptPayjoin => Some(
-                flow::post_original(
-                    &self.shared.regtest.mailroom,
-                    &original.psbt,
-                    &flow::one_time_param(&uri)?,
-                    &original.payee_address(),
-                    amount,
-                    false,
-                )
-                .await?,
-            ),
-            Gate::BroadcastOriginal(_) => None,
-        };
-        let result = self.settle_silent(&uri.sp, &original, sending, PATIENCE).await?;
-        self.last_paid = Some(uri);
-        Ok(result)
+        let original = self.sp_original(sp, amount)?;
+        let payee = vec![original.payee.clone()];
+        let none = BTreeSet::new();
+        let owners =
+            Owners { payer: self.name, bob_inputs: &none, bob_outputs: &payee, silent: &payee };
+        self.emit("signed", json!({ "tx": owners.psbt(self.client(), &original.psbt) }));
+        self.pace().await;
+        self.settle(&original.tx(), &owners, false, amount).await
     }
 
     fn save_contact(&mut self, name: &str) -> Result<Value, Error> {
         let uri = self.last_paid.take().ok_or("no URI paid to save")?;
         let contact = self.contacts.save_one_time(name, &uri);
-        let saved =
-            json!({ "name": contact.name, "sp": contact.sp.to_string(), "note": contact.note() });
+        let saved = json!({
+            "name": contact.name,
+            "sp": contact.sp.to_string(),
+            "payjoin": contact.payjoin.is_some(),
+        });
+        self.bob = Some(contact.sp);
         self.emit("contact_saved", saved.clone());
         Ok(saved)
+    }
+
+    fn ask_contact(&mut self, sp: &str) -> Result<Value, Error> {
+        let sp: SpAddress = sp.parse()?;
+        let asked = json!({ "sp": sp.to_string() });
+        self.emit("asked", asked.clone());
+        Ok(asked)
     }
 
     fn add_contact(&mut self, uri: &str) -> Result<Value, Error> {
         let contact = ContactUri::parse(uri, Network::Regtest)?;
         let saved = self.contacts.save_contact_uri("Bob", &contact);
-        let data = json!({ "name": saved.name, "sp": saved.sp.to_string(), "note": saved.note() });
-        self.contact = Some(contact);
+        let data = json!({
+            "name": saved.name,
+            "sp": saved.sp.to_string(),
+            "payjoin": saved.payjoin.is_some(),
+        });
+        self.bob = Some(contact.sp);
         self.emit("contact_saved", data.clone());
         Ok(data)
     }
 
     async fn pay_contact(&mut self, amount: Amount, reply_by: Duration) -> Result<Value, Error> {
-        let contact = self.contact.clone().ok_or("no contact saved")?;
+        let sp = self.bob.ok_or("no contact saved")?;
+        let contact = self.contacts.get(&sp).cloned().ok_or("no contact saved")?;
         self.emit("paying", json!({ "amount": amount.to_sat(), "reply_by": reply_by.as_secs() }));
-        let original = self.sp_original(&contact.sp, amount)?;
+        let Some(contact_uri) = contact.payjoin else {
+            return self.pay_silent(&sp, amount).await;
+        };
+        let original = self.sp_original(&contact_uri.sp, amount)?;
         let sending = flow::post_to_contact(
             &self.shared.regtest.mailroom,
-            &contact,
+            &contact_uri,
             &original.psbt,
             &original.payee_address(),
             amount,
             reply_by,
         )
         .await?;
-        self.settle_silent(&contact.sp, &original, Some(sending), reply_by).await
+        self.settle_silent(&contact_uri.sp, &original, Some(sending), reply_by).await
     }
 
     fn sp_original(&mut self, sp: &SpAddress, amount: Amount) -> Result<SpOriginal, Error> {
-        let Coins::Keys(keys) = &mut self.coins else { return Err("a keychain".into()) };
-        flow::sp_original(&self.secp, keys, sp, amount)
+        flow::sp_original(&self.secp, &mut self.keys, sp, amount)
     }
 
     /// After the Original is posted: wait for Bob's proposal, check it, sign
@@ -277,7 +290,10 @@ impl Payer {
         let none = BTreeSet::new();
         let owners =
             Owners { payer: self.name, bob_inputs: &none, bob_outputs: &payee, silent: &payee };
-        self.emit("original_sent", json!({ "tx": owners.psbt(self.client(), &original.psbt) }));
+        self.emit(
+            "original_sent",
+            json!({ "tx": owners.psbt(self.client(), &original.psbt), "silent": true }),
+        );
         let proposal = match &sending {
             Some(sending) => self.wait_for_proposal(sending, patience).await?,
             None => None,
@@ -286,7 +302,7 @@ impl Payer {
         let Some(mut proposal) = proposal else {
             self.emit("fallback", fallback("Bob didn't answer in time"));
             self.pace().await;
-            return self.settle(&original.tx(), &owners, Some(original), amount).await;
+            return self.settle(&original.tx(), &owners, false, amount).await;
         };
         let theirs = receiver_inputs(&original.psbt, &proposal);
         match sender::check_proposal(&self.secp, sp, &original.psbt, &original.own, &proposal) {
@@ -314,12 +330,11 @@ impl Payer {
                 );
                 self.pace().await;
                 self.pace().await;
-                let Coins::Keys(keys) = &self.coins else { unreachable!() };
-                keys.sign(&mut proposal)?;
+                self.keys.sign(&mut proposal)?;
                 let payjoin = wallet::extract(&proposal);
                 let original_tx = original.tx();
                 match sender::broadcast(self.client(), &payjoin, &original_tx)? {
-                    Broadcast::Payjoin(_) => self.settle(&payjoin, &owners, None, amount).await,
+                    Broadcast::Payjoin(_) => self.settle(&payjoin, &owners, true, amount).await,
                     Broadcast::Original { refused, .. } => {
                         self.emit("fallback", fallback(&format!("the node refused it: {refused}")));
                         let owners = Owners {
@@ -328,14 +343,14 @@ impl Payer {
                             bob_outputs: &payee,
                             silent: &payee,
                         };
-                        self.settle(&original_tx, &owners, Some(original), amount).await
+                        self.settle(&original_tx, &owners, false, amount).await
                     }
                 }
             }
             Err(rejection) => {
                 self.emit("rejected", fallback(&rejection.to_string()));
                 self.pace().await;
-                self.settle(&original.tx(), &owners, Some(original), amount).await
+                self.settle(&original.tx(), &owners, false, amount).await
             }
         }
     }
@@ -358,14 +373,14 @@ impl Payer {
     }
 
     /// Broadcast `tx` (unless it already is), mine it into a block, and
-    /// learn from it.
+    /// learn from it. `payjoin` says whether Bob added a coin to it.
     /// `amount` is what the payer set out to pay, which Bob's output exceeds
     /// by his own coin in a payjoin.
     async fn settle(
         &mut self,
         tx: &Transaction,
         owners: &Owners<'_>,
-        original: Option<&SpOriginal>,
+        payjoin: bool,
         amount: Amount,
     ) -> Result<Value, Error> {
         let txid = tx.compute_txid();
@@ -374,7 +389,7 @@ impl Payer {
         }
         let prevouts = chain::prevouts(self.client(), tx)?;
         let link = self.shared.explorer.as_ref().map(|e| owners.explorer_link(e, txid, tx));
-        let payjoin = original.is_none();
+        let silent = !owners.silent.is_empty();
         self.emit(
             "broadcast",
             json!({ "txid": txid.to_string(), "tx": owners.tx(tx, &prevouts), "payjoin": payjoin }),
@@ -382,9 +397,7 @@ impl Payer {
         self.pace().await;
         self.pace().await;
         let height = self.shared.regtest.confirm(&[txid])?;
-        if let Coins::Keys(keys) = &mut self.coins {
-            keys.credit(tx);
-        }
+        self.keys.credit(tx);
         let paid: u64 = tx
             .output
             .iter()
@@ -408,6 +421,7 @@ impl Payer {
             "height": height,
             "explorer": link,
             "payjoin": payjoin,
+            "silent": silent,
             "sent": spent - change,
             "amount": amount.to_sat(),
             "bob_got": paid,

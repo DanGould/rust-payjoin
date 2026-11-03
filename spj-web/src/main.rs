@@ -1,5 +1,5 @@
 //! Web wallets for the silent payjoin demo: Bob's silent payment wallet,
-//! and three payers (Carol's payjoin wallet, Alice's silent payment wallet,
+//! and two payers (Alice's wallet, which does payjoin and silent payments,
 //! and an exchange) on a regtest node with a payjoin directory and OHTTP
 //! relay on localhost.
 //!
@@ -88,7 +88,6 @@ fn options() -> Result<Options, Error> {
 struct App {
     shared: Arc<Shared>,
     bob: mpsc::Sender<bob::Command>,
-    carol: mpsc::Sender<payers::Command>,
     alice: mpsc::Sender<payers::Command>,
     exchange: mpsc::Sender<payers::Command>,
 }
@@ -107,9 +106,6 @@ async fn main() -> Result<(), Error> {
     regtest.fund(&mut contact_coins, &coins(6, 30_000))?;
     regtest.fund(&mut alice, &coins(3, 200_000))?;
     regtest.fund(&mut exchange, &coins(6, 300_000))?;
-    let carol = regtest.node.create_wallet("carol")?;
-    regtest.client().send_to_address(&carol.new_address()?, Amount::from_sat(500_000))?;
-    regtest.mine(1)?;
 
     if let Some(path) = &options.node_info {
         let node = Node::from(&regtest.node);
@@ -128,9 +124,8 @@ async fn main() -> Result<(), Error> {
         tx
     };
     let app = App {
-        carol: spawn_payer("carol", payers::Coins::Core(carol)),
-        alice: spawn_payer("alice", payers::Coins::Keys(alice)),
-        exchange: spawn_payer("exchange", payers::Coins::Keys(exchange)),
+        alice: spawn_payer("alice", alice),
+        exchange: spawn_payer("exchange", exchange),
         bob: {
             let (tx, rx) = mpsc::channel(8);
             tokio::spawn(bob::Bob::new(shared.clone(), one_time_coins, contact_coins).run(rx));
@@ -148,10 +143,11 @@ async fn main() -> Result<(), Error> {
         .route("/api/bob/one-time", post(bob_one_time))
         .route("/api/bob/contact", post(bob_contact))
         .route("/api/bob/awake", post(bob_awake))
-        .route("/api/{payer}/pay", post(pay))
+        .route("/api/alice/pay", post(alice_pay))
         .route("/api/alice/save-contact", post(alice_save_contact))
+        .route("/api/exchange/ask-contact", post(exchange_ask_contact))
         .route("/api/exchange/contact", post(exchange_contact))
-        .route("/api/exchange/pay-contact", post(exchange_pay_contact))
+        .route("/api/{payer}/pay-contact", post(pay_contact))
         .route("/", get(|| file("index.html".into())))
         .route("/{*path}", get(|UrlPath(path): UrlPath<String>| file(path)))
         .with_state(app);
@@ -254,18 +250,12 @@ async fn bob_awake(State(app): State<App>, Json(body): Json<Value>) -> ApiResult
     ask(&app.bob, |reply| bob::Command::Awake { awake, reply }).await
 }
 
-async fn pay(
-    State(app): State<App>,
-    UrlPath(payer): UrlPath<String>,
-    Json(body): Json<Value>,
-) -> ApiResult {
-    let to = match payer.as_str() {
-        "carol" => &app.carol,
-        "alice" => &app.alice,
-        _ => return Err(failed(format!("no payer {payer}"))),
-    };
+/// Pay a one-time URI. With `silent_only`, Alice's wallet pays it as one
+/// without payjoin does.
+async fn alice_pay(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
     let uri = body["uri"].as_str().ok_or_else(|| failed("uri"))?.to_string();
-    ask(to, |reply| payers::Command::Pay { uri, reply }).await
+    let silent_only = body["silent_only"].as_bool().unwrap_or(false);
+    ask(&app.alice, |reply| payers::Command::Pay { uri, silent_only, reply }).await
 }
 
 async fn alice_save_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
@@ -274,15 +264,29 @@ async fn alice_save_contact(State(app): State<App>, Json(body): Json<Value>) -> 
     ask(&app.alice, |reply| payers::Command::SaveContact { name, reply }).await
 }
 
+async fn exchange_ask_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
+    let sp = body["sp"].as_str().ok_or_else(|| failed("sp"))?.to_string();
+    ask(&app.exchange, |reply| payers::Command::AskContact { sp, reply }).await
+}
+
 async fn exchange_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
     let uri = body["uri"].as_str().ok_or_else(|| failed("uri"))?.to_string();
     ask(&app.exchange, |reply| payers::Command::AddContact { uri, reply }).await
 }
 
-async fn exchange_pay_contact(State(app): State<App>, Json(body): Json<Value>) -> ApiResult {
+async fn pay_contact(
+    State(app): State<App>,
+    UrlPath(payer): UrlPath<String>,
+    Json(body): Json<Value>,
+) -> ApiResult {
+    let to = match payer.as_str() {
+        "alice" => &app.alice,
+        "exchange" => &app.exchange,
+        _ => return Err(failed(format!("no payer {payer}"))),
+    };
     let amount = amount(&body)?;
     let reply_by = Duration::from_secs(body["reply_by"].as_u64().unwrap_or(60));
-    ask(&app.exchange, |reply| payers::Command::PayContact { amount, reply_by, reply }).await
+    ask(to, |reply| payers::Command::PayContact { amount, reply_by, reply }).await
 }
 
 /// A file from `static/`, never from outside it.

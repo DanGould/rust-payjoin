@@ -21,8 +21,7 @@ const shortMid = (s, a = 10, b = 6) =>
   s && s.length > a + b + 1 ? `${s.slice(0, a)}…${s.slice(-b)}` : (s ?? "");
 
 const PEOPLE = {
-  carol: { name: "Carol", kind: "Payjoin wallet" },
-  alice: { name: "Alice", kind: "Silent payment wallet" },
+  alice: { name: "Alice", kind: "Payjoin and silent payments" },
   exchange: { name: "Exchange", kind: "Back office" },
   bob: { name: "Bob", kind: "Silent payment wallet" },
 };
@@ -36,10 +35,12 @@ const payerState = () => ({
   done: null,
   contacts: [],
   scan: null,
+  // The exchange only: it asked Bob for his contact URI.
+  asked: false,
 });
 
 const state = {
-  payer: "carol",
+  payer: "alice",
   amount: 40000,
   replyBy: 60,
   // What starts the exchange's next transfer to Bob: Bob, withdrawing from
@@ -52,12 +53,15 @@ const state = {
     balance: 0,
     activity: [],
     steps: [],
+    // His unlabelled silent payment address, which the exchange has on
+    // file.
+    sp: null,
     oneTime: null,
     contact: null,
     awake: true,
     status: "",
   },
-  payers: { carol: payerState(), alice: payerState(), exchange: payerState() },
+  payers: { alice: payerState(), exchange: payerState() },
   uri: null,
   tx: null,
 };
@@ -172,6 +176,7 @@ async function apply({ kind, data }) {
       return;
     case "bob.ready":
       state.bob.balance = data.balance;
+      state.bob.sp = data.sp;
       return;
     case "bob.one_time":
       Object.assign(state.bob, { screen: "receive", oneTime: data, steps: [] });
@@ -277,12 +282,19 @@ async function apply({ kind, data }) {
         payout: state.payout,
       });
       return;
+    case "signed":
+      // A plain silent payment: no mailbox, straight to the network.
+      p.screen = "progress";
+      p.steps.push("Worked out Bob's output and signed");
+      setTx(data.tx, `${payerName(who)}'s transaction`);
+      Object.assign(state.tx, { checked: false, found: false, label: null });
+      return;
     case "original_sent": {
       p.screen = "progress";
       p.steps.push(
-        who === "carol"
-          ? "Signed a transaction to the address"
-          : "Worked out Bob's output and signed",
+        data.silent
+          ? "Worked out Bob's output and signed"
+          : "Signed a transaction to the address",
       );
       p.status = "Waiting for Bob";
       state.uri = null;
@@ -300,7 +312,7 @@ async function apply({ kind, data }) {
     case "proposal":
       await pickUp("#payer");
       p.steps.push("Bob added a coin");
-      p.status = who === "carol" ? "Signing" : "Checking Bob's proof";
+      p.status = data.checks === "bip78" ? "Signing" : "Checking Bob's proof";
       setTx(data.tx, "Checking");
       return;
     case "checked":
@@ -336,12 +348,13 @@ async function apply({ kind, data }) {
       await fly("#payer", "#network", data.payjoin ? "Payjoin" : "Transaction");
       return;
     case "confirmed": {
-      const silent = who !== "carol";
       const tag = data.payjoin
-        ? silent
+        ? data.silent
           ? ["spj", "Silent Payjoin"]
           : ["pj", "Payjoin"]
-        : ["sp", "Silent payment"];
+        : data.silent
+          ? ["sp", "Silent payment"]
+          : ["plain", "Transaction"];
       if (state.tx) {
         state.tx.status = `Block ${data.height}`;
         state.tx.cls = "confirmed";
@@ -360,6 +373,11 @@ async function apply({ kind, data }) {
       p.fallback = false;
       return;
     }
+    case "asked":
+      p.asked = true;
+      await fly("#payer", "#bob", "Contact URI?");
+      Object.assign(state.bob, { screen: "asked", steps: [] });
+      return;
     case "contact_saved":
       p.contacts = [data];
       if (who === "exchange") p.screen = "home";
@@ -483,16 +501,13 @@ function activity(rows, empty = "Nothing yet") {
     .join("")}</ul>`;
 }
 
-// A QR finder: four corners and a scan line.
-const SCAN_ICON = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/><path d="M7 12h10"/></svg>`;
-
 function contactCard(c) {
   if (!c) return "";
-  // A contact without reusable payjoin offers to scan the contact's
-  // contact URI, which has it.
-  const note = c.note
-    ? `<div class="note"><span>${esc(c.note[0].toUpperCase() + c.note.slice(1))}</span><button class="note-scan" type="button" aria-label="Scan ${esc(c.name)}'s contact URI">${SCAN_ICON}</button></div>`
-    : '<div class="c-ok">Silent payments and reusable payjoin</div>';
+  // A contact saved from a one-time URI is paid again at its silent payment
+  // address, with no URI and no payjoin.
+  const note = c.payjoin
+    ? '<div class="c-ok">Silent payments and reusable payjoin</div>'
+    : `<div class="note"><span>Pay again any time, no URI needed<small>By silent payment</small></span><button class="btn primary note-pay" data-act="pay-contact" type="button">Pay</button></div>`;
   return `<div class="contact"><div class="c-head"><span class="avatar">B</span>${esc(c.name)}</div>
     <div class="c-sp">${esc(shortMid(c.sp, 18, 8))}</div>${note}</div>`;
 }
@@ -560,6 +575,14 @@ function bobView() {
         <button class="btn soft block" data-act="bob-home" type="button">Done</button>
       </div>`;
     }
+    case "asked":
+      return `<div class="view">
+        <div class="head"><h2>Exchange</h2></div>
+        <div class="contact asked"><div class="c-head"><span class="avatar">E</span>Exchange</div>
+          <p>Asks for your contact URI</p><small>So its withdrawals to you can be Silent Payjoins</small></div>
+        <div class="spacer"></div>
+        <button class="btn primary block" data-act="share-contact" type="button">Show my contact</button>
+      </div>`;
     case "incoming":
       return `<div class="view">
         <div class="head"><h2>Receiving</h2></div>
@@ -619,14 +642,21 @@ function exchangeView(p) {
       ${steps(p.steps)}
     </div>`;
   } else {
-    const act = !contact
-      ? '<button class="btn primary" data-act="scan" type="button">Add contact</button>'
-      : state.payout === "scheduled"
+    // Before it has Bob's contact URI, the exchange knows only that he
+    // withdraws to a silent payment address, and asks him for the URI.
+    const act = contact
+      ? state.payout === "scheduled"
         ? `<div class="scheduled"><span>Scheduled payout to Bob, ${sats(state.amount)}, every week</span><span class="status mempool">Due now</span></div>`
-        : "";
+        : ""
+      : p.asked
+        ? '<button class="btn primary" data-act="scan" type="button">Scan his contact URI</button>'
+        : '<button class="btn primary" data-act="ask-contact" type="button">Ask for his contact URI</button>';
+    const customer = `<div class="contact customer"><div class="c-head"><span class="avatar">B</span>Bob</div>
+      <div class="c-sp">${esc(shortMid(state.bob.sp, 18, 8))}</div>
+      <div class="note"><span>Withdraws to a silent payment address<small>${p.asked ? "Asked for his contact URI" : "No contact URI yet"}</small></span></div></div>`;
     main = `<div class="panel">
-        <div class="section-title">Saved contact</div>
-        ${contact ? contactCard(contact) : '<div class="empty">No contacts yet</div>'}
+        <div class="section-title">${contact ? "Saved contact" : "Customer"}</div>
+        ${contact ? contactCard(contact) : customer}
       </div>
       <div class="panel">
         <div class="section-title">Transfers out</div>
@@ -652,20 +682,18 @@ function payerView(name) {
         <div class="uri-kind">Point the camera at Bob's code</div>
       </div>`;
     case "review": {
+      // The URI's address is fresh, so Alice's wallet pays it as an
+      // ordinary payjoin. Its sp= only tells her Bob has a silent payment
+      // address.
       const u = uriParts(scanned.uri);
       const amount = Math.round(Number(u.amount ?? 0) * 1e8);
-      const silent = name !== "carol";
       return `<div class="view">
         <div class="head"><h2>Pay Bob</h2></div>
         <div class="pay-amount">${sats(amount)}</div>
         <div class="sees">
-          ${
-            silent
-              ? `<div><span class="k">Silent payment</span><span class="v">${esc(shortMid(u.sp, 8, 4))}</span></div>`
-              : `<div><span class="k">Address</span><span class="v">${esc(shortMid(u.address, 8, 4))}</span></div>`
-          }
-          <div><span class="k">Payjoin</span><span class="v">Yes</span></div>
-          ${silent ? "" : '<div><span class="k">Silent payment</span><span class="v off">Not supported</span></div>'}
+          <div class="pays"><span class="k">Address</span><span class="v">${esc(shortMid(u.address, 8, 4))}</span></div>
+          <div class="pays"><span class="k">Payjoin</span><span class="v">Yes</span></div>
+          <div class="has-sp"><span class="k">Silent payment</span><span class="v off">Bob has one</span></div>
         </div>
         <button class="btn primary block" style="margin-top:16px" data-act="send" type="button">Send</button>
       </div>`;
@@ -870,7 +898,7 @@ document.addEventListener("click", async (ev) => {
       el.disabled = true;
       Object.assign(p, { screen: "progress", steps: [], status: "Preparing" });
       render();
-      await api(`/api/${name}/pay`, { uri: p.scan.uri });
+      await api("/api/alice/pay", { uri: p.scan.uri });
     }
     if (act === "save-contact") {
       const field = $("#contact-name");
@@ -880,6 +908,14 @@ document.addEventListener("click", async (ev) => {
       }
       el.disabled = true;
       await api("/api/alice/save-contact", { name: field.value });
+    }
+    if (act === "pay-contact") {
+      el.disabled = true;
+      await api(`/api/${name}/pay-contact`, { amount: state.amount });
+    }
+    if (act === "ask-contact") {
+      el.disabled = true;
+      await api("/api/exchange/ask-contact", { sp: state.bob.sp });
     }
     if (act === "bob-home") {
       state.bob.screen = "home";
