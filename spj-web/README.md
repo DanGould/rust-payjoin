@@ -1,20 +1,43 @@
-# Silent Payjoin demo
+# Silent Payjoin
 
-Silent payments and payjoin from one URI. This crate runs three wallets in a
-browser on a regtest node: Bob's silent payment wallet, Alice's wallet with
-payjoin and silent payments, and an exchange. They reach each other only
-through a payjoin directory and OHTTP relay that run in the same process on
-127.0.0.1. Nothing leaves the machine.
+People who support both payjoin and silent payments want to compose them.
+This is a prototype of how, on regtest only. Don't use it with real coins.
 
-It is a prototype. Don't use it with real coins.
+https://github.com/user-attachments/assets/abb2ab24-186a-43f4-a7d8-59b16401477e
 
-The design it follows is a draft and will change. The pieces are:
+One-time URIs should be the default. A one-time URI is an ordinary payjoin,
+and the silent payment address in it says the receiver supports a contact.
+A contact URI replaces that base silent payment address with a labelled one
+and a reusable 1-to-1 mailbox. That's where a Silent Payjoin happens. The
+receiver adds a coin, works out its output again, and attaches a proof the
+payer checks before it signs.
 
-- `spj-crypto`: BIP 352 silent payments with labels, BIP 374 DLEQ proofs, and
-  BIP 375 shares and proofs carried in PSBT inputs.
-- `spj-demo`: the receiver and sender sides of a silent payjoin, and six scenes
-  that run end to end on regtest and check each result.
-- `spj-web`: the wallets above, with a page to drive them.
+Composing them for open donations makes little sense. There's no good
+anonymous, permissionless, economical DoS limiter for a publicly known
+mailbox, so a donation address stays a plain silent payment address.
+
+This builds on Armin Sabouri's
+[write-up on silent payjoins](https://github.com/payjoin/research-docs/tree/main/silent-payjoins)
+from January 2026, which worked out the receiver's share of the tweak and
+the DLEQ proof that lets the sender check it. The design here is a draft and
+will change.
+
+## The parts
+
+| Crate                         | What it is                                                                                                                |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| [`spj-crypto`](../spj-crypto) | BIP 352 silent payments with labels, BIP 374 DLEQ proofs, and BIP 375 shares and proofs carried in PSBT inputs            |
+| [`spj-demo`](../spj-demo)     | The receiver and sender sides of a Silent Payjoin, and six scenes that run end to end on regtest and check each result    |
+| [`spj-web`](.)                | Three wallets in a browser (Bob, Alice and the exchange) with a page to drive them, and the script that records the video |
+
+The wallets reach each other only through a payjoin directory and OHTTP relay
+that run in the same process on 127.0.0.1. Nothing leaves the machine.
+
+Specifications: [BIP 352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki)
+silent payments, [BIP 374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki)
+DLEQ proofs, [BIP 375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki)
+silent payments in PSBTs, [BIP 77](https://github.com/bitcoin/bips/blob/master/bip-0077.md)
+async payjoin.
 
 ## Run it
 
